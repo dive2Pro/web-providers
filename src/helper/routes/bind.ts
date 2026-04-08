@@ -6,10 +6,20 @@ export function registerBindRoute(app: FastifyInstance, ctx: AppContext) {
   app.post("/v1/bind", async (_request, reply) => {
     try {
       const result = await ctx.browserClient.bindDeepSeekTab();
+      const previousSession = ctx.state.getBoundSession();
+      const sameTab = previousSession?.tabId === result.tabId;
 
       ctx.state.setBoundSession({
         ...result,
-        conversationId: `conv-${result.tabId}`,
+        conversationId: sameTab
+          ? previousSession.conversationId
+          : `conv-${result.tabId}`,
+        providerInitialized: sameTab
+          ? previousSession.providerInitialized
+          : false,
+        providerInitFingerprint: sameTab
+          ? previousSession.providerInitFingerprint
+          : null,
       });
 
       return result;

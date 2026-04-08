@@ -21,7 +21,8 @@ describe("chat route", () => {
         }),
         resetPageBridge: async () => undefined,
         sendChatPrompt: async () => ({
-          reply: "hello from deepseek",
+          mode: "text",
+          outputText: "hello from deepseek",
           modelLabel: "DeepSeek Web",
         }),
       } as never,
@@ -102,7 +103,8 @@ describe("chat route", () => {
           });
 
           return {
-            reply: "hello from deepseek",
+            mode: "text",
+            outputText: "hello from deepseek",
             modelLabel: "DeepSeek Web",
           };
         },

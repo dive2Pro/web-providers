@@ -1,4 +1,9 @@
 import { HelperError } from "../errors";
+import type {
+  ProviderTextTurn,
+  ProviderToolCall,
+  ProviderToolCallTurn,
+} from "./types";
 
 export const DEEPSEEK_HOST_ALLOWLIST = new Set([
   "chat.deepseek.com",
@@ -19,10 +24,267 @@ export function assertDeepSeekUrl(rawUrl: string) {
   return url.toString();
 }
 
+export interface CompletionRawEvent {
+  eventType: string | null;
+  parsed: unknown;
+  at: number;
+}
+
+export type CompletionTurn =
+  | Omit<ProviderTextTurn, "modelLabel">
+  | Omit<ProviderToolCallTurn, "modelLabel">;
+
+type JsonEnvelopeDetection =
+  | {
+      kind: "message";
+      content: string;
+    }
+  | {
+      kind: "tool_call";
+      toolCall: ProviderToolCall;
+    };
+
+function normalizeToolCallArguments(value: unknown) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    if (typeof value !== "string") {
+      return null;
+    }
+
+    try {
+      const parsed = JSON.parse(value);
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        return null;
+      }
+
+      return JSON.stringify(parsed);
+    } catch {
+      return null;
+    }
+  }
+
+  return JSON.stringify(value);
+}
+
+function normalizeToolCallCandidate(value: unknown): ProviderToolCall | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+
+  const candidate =
+    "function" in value &&
+    value.function &&
+    typeof value.function === "object" &&
+    !Array.isArray(value.function)
+      ? value.function
+      : value;
+
+  const name =
+    "name" in candidate && typeof candidate.name === "string"
+      ? candidate.name.trim()
+      : "";
+  const argumentsJson = normalizeToolCallArguments(
+    "arguments" in candidate ? candidate.arguments : undefined,
+  );
+
+  if (name.length === 0 || !argumentsJson) {
+    return null;
+  }
+
+  return {
+    name,
+    argumentsJson,
+  };
+}
+
+function findToolCallInValue(
+  value: unknown,
+  hintKey: string | null = null,
+): ProviderToolCall | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+
+  const hinted =
+    hintKey === "tool_call" ||
+    hintKey === "tool_calls" ||
+    hintKey === "toolCall" ||
+    hintKey === "toolCalls" ||
+    hintKey === "function_call" ||
+    hintKey === "functionCall" ||
+    hintKey === "function";
+
+  if (hinted) {
+    if (Array.isArray(value)) {
+      for (const entry of value) {
+        const direct = normalizeToolCallCandidate(entry);
+        if (direct) {
+          return direct;
+        }
+
+        const nested = findToolCallInValue(entry);
+        if (nested) {
+          return nested;
+        }
+      }
+    } else {
+      const direct = normalizeToolCallCandidate(value);
+      if (direct) {
+        return direct;
+      }
+    }
+  }
+
+  if (Array.isArray(value)) {
+    for (const entry of value) {
+      const nested = findToolCallInValue(entry);
+      if (nested) {
+        return nested;
+      }
+    }
+
+    return null;
+  }
+
+  for (const [key, nestedValue] of Object.entries(value)) {
+    const nested = findToolCallInValue(nestedValue, key);
+    if (nested) {
+      return nested;
+    }
+  }
+
+  return null;
+}
+
+export function detectNativeToolCall(rawEvents: CompletionRawEvent[]) {
+  for (const event of rawEvents) {
+    const detected = findToolCallInValue(event.parsed, event.eventType);
+    if (detected) {
+      return detected;
+    }
+  }
+
+  return null;
+}
+
+function detectJsonEnvelope(text: string): JsonEnvelopeDetection | null {
+  function parseCandidate(candidate: string): JsonEnvelopeDetection | null {
+    const trimmed = candidate.trim();
+    if (trimmed.length === 0) {
+      return null;
+    }
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(trimmed);
+    } catch {
+      return null;
+    }
+
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return null;
+    }
+
+    if (parsed.type === "message" && typeof parsed.content === "string") {
+      return {
+        kind: "message",
+        content: parsed.content,
+      };
+    }
+
+    if (parsed.type === "tool_call" && typeof parsed.name === "string") {
+      const name = parsed.name.trim();
+      if (name.length === 0) {
+        return null;
+      }
+
+      if (
+        !parsed.arguments ||
+        typeof parsed.arguments !== "object" ||
+        Array.isArray(parsed.arguments)
+      ) {
+        return null;
+      }
+
+      return {
+        kind: "tool_call",
+        toolCall: {
+          name,
+          argumentsJson: JSON.stringify(parsed.arguments),
+        },
+      };
+    }
+
+    return null;
+  }
+
+  const directMatch = parseCandidate(text);
+  if (directMatch) {
+    return directMatch;
+  }
+
+  for (const match of text.matchAll(/```(?:json)?\s*([\s\S]*?)```/gi)) {
+    const fencedMatch = parseCandidate(match[1] ?? "");
+    if (fencedMatch) {
+      return fencedMatch;
+    }
+  }
+
+  return null;
+}
+
+export function detectJsonFallbackToolCall(text: string) {
+  const detection = detectJsonEnvelope(text);
+  return detection?.kind === "tool_call" ? detection.toolCall : null;
+}
+
+export function classifyCompletionTurn(input: {
+  reply: string;
+  rawEvents: CompletionRawEvent[];
+}): CompletionTurn {
+  const outputText = input.reply.trim();
+  const nativeToolCall = detectNativeToolCall(input.rawEvents);
+  if (nativeToolCall) {
+    return {
+      mode: "native_tool_call",
+      toolCall: nativeToolCall,
+      ...(outputText.length > 0 ? { outputText } : {}),
+    };
+  }
+
+  const jsonEnvelope = detectJsonEnvelope(outputText);
+  if (jsonEnvelope?.kind === "tool_call") {
+    return {
+      mode: "json_fallback",
+      toolCall: jsonEnvelope.toolCall,
+      outputText,
+    };
+  }
+
+  if (jsonEnvelope?.kind === "message") {
+    return {
+      mode: "text",
+      outputText: jsonEnvelope.content,
+    };
+  }
+
+  return {
+    mode: "text",
+    outputText,
+  };
+}
+
 export const INJECTED_BRIDGE_SOURCE = `
 (() => {
   const KEY = "__piDeepSeekBridge";
-  const VERSION = 8;
+  const VERSION = 10;
+  const __name = (target, _value) => target;
+  const detectNativeToolCall = ${detectNativeToolCall.toString()};
+  const detectJsonEnvelope = ${detectJsonEnvelope.toString()};
+  const detectJsonFallbackToolCall = ${detectJsonFallbackToolCall.toString()};
+  const classifyCompletionTurn = ${classifyCompletionTurn.toString()};
+  const normalizeToolCallArguments = ${normalizeToolCallArguments.toString()};
+  const normalizeToolCallCandidate = ${normalizeToolCallCandidate.toString()};
+  const findToolCallInValue = ${findToolCallInValue.toString()};
   const existing = window[KEY];
   if (
     existing &&
@@ -46,8 +308,11 @@ export const INJECTED_BRIDGE_SOURCE = `
       modelType: null,
       status: "idle",
       reply: "",
+      rawEvents: [],
       error: null,
       closed: false,
+      lastPatchPath: null,
+      lastPatchOp: null,
     };
   }
 
@@ -94,6 +359,11 @@ export const INJECTED_BRIDGE_SOURCE = `
 
   function applyCompletionPayload(eventType, dataText) {
     if (eventType === "close") {
+      completionState.rawEvents.push({
+        eventType,
+        parsed: null,
+        at: Date.now(),
+      });
       completionState.closed = true;
       if (completionState.status === "streaming" && completionState.reply.trim().length > 0) {
         completionState.status = "finished";
@@ -113,6 +383,11 @@ export const INJECTED_BRIDGE_SOURCE = `
     }
 
     markCompletionObserved();
+    completionState.rawEvents.push({
+      eventType,
+      parsed,
+      at: Date.now(),
+    });
 
     if (eventType === "ready") {
       completionState.requestMessageId = parsed.request_message_id ?? null;
@@ -124,6 +399,24 @@ export const INJECTED_BRIDGE_SOURCE = `
 
     if (eventType === "update_session") {
       return;
+    }
+
+    const patchPath =
+      parsed &&
+      typeof parsed === "object" &&
+      typeof parsed.p === "string"
+        ? parsed.p
+        : null;
+    const patchOp =
+      parsed &&
+      typeof parsed === "object" &&
+      typeof parsed.o === "string"
+        ? parsed.o
+        : null;
+
+    if (patchPath || patchOp) {
+      completionState.lastPatchPath = patchPath;
+      completionState.lastPatchOp = patchOp;
     }
 
     if (
@@ -159,6 +452,20 @@ export const INJECTED_BRIDGE_SOURCE = `
       parsed.p === "response/fragments/-1/content" &&
       parsed.o === "APPEND" &&
       typeof parsed.v === "string"
+    ) {
+      completionState.reply += parsed.v;
+      completionState.status = "streaming";
+      return;
+    }
+
+    if (
+      parsed &&
+      typeof parsed === "object" &&
+      !("p" in parsed) &&
+      !("o" in parsed) &&
+      typeof parsed.v === "string" &&
+      completionState.lastPatchPath === "response/fragments/-1/content" &&
+      completionState.lastPatchOp === "APPEND"
     ) {
       completionState.reply += parsed.v;
       completionState.status = "streaming";
@@ -367,6 +674,36 @@ export const INJECTED_BRIDGE_SOURCE = `
     );
   }
 
+  function findNewChatButton() {
+    const directMatch =
+      document.querySelector("button[aria-label='New Chat']") ||
+      document.querySelector("button[aria-label='New chat']") ||
+      document.querySelector("button[aria-label='新对话']") ||
+      document.querySelector("button[aria-label='新建对话']") ||
+      document.querySelector("a[aria-label='New Chat']") ||
+      document.querySelector("a[aria-label='新对话']") ||
+      document.querySelector("[data-testid='new-chat']") ||
+      document.querySelector("a[href='/']") ||
+      document.querySelector("a[href='/chat']");
+
+    if (directMatch) {
+      return directMatch;
+    }
+
+    const clickableNodes = Array.from(
+      document.querySelectorAll("button, a, div[role='button']")
+    );
+    return clickableNodes.find((node) => {
+      const text = (node.textContent || "").trim().toLowerCase();
+      return (
+        text === "new chat" ||
+        text === "new conversation" ||
+        text === "新对话" ||
+        text === "新建对话"
+      );
+    }) || null;
+  }
+
   function setComposerValue(composer, nextValue) {
     const prototype = Object.getPrototypeOf(composer);
     const valueDescriptor =
@@ -425,6 +762,7 @@ export const INJECTED_BRIDGE_SOURCE = `
     let previousFreshDomText = "";
     let sawFreshDomReply = false;
     let stableCount = 0;
+    let lastFreshDomChangeAt = 0;
 
     while (Date.now() - startedAt < timeoutMs) {
       const pageState = window[KEY].getPageState();
@@ -439,11 +777,31 @@ export const INJECTED_BRIDGE_SOURCE = `
       }
 
       if (completionState.status === "finished" && streamedReply.length > 0) {
-        return { ok: true, reply: streamedReply };
+        return {
+          ok: true,
+          turn: classifyCompletionTurn({
+            reply: streamedReply,
+            rawEvents: completionState.rawEvents,
+          }),
+          meta: {
+            source: "bridge_stream",
+            completionObserved: completionState.observed,
+          },
+        };
       }
 
       if (streamedReply.length > 0 && completionState.closed) {
-        return { ok: true, reply: streamedReply };
+        return {
+          ok: true,
+          turn: classifyCompletionTurn({
+            reply: streamedReply,
+            rawEvents: completionState.rawEvents,
+          }),
+          meta: {
+            source: "bridge_stream",
+            completionObserved: completionState.observed,
+          },
+        };
       }
 
       const nextText = (pageState.latestAssistantPreview || "").trim();
@@ -458,6 +816,7 @@ export const INJECTED_BRIDGE_SOURCE = `
         if (nextText !== previousFreshDomText) {
           previousFreshDomText = nextText;
           stableCount = 0;
+          lastFreshDomChangeAt = Date.now();
         } else {
           stableCount += 1;
         }
@@ -465,8 +824,24 @@ export const INJECTED_BRIDGE_SOURCE = `
         stableCount = 0;
       }
 
-      if (!completionState.observed && sawFreshDomReply && !pageState.busy && stableCount >= 3) {
-        return { ok: true, reply: latestFreshDomText };
+      if (
+        !completionState.observed &&
+        sawFreshDomReply &&
+        !pageState.busy &&
+        stableCount >= 3 &&
+        Date.now() - lastFreshDomChangeAt >= 2_000
+      ) {
+        return {
+          ok: true,
+          turn: classifyCompletionTurn({
+            reply: latestFreshDomText,
+            rawEvents: completionState.rawEvents,
+          }),
+          meta: {
+            source: "bridge_dom_fallback",
+            completionObserved: completionState.observed,
+          },
+        };
       }
 
       await sleep(250);
@@ -474,7 +849,17 @@ export const INJECTED_BRIDGE_SOURCE = `
 
     const fallbackReply = completionState.reply.trim() || latestFreshDomText;
     if (fallbackReply.length > 0) {
-      return { ok: true, reply: fallbackReply };
+      return {
+        ok: true,
+        turn: classifyCompletionTurn({
+          reply: fallbackReply,
+          rawEvents: completionState.rawEvents,
+        }),
+        meta: {
+          source: "bridge_timeout_recovery",
+          completionObserved: completionState.observed,
+        },
+      };
     }
 
     return {
@@ -530,6 +915,20 @@ export const INJECTED_BRIDGE_SOURCE = `
         );
       }
 
+      return { ok: true };
+    },
+    async startNewChat() {
+      const newChatButton = findNewChatButton();
+
+      if (newChatButton instanceof HTMLElement) {
+        newChatButton.click();
+        await sleep(750);
+      } else {
+        window.location.href = "https://chat.deepseek.com/";
+        await sleep(1_500);
+      }
+
+      resetCompletionState();
       return { ok: true };
     },
     async sendPrompt({ prompt, timeoutMs }) {

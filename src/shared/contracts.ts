@@ -34,13 +34,29 @@ export interface ProviderChatRequest {
     role: "system" | "user" | "assistant";
     content: string;
   }>;
+  sessionInit?: {
+    fingerprint: string;
+    prompt: string;
+  };
   temperature?: number;
   maxOutputTokens?: number;
   abortKey?: string;
 }
 
-export interface ProviderChatResponse {
-  outputText: string;
-  finishReason: "stop" | "length" | "error";
-  modelLabel?: string;
-}
+export type ProviderChatResponse =
+  | {
+      mode: "text";
+      outputText: string;
+      finishReason: "stop" | "length" | "error";
+      modelLabel?: string;
+    }
+  | {
+      mode: "native_tool_call" | "json_fallback";
+      toolCall: {
+        name: string;
+        argumentsJson: string;
+      };
+      finishReason: "stop" | "error";
+      modelLabel?: string;
+      outputText?: string;
+    };

@@ -49,11 +49,15 @@ export function registerChatRoute(app: FastifyInstance, ctx: AppContext) {
         prompt: body.prompt,
         timeoutMs: body.timeoutMs ?? 60_000,
       });
+      const replyText =
+        result.mode === "text"
+          ? result.outputText
+          : (result.outputText ?? "");
 
       ctx.state.setActiveRequest(null);
 
       return {
-        reply: result.reply,
+        reply: replyText,
         conversationId: session.conversationId,
         modelLabel: result.modelLabel,
         rawStatus: "completed",

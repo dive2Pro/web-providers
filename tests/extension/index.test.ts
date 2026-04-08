@@ -53,6 +53,11 @@ type ToolResultMessage = {
 type Context = {
   systemPrompt?: string;
   messages: Array<UserMessage | AssistantMessage | ToolResultMessage>;
+  tools?: Array<{
+    name: string;
+    description?: string;
+    inputSchema?: Record<string, unknown>;
+  }>;
 };
 
 type StreamOptions = {
@@ -74,6 +79,19 @@ type StreamEvent =
       type: "text_end";
       contentIndex: number;
       content: string;
+      partial: AssistantMessage;
+    }
+  | { type: "toolcall_start"; contentIndex: number; partial: AssistantMessage }
+  | {
+      type: "toolcall_delta";
+      contentIndex: number;
+      delta: string;
+      partial: AssistantMessage;
+    }
+  | {
+      type: "toolcall_end";
+      contentIndex: number;
+      toolCall: ToolCallContent;
       partial: AssistantMessage;
     }
   | {
@@ -149,7 +167,8 @@ describe("pi provider extension", () => {
           stop: async () => undefined,
         }),
         helperClient: {
-          post: async <T>() => ({ outputText: "ok", finishReason: "stop" } as T),
+          post: async <T>() =>
+            ({ mode: "text", outputText: "ok", finishReason: "stop" } as T),
         },
         randomToken: () => "token-123",
         pickPort: async () => 4318,
@@ -218,6 +237,7 @@ describe("pi provider extension", () => {
             }
 
             return {
+              mode: "text",
               outputText: "reply",
               finishReason: "stop",
               modelLabel: "DeepSeek Web",
@@ -259,11 +279,15 @@ describe("pi provider extension", () => {
       collectEventTypes(stream as AssistantMessageEventStreamLike),
     ]);
 
-    expect(calls).toEqual([
-      "spawn:token-123:4318",
-      'post:http://127.0.0.1:4318:/v1/bind:token-123:{}',
-      'post:http://127.0.0.1:4318:/v1/provider/chat:token-123:{"model":"deepseek-web-chat","messages":[{"role":"system","content":"system prompt"},{"role":"user","content":"hello"}],"temperature":0.3,"maxOutputTokens":512}',
-    ]);
+    expect(calls[0]).toBe("spawn:token-123:4318");
+    expect(calls[1]).toBe("post:http://127.0.0.1:4318:/v1/bind:token-123:{}");
+    expect(calls[2]).toContain('post:http://127.0.0.1:4318:/v1/provider/chat:token-123:');
+    expect(calls[2]).toContain('"model":"deepseek-web-chat"');
+    expect(calls[2]).toContain('"messages":[{"role":"user","content":"hello"}]');
+    expect(calls[2]).toContain('"temperature":0.3');
+    expect(calls[2]).toContain('"maxOutputTokens":512');
+    expect(calls[2]).toContain('\\"type\\":\\"message\\"');
+    expect(calls[2]).toContain('system prompt');
     expect(eventTypes).toEqual(["start", "text_start", "text_delta", "text_end", "done"]);
     expect(result).toMatchObject({
       role: "assistant",
@@ -272,6 +296,365 @@ describe("pi provider extension", () => {
       model: "deepseek-web-chat",
       stopReason: "stop",
       content: [{ type: "text", text: "reply" }],
+    });
+  });
+
+  it("injects fallback instructions and emits pi tool-call events for structured tool turns", async () => {
+    const calls: Array<{
+      path: string;
+      body: Record<string, unknown>;
+    }> = [];
+    let config: ProviderConfig | undefined;
+
+    registerDeepSeekExtension(
+      {
+        registerProvider(_name, providerConfig) {
+          config = providerConfig as ProviderConfig;
+        },
+        on() {},
+      },
+      {
+        spawnHelper: async () => ({
+          baseUrl: "http://127.0.0.1:4318",
+          token: "token-123",
+          stop: async () => undefined,
+        }),
+        helperClient: {
+          post: async <T>(
+            _baseUrl: string,
+            path: string,
+            body: Record<string, unknown>,
+          ) => {
+            calls.push({ path, body });
+
+            if (path === "/v1/bind") {
+              return { ok: true } as T;
+            }
+
+            return {
+              mode: "json_fallback",
+              toolCall: {
+                name: "bash",
+                argumentsJson: "{\"cmd\":\"ls -la\"}",
+              },
+              finishReason: "stop",
+              modelLabel: "DeepSeek Web",
+            } as T;
+          },
+        },
+        randomToken: () => "token-123",
+        pickPort: async () => 4318,
+      },
+    );
+
+    const stream = config?.streamSimple?.(
+      {
+        id: "deepseek-web-chat",
+        api: "deepseek-web-api",
+        provider: "deepseek-web",
+      },
+      {
+        messages: [
+          {
+            role: "user",
+            content: "inspect the project",
+            timestamp: Date.now(),
+          },
+        ],
+        tools: [
+          {
+            name: "bash",
+            description: "Execute bash commands",
+            inputSchema: {
+              type: "object",
+              properties: {
+                cmd: { type: "string" },
+              },
+              required: ["cmd"],
+            },
+          },
+        ],
+      },
+      {
+        signal: new AbortController().signal,
+      },
+    );
+
+    const events: StreamEvent[] = [];
+    for await (const event of stream as AssistantMessageEventStreamLike) {
+      events.push(event);
+    }
+
+    const providerChatCall = calls.find((call) => call.path === "/v1/provider/chat");
+    const providerMessages = Array.isArray(providerChatCall?.body.messages)
+      ? (providerChatCall.body.messages as Array<{ content?: string }>)
+      : [];
+
+    expect(providerMessages.at(-1)?.content).toBe("inspect the project");
+    expect(providerChatCall?.body.sessionInit).toMatchObject({
+      prompt: expect.stringContaining('"type":"message"'),
+      fingerprint: expect.any(String),
+    });
+    expect(String(providerChatCall?.body.sessionInit?.prompt ?? "")).toContain('"type":"tool_call"');
+    expect(String(providerChatCall?.body.sessionInit?.prompt ?? "")).toContain("Tool name: bash");
+    expect(String(providerChatCall?.body.sessionInit?.prompt ?? "")).toContain("\"cmd\"");
+    expect(events.map((event) => event.type)).toEqual([
+      "start",
+      "toolcall_start",
+      "toolcall_delta",
+      "toolcall_end",
+      "done",
+    ]);
+    expect(events).toContainEqual({
+      type: "toolcall_end",
+      contentIndex: 0,
+      toolCall: {
+        type: "toolCall",
+        id: "deepseek-web-0",
+        name: "bash",
+        arguments: { cmd: "ls -la" },
+      },
+      partial: expect.objectContaining({
+        stopReason: "toolUse",
+        content: [
+          {
+            type: "toolCall",
+            id: "deepseek-web-0",
+            name: "bash",
+            arguments: { cmd: "ls -la" },
+          },
+        ],
+      }),
+    });
+  });
+
+  it("repairs malformed tool-call arguments against the active tool schema before emitting pi tool events", async () => {
+    const calls: Array<{
+      path: string;
+      body: Record<string, unknown>;
+    }> = [];
+    let config: ProviderConfig | undefined;
+    let providerChatCount = 0;
+
+    registerDeepSeekExtension(
+      {
+        registerProvider(_name, providerConfig) {
+          config = providerConfig as ProviderConfig;
+        },
+        on() {},
+      },
+      {
+        spawnHelper: async () => ({
+          baseUrl: "http://127.0.0.1:4318",
+          token: "token-123",
+          stop: async () => undefined,
+        }),
+        helperClient: {
+          post: async <T>(
+            _baseUrl: string,
+            path: string,
+            body: Record<string, unknown>,
+          ) => {
+            calls.push({ path, body });
+
+            if (path === "/v1/bind") {
+              return { ok: true } as T;
+            }
+
+            providerChatCount += 1;
+            if (providerChatCount === 1) {
+              return {
+                mode: "json_fallback",
+                toolCall: {
+                  name: "bash",
+                  argumentsJson:
+                    "{\"command\":\"ls -la /Users/yc/code/webai-no-fee/src\",\"description\":\"List src directory structure\"}",
+                },
+                finishReason: "stop",
+                modelLabel: "DeepSeek Web",
+                outputText:
+                  "{\"type\":\"tool_call\",\"name\":\"bash\",\"arguments\":{\"command\":\"ls -la /Users/yc/code/webai-no-fee/src\",\"description\":\"List src directory structure\"}}",
+              } as T;
+            }
+
+            return {
+              mode: "json_fallback",
+              toolCall: {
+                name: "bash",
+                argumentsJson: "{\"cmd\":\"ls -la /Users/yc/code/webai-no-fee/src\"}",
+              },
+              finishReason: "stop",
+              modelLabel: "DeepSeek Web",
+              outputText:
+                "{\"type\":\"tool_call\",\"name\":\"bash\",\"arguments\":{\"cmd\":\"ls -la /Users/yc/code/webai-no-fee/src\"}}",
+            } as T;
+          },
+        },
+        randomToken: () => "token-123",
+        pickPort: async () => 4318,
+      },
+    );
+
+    const stream = config?.streamSimple?.(
+      {
+        id: "deepseek-web-chat",
+        api: "deepseek-web-api",
+        provider: "deepseek-web",
+      },
+      {
+        messages: [
+          {
+            role: "user",
+            content: "inspect src",
+            timestamp: Date.now(),
+          },
+        ],
+        tools: [
+          {
+            name: "bash",
+            description: "Execute bash commands",
+            inputSchema: {
+              type: "object",
+              properties: {
+                cmd: { type: "string" },
+              },
+              required: ["cmd"],
+              additionalProperties: false,
+            },
+          },
+        ],
+      },
+      {
+        signal: new AbortController().signal,
+      },
+    );
+
+    const events: StreamEvent[] = [];
+    for await (const event of stream as AssistantMessageEventStreamLike) {
+      events.push(event);
+    }
+
+    const providerCalls = calls.filter((call) => call.path === "/v1/provider/chat");
+    expect(providerCalls).toHaveLength(2);
+    expect(String(providerCalls[1]?.body.messages?.[0]?.content ?? "")).toContain(
+      "The previous reply violated the required JSON response protocol",
+    );
+    expect(String(providerCalls[1]?.body.messages?.[0]?.content ?? "")).toContain(
+      "\"cmd\"",
+    );
+    expect(events.map((event) => event.type)).toEqual([
+      "start",
+      "toolcall_start",
+      "toolcall_delta",
+      "toolcall_end",
+      "done",
+    ]);
+    expect(events).toContainEqual({
+      type: "toolcall_end",
+      contentIndex: 0,
+      toolCall: {
+        type: "toolCall",
+        id: "deepseek-web-0",
+        name: "bash",
+        arguments: { cmd: "ls -la /Users/yc/code/webai-no-fee/src" },
+      },
+      partial: expect.objectContaining({
+        stopReason: "toolUse",
+      }),
+    });
+  });
+
+  it("repairs malformed multi-object protocol text into a single message envelope", async () => {
+    const calls: Array<{
+      path: string;
+      body: Record<string, unknown>;
+    }> = [];
+    let config: ProviderConfig | undefined;
+    let providerChatCount = 0;
+
+    registerDeepSeekExtension(
+      {
+        registerProvider(_name, providerConfig) {
+          config = providerConfig as ProviderConfig;
+        },
+        on() {},
+      },
+      {
+        spawnHelper: async () => ({
+          baseUrl: "http://127.0.0.1:4318",
+          token: "token-123",
+          stop: async () => undefined,
+        }),
+        helperClient: {
+          post: async <T>(
+            _baseUrl: string,
+            path: string,
+            body: Record<string, unknown>,
+          ) => {
+            calls.push({ path, body });
+
+            if (path === "/v1/bind") {
+              return { ok: true } as T;
+            }
+
+            providerChatCount += 1;
+            if (providerChatCount === 1) {
+              return {
+                mode: "text",
+                outputText:
+                  '{"type":"tool_call","name":"read","arguments":{"path":"/tmp/a"}}~~\n{"type":"message","content":"hello"}',
+                finishReason: "stop",
+                modelLabel: "DeepSeek Web",
+              } as T;
+            }
+
+            return {
+              mode: "text",
+              outputText: "hello",
+              finishReason: "stop",
+              modelLabel: "DeepSeek Web",
+            } as T;
+          },
+        },
+        randomToken: () => "token-123",
+        pickPort: async () => 4318,
+      },
+    );
+
+    const stream = config?.streamSimple?.(
+      {
+        id: "deepseek-web-chat",
+        api: "deepseek-web-api",
+        provider: "deepseek-web",
+      },
+      {
+        messages: [
+          {
+            role: "user",
+            content: "say hello",
+            timestamp: Date.now(),
+          },
+        ],
+      },
+      {
+        signal: new AbortController().signal,
+      },
+    );
+
+    const [result, eventTypes] = await Promise.all([
+      stream?.result(),
+      collectEventTypes(stream as AssistantMessageEventStreamLike),
+    ]);
+
+    const providerCalls = calls.filter((call) => call.path === "/v1/provider/chat");
+    expect(providerCalls).toHaveLength(2);
+    expect(String(providerCalls[1]?.body.messages?.[0]?.content ?? "")).toContain(
+      "Return exactly one JSON object",
+    );
+    expect(eventTypes).toEqual(["start", "text_start", "text_delta", "text_end", "done"]);
+    expect(result).toMatchObject({
+      stopReason: "stop",
+      content: [{ type: "text", text: "hello" }],
     });
   });
 
@@ -300,7 +683,8 @@ describe("pi provider extension", () => {
           },
         }),
         helperClient: {
-          post: async <T>() => ({ outputText: "ok", finishReason: "stop" } as T),
+          post: async <T>() =>
+            ({ mode: "text", outputText: "ok", finishReason: "stop" } as T),
         },
         randomToken: () => "token-123",
         pickPort: async () => 4318,

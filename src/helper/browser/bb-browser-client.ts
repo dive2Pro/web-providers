@@ -251,10 +251,33 @@ export class BbBrowserClient implements BrowserAutomationClient {
     );
   }
 
+  async startNewChat(tabId: string): Promise<void> {
+    try {
+      await this.transport.evaluate(
+        tabId,
+        `${INJECTED_BRIDGE_SOURCE}; window.__piDeepSeekBridge.startNewChat()`,
+      );
+      return;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const isExpectedNavigation =
+        message.includes("Inspected target navigated or closed") ||
+        message.includes("Execution context was destroyed");
+
+      if (!isExpectedNavigation) {
+        throw error;
+      }
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 1_000));
+    await this.transport.evaluate(tabId, INJECTED_BRIDGE_SOURCE);
+  }
+
   async sendChatPrompt(input: {
     tabId: string;
     prompt: string;
     timeoutMs: number;
+    freshSession?: boolean;
   }): Promise<SendChatResult> {
     const promptLiteral = JSON.stringify(input.prompt);
     const bridgeSendScript = `${INJECTED_BRIDGE_SOURCE}; window.__piDeepSeekBridge.sendPrompt({ prompt: ${promptLiteral}, timeoutMs: ${input.timeoutMs} })`;
@@ -263,7 +286,11 @@ export class BbBrowserClient implements BrowserAutomationClient {
     try {
       const bridgeResult = await this.transport.evaluate<{
         ok?: boolean;
-        reply?: string;
+        turn?: SendChatResult;
+        meta?: {
+          source?: "bridge_stream" | "bridge_dom_fallback" | "bridge_timeout_recovery";
+          completionObserved?: boolean;
+        };
         error?: string;
         message?: string;
         inputReady?: boolean;
@@ -274,9 +301,14 @@ export class BbBrowserClient implements BrowserAutomationClient {
       }>(input.tabId, bridgeSendScript);
 
       if (bridgeResult && typeof bridgeResult === "object" && "ok" in bridgeResult) {
-        if (bridgeResult.ok && typeof bridgeResult.reply === "string") {
+        if (bridgeResult.ok && bridgeResult.turn && typeof bridgeResult.turn === "object") {
           return {
-            reply: bridgeResult.reply,
+            ...bridgeResult.turn,
+            debug: {
+              source: bridgeResult.meta?.source ?? "bridge_stream",
+              freshSession: input.freshSession === true,
+              completionObserved: bridgeResult.meta?.completionObserved,
+            },
             modelLabel: "DeepSeek Web",
           };
         }
@@ -344,6 +376,7 @@ export class BbBrowserClient implements BrowserAutomationClient {
       let previousAssistantCount = baselineAssistantCount;
       let sawFreshReply = false;
       let stableCount = 0;
+      let lastFreshReplyChangeAt = 0;
 
       while (Date.now() - startedAt < hardTimeoutMs) {
         const state = await this.transport.evaluate<{
@@ -383,14 +416,27 @@ export class BbBrowserClient implements BrowserAutomationClient {
 
           if (replyChanged) {
             stableCount = 0;
+            lastFreshReplyChangeAt = Date.now();
           } else {
             stableCount += 1;
           }
         }
 
-        if (sawFreshReply && !state.busy && stableCount >= 2) {
+        if (
+          sawFreshReply &&
+          !state.busy &&
+          stableCount >= 2 &&
+          (!input.freshSession || Date.now() - lastFreshReplyChangeAt >= 2_000)
+        ) {
           return {
-            reply: latestReply || nextReply,
+            mode: "text",
+            outputText: latestReply || nextReply,
+            debug: {
+              source: "client_polling",
+              freshSession: input.freshSession === true,
+              baselineReply,
+              latestReply: latestReply || nextReply,
+            },
             modelLabel: "DeepSeek Web",
           };
         }
@@ -425,7 +471,15 @@ export class BbBrowserClient implements BrowserAutomationClient {
 
       if (hasRecoveredReply) {
         return {
-          reply: finalReply || latestReply,
+          mode: "text",
+          outputText: finalReply || latestReply,
+          debug: {
+            source: "client_recovery",
+            freshSession: input.freshSession === true,
+            baselineReply,
+            latestReply,
+            finalReply: finalReply || latestReply,
+          },
           modelLabel: "DeepSeek Web",
         };
       }

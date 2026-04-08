@@ -1,6 +1,9 @@
 import vm from "node:vm";
 import { describe, expect, it } from "vitest";
-import { INJECTED_BRIDGE_SOURCE } from "../../src/helper/browser/deepseek-page-bridge";
+import {
+  classifyCompletionTurn,
+  INJECTED_BRIDGE_SOURCE,
+} from "../../src/helper/browser/deepseek-page-bridge";
 
 class FakeEvent {
   constructor(
@@ -109,7 +112,10 @@ Object.defineProperty(FakeTextarea.prototype, "value", {
   },
 });
 
-function createBridgeTestContext(options?: { latestAssistantText?: string }) {
+function createBridgeTestContext(options?: {
+  latestAssistantText?: string;
+  assistantVisible?: boolean;
+}) {
   const unrelatedPageIcon = new FakeElement({
     className: "_7d1f5e2 ds-icon-button ds-icon-button--l ds-icon-button--sizing-icon",
     attributes: {
@@ -141,16 +147,18 @@ function createBridgeTestContext(options?: { latestAssistantText?: string }) {
   const composerRoot = new FakeElement();
   const composerInputWrapper = new FakeElement();
   const textarea = new FakeTextarea(composerSend);
-  const latestAssistantMarkdown = options?.latestAssistantText
+  const shouldCreateAssistant = options?.assistantVisible === true ||
+    typeof options?.latestAssistantText === "string";
+  const latestAssistantMarkdown = shouldCreateAssistant
     ? new FakeElement()
     : null;
-  const latestAssistantMessage = options?.latestAssistantText
+  const latestAssistantMessage = shouldCreateAssistant
     ? new FakeElement()
     : null;
 
   if (latestAssistantMarkdown && latestAssistantMessage) {
-    latestAssistantMarkdown.textContent = options.latestAssistantText;
-    latestAssistantMessage.textContent = options.latestAssistantText;
+    latestAssistantMarkdown.textContent = options?.latestAssistantText ?? "";
+    latestAssistantMessage.textContent = options?.latestAssistantText ?? "";
     latestAssistantMessage.querySelector = (selector: string) => {
       if (selector === ".ds-markdown") {
         return latestAssistantMarkdown;
@@ -256,10 +264,110 @@ function createBridgeTestContext(options?: { latestAssistantText?: string }) {
     textarea,
     unrelatedPageIcon,
     composerSend,
+    latestAssistantMarkdown,
+    latestAssistantMessage,
   };
 }
 
 describe("deepseek page bridge", () => {
+  it("classifies native tool-call payloads from captured SSE records", () => {
+    expect(
+      classifyCompletionTurn({
+        reply: "",
+        rawEvents: [
+          {
+            eventType: null,
+            parsed: {
+              v: {
+                response: {
+                  tool_calls: [
+                    {
+                      function: {
+                        name: "read",
+                        arguments: "{\"path\":\"src/app.ts\"}",
+                      },
+                    },
+                  ],
+                },
+              },
+            },
+            at: Date.now(),
+          },
+        ],
+      }),
+    ).toEqual({
+      mode: "native_tool_call",
+      toolCall: {
+        name: "read",
+        argumentsJson: "{\"path\":\"src/app.ts\"}",
+      },
+    });
+  });
+
+  it("classifies strict JSON fallback text when native payloads are absent", () => {
+    expect(
+      classifyCompletionTurn({
+        reply: "{\"type\":\"tool_call\",\"name\":\"read\",\"arguments\":{\"path\":\"src/app.ts\"}}",
+        rawEvents: [],
+      }),
+    ).toEqual({
+      mode: "json_fallback",
+      toolCall: {
+        name: "read",
+        argumentsJson: "{\"path\":\"src/app.ts\"}",
+      },
+      outputText: "{\"type\":\"tool_call\",\"name\":\"read\",\"arguments\":{\"path\":\"src/app.ts\"}}",
+    });
+  });
+
+  it("classifies strict JSON message envelopes as assistant text", () => {
+    expect(
+      classifyCompletionTurn({
+        reply: "{\"type\":\"message\",\"content\":\"hello from deepseek\"}",
+        rawEvents: [],
+      }),
+    ).toEqual({
+      mode: "text",
+      outputText: "hello from deepseek",
+    });
+  });
+
+  it("keeps prose-wrapped JSON as plain text", () => {
+    expect(
+      classifyCompletionTurn({
+        reply: "I will call a tool now\n{\"type\":\"tool_call\"}",
+        rawEvents: [],
+      }),
+    ).toEqual({
+      mode: "text",
+      outputText: "I will call a tool now\n{\"type\":\"tool_call\"}",
+    });
+  });
+
+  it("classifies fenced JSON fallback tool calls even when the assistant adds a short preface", () => {
+    const reply = [
+      "I will inspect the project first.",
+      "",
+      "```json",
+      '{"type":"tool_call","name":"bash","arguments":{"cmd":"ls -la"}}',
+      "```",
+    ].join("\n");
+
+    expect(
+      classifyCompletionTurn({
+        reply,
+        rawEvents: [],
+      }),
+    ).toEqual({
+      mode: "json_fallback",
+      toolCall: {
+        name: "bash",
+        argumentsJson: "{\"cmd\":\"ls -la\"}",
+      },
+      outputText: reply,
+    });
+  });
+
   it("clicks the composer send button instead of the first page icon button", async () => {
     const { context, textarea, unrelatedPageIcon, composerSend } =
       createBridgeTestContext();
@@ -308,6 +416,137 @@ describe("deepseek page bridge", () => {
       ok: false,
       error: "TIMEOUT",
       message: "The page did not finish streaming in time",
+    });
+  });
+
+  it("waits for the DOM preview to settle before returning a fresh reply without SSE events", async () => {
+    const {
+      context,
+      latestAssistantMarkdown,
+      latestAssistantMessage,
+    } = createBridgeTestContext({
+      assistantVisible: true,
+    });
+
+    vm.runInNewContext(INJECTED_BRIDGE_SOURCE, context);
+
+    const bridge = (context.window as Record<string, any>).__piDeepSeekBridge;
+    expect(bridge).toBeTruthy();
+
+    setTimeout(() => {
+      if (latestAssistantMarkdown) {
+        latestAssistantMarkdown.textContent = "I'm";
+      }
+      if (latestAssistantMessage) {
+        latestAssistantMessage.textContent = "I'm";
+      }
+    }, 100);
+
+    setTimeout(() => {
+      if (latestAssistantMarkdown) {
+        latestAssistantMarkdown.textContent = "I'm here to help with your task.";
+      }
+      if (latestAssistantMessage) {
+        latestAssistantMessage.textContent = "I'm here to help with your task.";
+      }
+    }, 2_000);
+
+    const result = await bridge.sendPrompt({ prompt: "hello", timeoutMs: 4_000 });
+
+    expect(result).toEqual({
+      ok: true,
+      turn: {
+        mode: "text",
+        outputText: "I'm here to help with your task.",
+      },
+      meta: {
+        source: "bridge_timeout_recovery",
+        completionObserved: false,
+      },
+    });
+  });
+
+  it("reconstructs streamed SSE reply chunks when continuation data blocks omit patch metadata", async () => {
+    const { context, composerSend } = createBridgeTestContext();
+
+    class FakeStreamingXmlHttpRequest {
+      public readyState = 0;
+      public responseText = "";
+      private readonly listeners = new Map<string, Array<() => void>>();
+
+      addEventListener(type: string, handler: () => void) {
+        const current = this.listeners.get(type) ?? [];
+        current.push(handler);
+        this.listeners.set(type, current);
+      }
+
+      open() {
+        return undefined;
+      }
+
+      send() {
+        setTimeout(() => {
+          this.pushChunk(
+            [
+              "event: ready",
+              "data: {\"request_message_id\":1,\"response_message_id\":2,\"model_type\":\"default\"}",
+              "",
+              "data: {\"v\":{\"response\":{\"message_id\":2,\"status\":\"WIP\",\"fragments\":[{\"type\":\"RESPONSE\",\"content\":\"I'm\"}]}}}",
+              "",
+              "data: {\"p\":\"response/fragments/-1/content\",\"o\":\"APPEND\",\"v\":\" here\"}",
+              "",
+              "data: {\"v\":\" to help\"}",
+              "",
+              "data: {\"v\":\" with your task.\"}",
+              "",
+              "data: {\"p\":\"response/status\",\"o\":\"SET\",\"v\":\"FINISHED\"}",
+              "",
+              "event: close",
+              "data: {\"click_behavior\":\"none\",\"auto_resume\":false}",
+              "",
+            ].join("\n"),
+            4,
+          );
+        }, 50);
+        return undefined;
+      }
+
+      private pushChunk(chunk: string, readyState: number) {
+        this.responseText += chunk;
+        this.readyState = readyState;
+        for (const handler of this.listeners.get("readystatechange") ?? []) {
+          handler();
+        }
+      }
+    }
+
+    context.XMLHttpRequest = FakeStreamingXmlHttpRequest;
+    (context.window as Record<string, unknown>).XMLHttpRequest = FakeStreamingXmlHttpRequest;
+
+    composerSend.click = () => {
+      const xhr = new FakeStreamingXmlHttpRequest();
+      xhr.open("POST", "/api/v0/chat/completion");
+      xhr.send();
+      composerSend.clicked += 1;
+    };
+
+    vm.runInNewContext(INJECTED_BRIDGE_SOURCE, context);
+
+    const bridge = (context.window as Record<string, any>).__piDeepSeekBridge;
+    expect(bridge).toBeTruthy();
+
+    const result = await bridge.sendPrompt({ prompt: "hello", timeoutMs: 2_000 });
+
+    expect(result).toEqual({
+      ok: true,
+      turn: {
+        mode: "text",
+        outputText: "I'm here to help with your task.",
+      },
+      meta: {
+        source: "bridge_stream",
+        completionObserved: true,
+      },
     });
   });
 });

@@ -16,7 +16,43 @@ export interface BindResult {
   pageState: PageStateSummary;
 }
 
-export interface SendChatResult {
+export interface ProviderToolCall {
+  name: string;
+  argumentsJson: string;
+}
+
+export interface ProviderToolCallTurn {
+  mode: "native_tool_call" | "json_fallback";
+  toolCall: ProviderToolCall;
+  outputText?: string;
+  modelLabel?: string;
+}
+
+export interface ProviderTextTurn {
+  mode: "text";
+  outputText: string;
+  modelLabel?: string;
+}
+
+export interface SendChatAutomationDebug {
+  source:
+    | "bridge_stream"
+    | "bridge_dom_fallback"
+    | "bridge_timeout_recovery"
+    | "client_polling"
+    | "client_recovery";
+  freshSession: boolean;
+  completionObserved?: boolean;
+  baselineReply?: string;
+  latestReply?: string;
+  finalReply?: string;
+}
+
+export type SendChatResult =
+  | (ProviderTextTurn & { debug?: SendChatAutomationDebug })
+  | (ProviderToolCallTurn & { debug?: SendChatAutomationDebug });
+
+export interface ChatTextResult {
   reply: string;
   modelLabel?: string;
 }
@@ -25,9 +61,11 @@ export interface BrowserAutomationClient {
   getConnectionStatus(): Promise<BrowserConnectionStatus>;
   bindDeepSeekTab(): Promise<BindResult>;
   resetPageBridge(tabId: string): Promise<void>;
+  startNewChat(tabId: string): Promise<void>;
   sendChatPrompt(input: {
     tabId: string;
     prompt: string;
     timeoutMs: number;
+    freshSession?: boolean;
   }): Promise<SendChatResult>;
 }

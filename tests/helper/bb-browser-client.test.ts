@@ -156,6 +156,36 @@ describe("BbBrowserClient", () => {
     expect(opened).toEqual(["https://chat.deepseek.com"]);
   });
 
+  it("treats expected target navigation during startNewChat as success and reinjects the bridge", async () => {
+    const evaluations: Array<{ tabId: string; script: string }> = [];
+    let callCount = 0;
+
+    const client = new BbBrowserClient({
+      getConnectionStatus: async () => "connected",
+      findDeepSeekTab: async () => ({
+        id: "tab-1",
+        url: "https://chat.deepseek.com/",
+      }),
+      openDeepSeek: async () => undefined,
+      submitPrompt: async () => undefined,
+      evaluate: async <T>(tabId: string, script: string) => {
+        evaluations.push({ tabId, script });
+        callCount += 1;
+
+        if (callCount === 1) {
+          throw new Error("Runtime.evaluate: Inspected target navigated or closed");
+        }
+
+        return undefined as T;
+      },
+    });
+
+    await expect(client.startNewChat("tab-1")).resolves.toBeUndefined();
+    expect(evaluations).toHaveLength(2);
+    expect(evaluations[0]?.script).toContain("startNewChat()");
+    expect(evaluations[1]?.script).toContain("__piDeepSeekBridge");
+  });
+
   it("translates page timeout responses into HelperError", async () => {
     const client = new BbBrowserClient({
       getConnectionStatus: async () => "connected",
@@ -250,7 +280,10 @@ describe("BbBrowserClient", () => {
         if (script.includes("sendPrompt({")) {
           return {
             ok: true,
-            reply: "streamed reply",
+            turn: {
+              mode: "text",
+              outputText: "streamed reply",
+            },
           } as T;
         }
 
@@ -265,11 +298,69 @@ describe("BbBrowserClient", () => {
         timeoutMs: 3000,
       }),
     ).resolves.toEqual({
-      reply: "streamed reply",
+      mode: "text",
+      outputText: "streamed reply",
+      debug: {
+        source: "bridge_stream",
+        freshSession: false,
+        completionObserved: undefined,
+      },
       modelLabel: "DeepSeek Web",
     });
 
     expect(submittedPrompt).toBeNull();
+  });
+
+  it("returns structured tool-call turns from the injected bridge", async () => {
+    const client = new BbBrowserClient({
+      getConnectionStatus: async () => "connected",
+      findDeepSeekTab: async () => ({
+        id: "tab-1",
+        url: "https://chat.deepseek.com/",
+      }),
+      openDeepSeek: async () => undefined,
+      submitPrompt: async () => undefined,
+      evaluate: async <T>(_tabId: string, script: string) => {
+        if (script.includes("sendPrompt({")) {
+          return {
+            ok: true,
+            turn: {
+              mode: "json_fallback",
+              toolCall: {
+                name: "read",
+                argumentsJson: "{\"path\":\"src/app.ts\"}",
+              },
+              outputText:
+                "{\"type\":\"tool_call\",\"name\":\"read\",\"arguments\":{\"path\":\"src/app.ts\"}}",
+            },
+          } as T;
+        }
+
+        return undefined as T;
+      },
+    });
+
+    await expect(
+      client.sendChatPrompt({
+        tabId: "tab-1",
+        prompt: "read src/app.ts",
+        timeoutMs: 3000,
+      }),
+    ).resolves.toEqual({
+      mode: "json_fallback",
+      toolCall: {
+        name: "read",
+        argumentsJson: "{\"path\":\"src/app.ts\"}",
+      },
+      outputText:
+        "{\"type\":\"tool_call\",\"name\":\"read\",\"arguments\":{\"path\":\"src/app.ts\"}}",
+      debug: {
+        source: "bridge_stream",
+        freshSession: false,
+        completionObserved: undefined,
+      },
+      modelLabel: "DeepSeek Web",
+    });
   });
 
   it("submits prompt through transport and returns fresh assistant reply", async () => {
@@ -326,7 +417,14 @@ describe("BbBrowserClient", () => {
         timeoutMs: 3000,
       }),
     ).resolves.toEqual({
-      reply: "new reply",
+      mode: "text",
+      outputText: "new reply",
+      debug: {
+        source: "client_polling",
+        freshSession: false,
+        baselineReply: "old reply",
+        latestReply: "new reply",
+      },
       modelLabel: "DeepSeek Web",
     });
 
@@ -384,7 +482,14 @@ describe("BbBrowserClient", () => {
         timeoutMs: 3000,
       }),
     ).resolves.toEqual({
-      reply: "same reply",
+      mode: "text",
+      outputText: "same reply",
+      debug: {
+        source: "client_polling",
+        freshSession: false,
+        baselineReply: "same reply",
+        latestReply: "same reply",
+      },
       modelLabel: "DeepSeek Web",
     });
   });
@@ -458,7 +563,14 @@ describe("BbBrowserClient", () => {
         timeoutMs: 400,
       }),
     ).resolves.toEqual({
-      reply: "ABC",
+      mode: "text",
+      outputText: "ABC",
+      debug: {
+        source: "client_polling",
+        freshSession: false,
+        baselineReply: "A",
+        latestReply: "ABC",
+      },
       modelLabel: "DeepSeek Web",
     });
   });
@@ -523,7 +635,14 @@ describe("BbBrowserClient", () => {
         timeoutMs: 400,
       }),
     ).resolves.toEqual({
-      reply: "first token",
+      mode: "text",
+      outputText: "first token",
+      debug: {
+        source: "client_polling",
+        freshSession: false,
+        baselineReply: "",
+        latestReply: "first token",
+      },
       modelLabel: "DeepSeek Web",
     });
   });
@@ -586,10 +705,75 @@ describe("BbBrowserClient", () => {
         timeoutMs: 400,
       }),
     ).resolves.toEqual({
-      reply: "new reply",
+      mode: "text",
+      outputText: "new reply",
+      debug: {
+        source: "client_recovery",
+        freshSession: false,
+        baselineReply: "old reply",
+        latestReply: "",
+        finalReply: "new reply",
+      },
       modelLabel: "DeepSeek Web",
     });
 
     expect(resetCount).toBe(1);
+  });
+
+  it("waits longer for a fresh session fallback reply to settle before returning partial DOM text", async () => {
+    let currentReply: string | null = null;
+
+    setTimeout(() => {
+      currentReply = "I'm";
+    }, 100);
+
+    setTimeout(() => {
+      currentReply = "I'm here to help with your task.";
+    }, 2_000);
+
+    const client = new BbBrowserClient({
+      getConnectionStatus: async () => "connected",
+      findDeepSeekTab: async () => ({
+        id: "tab-1",
+        url: "https://chat.deepseek.com/",
+      }),
+      openDeepSeek: async () => undefined,
+      submitPrompt: async () => undefined,
+      evaluate: async <T>(_tabId: string, script: string) => {
+        if (script.includes("getPageState")) {
+          return {
+            inputReady: true,
+            busy: false,
+            latestAssistantPreview: currentReply,
+            assistantCount: currentReply ? 1 : 0,
+          } as T;
+        }
+
+        if (script.includes("sendPrompt({")) {
+          return undefined as T;
+        }
+
+        return undefined as T;
+      },
+    });
+
+    await expect(
+      client.sendChatPrompt({
+        tabId: "tab-1",
+        prompt: "hello",
+        timeoutMs: 4_000,
+        freshSession: true,
+      }),
+    ).resolves.toEqual({
+      mode: "text",
+      outputText: "I'm here to help with your task.",
+      debug: {
+        source: "client_polling",
+        freshSession: true,
+        baselineReply: "",
+        latestReply: "I'm here to help with your task.",
+      },
+      modelLabel: "DeepSeek Web",
+    });
   });
 });

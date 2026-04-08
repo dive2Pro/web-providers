@@ -1,4 +1,5 @@
 import type { PageStateSummary } from "./browser/types";
+import type { SendChatAutomationDebug } from "./browser/types";
 import type {
   ProviderChatRequest,
   ProviderChatResponse,
@@ -11,6 +12,8 @@ export interface BoundSession {
   bridgeInjected: boolean;
   pageState: PageStateSummary;
   conversationId: string;
+  providerInitialized: boolean;
+  providerInitFingerprint: string | null;
 }
 
 export interface ActiveRequest {
@@ -36,6 +39,7 @@ export interface ProviderRequestDebugRecord {
   completedAt: string | null;
   status: "running" | "completed" | "failed";
   response: ProviderChatResponse | null;
+  automation: SendChatAutomationDebug | null;
   error: {
     code: string;
     message: string;

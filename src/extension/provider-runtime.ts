@@ -1,9 +1,9 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { createServer } from "node:net";
 import { fileURLToPath } from "node:url";
-import type { ProviderChatRequest } from "../shared/contracts";
+import type { ProviderChatRequest, ProviderChatResponse } from "../shared/contracts";
 
 interface ManagedHelper {
   baseUrl: string;
@@ -61,9 +61,27 @@ type ToolResultMessage = {
   timestamp: number;
 };
 
+type ToolDefinition = {
+  name: string;
+  description?: string;
+  inputSchema?: Record<string, unknown>;
+};
+
+type ProtocolEnvelope =
+  | {
+      type: "message";
+      content: string;
+    }
+  | {
+      type: "tool_call";
+      name: string;
+      arguments: Record<string, unknown>;
+    };
+
 interface ProviderContext {
   systemPrompt?: string;
   messages: Array<UserMessage | AssistantMessage | ToolResultMessage>;
+  tools?: ToolDefinition[];
 }
 
 interface ProviderModel {
@@ -91,6 +109,19 @@ type AssistantMessageEvent =
       type: "text_end";
       contentIndex: number;
       content: string;
+      partial: AssistantMessage;
+    }
+  | { type: "toolcall_start"; contentIndex: number; partial: AssistantMessage }
+  | {
+      type: "toolcall_delta";
+      contentIndex: number;
+      delta: string;
+      partial: AssistantMessage;
+    }
+  | {
+      type: "toolcall_end";
+      contentIndex: number;
+      toolCall: ToolCallContent;
       partial: AssistantMessage;
     }
   | {
@@ -252,6 +283,309 @@ const PROVIDER_API_KEY = "deepseek-web-local";
 const PROVIDER_BASE_URL = "http://127.0.0.1";
 const MODEL_ID = "deepseek-web-chat";
 const DEBUG_PROVIDER_REQUESTS = process.env.PI_DEEPSEEK_DEBUG === "1";
+const RESPONSE_ENVELOPE_INSTRUCTION = [
+  "Your entire assistant reply must be exactly one JSON object.",
+  'For normal replies use: {"type":"message","content":"your response text"}',
+  'For tool calls use: {"type":"tool_call","name":"tool_name","arguments":{"key":"value"}}',
+  "Do not add any prose before or after it.",
+  "Do not wrap it in markdown or code fences.",
+].join(" ");
+
+function buildToolCatalogPrompt(tools: ToolDefinition[] | undefined) {
+  if (!tools || tools.length === 0) {
+    return "";
+  }
+
+  return [
+    "When using JSON fallback tool calls, you must use one of these exact tool definitions.",
+    "Use the exact tool name and argument keys from the schema.",
+    ...tools.map((tool) =>
+      [
+        `Tool name: ${tool.name}`,
+        tool.description ? `Description: ${tool.description}` : "",
+        `Arguments JSON schema: ${JSON.stringify(tool.inputSchema ?? {})}`,
+      ]
+        .filter((part) => part.length > 0)
+        .join("\n"),
+    ),
+  ].join("\n\n");
+}
+
+function parseStrictProtocolEnvelope(text: string): {
+  envelope: ProtocolEnvelope | null;
+  protocolLike: boolean;
+  error: string | null;
+} {
+  const trimmed = text.trim();
+  const protocolLike =
+    /"type"\s*:\s*"(message|tool_call)"/.test(text) || trimmed.startsWith("{");
+
+  if (trimmed.length === 0) {
+    return {
+      envelope: null,
+      protocolLike: false,
+      error: null,
+    };
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(trimmed);
+  } catch {
+    return {
+      envelope: null,
+      protocolLike,
+      error: protocolLike ? "Return exactly one JSON object." : null,
+    };
+  }
+
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return {
+      envelope: null,
+      protocolLike,
+      error: "Top-level reply must be a JSON object.",
+    };
+  }
+
+  const candidate = parsed as Record<string, unknown>;
+  if (candidate.type === "message") {
+    if (
+      Object.keys(candidate).length !== 2 ||
+      typeof candidate.content !== "string"
+    ) {
+      return {
+        envelope: null,
+        protocolLike: true,
+        error: 'Message replies must match {"type":"message","content":"..."} exactly.',
+      };
+    }
+
+    return {
+      envelope: {
+        type: "message",
+        content: candidate.content,
+      },
+      protocolLike: true,
+      error: null,
+    };
+  }
+
+  if (candidate.type === "tool_call") {
+    if (
+      Object.keys(candidate).length !== 3 ||
+      typeof candidate.name !== "string" ||
+      !candidate.arguments ||
+      typeof candidate.arguments !== "object" ||
+      Array.isArray(candidate.arguments)
+    ) {
+      return {
+        envelope: null,
+        protocolLike: true,
+        error:
+          'Tool calls must match {"type":"tool_call","name":"tool_name","arguments":{...}} exactly.',
+      };
+    }
+
+    return {
+      envelope: {
+        type: "tool_call",
+        name: candidate.name,
+        arguments: candidate.arguments as Record<string, unknown>,
+      },
+      protocolLike: true,
+      error: null,
+    };
+  }
+
+  return {
+    envelope: null,
+    protocolLike,
+    error: 'Reply "type" must be either "message" or "tool_call".',
+  };
+}
+
+function validateValueAgainstSchema(
+  value: unknown,
+  schema: Record<string, unknown> | undefined,
+  path: string,
+): string[] {
+  if (!schema || typeof schema !== "object" || Array.isArray(schema)) {
+    return [];
+  }
+
+  const errors: string[] = [];
+  const type = typeof schema.type === "string" ? schema.type : null;
+  const properties =
+    schema.properties &&
+    typeof schema.properties === "object" &&
+    !Array.isArray(schema.properties)
+      ? (schema.properties as Record<string, Record<string, unknown>>)
+      : null;
+  const required = Array.isArray(schema.required)
+    ? schema.required.filter((entry): entry is string => typeof entry === "string")
+    : [];
+
+  if (Array.isArray(schema.enum) && !schema.enum.some((entry) => entry === value)) {
+    errors.push(`${path} must be one of: ${schema.enum.join(", ")}`);
+    return errors;
+  }
+
+  if ("const" in schema && value !== schema.const) {
+    errors.push(`${path} must equal ${JSON.stringify(schema.const)}`);
+    return errors;
+  }
+
+  if (type === "object") {
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      errors.push(`${path} must be an object`);
+      return errors;
+    }
+
+    const record = value as Record<string, unknown>;
+    for (const key of required) {
+      if (!(key in record)) {
+        errors.push(`${path}.${key} is required`);
+      }
+    }
+
+    if (properties) {
+      for (const [key, child] of Object.entries(record)) {
+        if (key in properties) {
+          errors.push(...validateValueAgainstSchema(child, properties[key], `${path}.${key}`));
+          continue;
+        }
+
+        if (schema.additionalProperties === false) {
+          errors.push(`${path}.${key} is not allowed`);
+        }
+      }
+    }
+
+    return errors;
+  }
+
+  if (type === "array") {
+    if (!Array.isArray(value)) {
+      errors.push(`${path} must be an array`);
+      return errors;
+    }
+
+    const itemSchema =
+      schema.items && typeof schema.items === "object" && !Array.isArray(schema.items)
+        ? (schema.items as Record<string, unknown>)
+        : undefined;
+    if (itemSchema) {
+      for (const [index, item] of value.entries()) {
+        errors.push(...validateValueAgainstSchema(item, itemSchema, `${path}[${index}]`));
+      }
+    }
+
+    return errors;
+  }
+
+  if (type === "string" && typeof value !== "string") {
+    errors.push(`${path} must be a string`);
+  }
+
+  if (type === "number" && typeof value !== "number") {
+    errors.push(`${path} must be a number`);
+  }
+
+  if (type === "integer" && (!Number.isInteger(value) || typeof value !== "number")) {
+    errors.push(`${path} must be an integer`);
+  }
+
+  if (type === "boolean" && typeof value !== "boolean") {
+    errors.push(`${path} must be a boolean`);
+  }
+
+  return errors;
+}
+
+function validateToolCallAgainstTools(
+  toolCall: {
+    name: string;
+    arguments: Record<string, unknown>;
+  },
+  tools: ToolDefinition[] | undefined,
+): string[] {
+  if (!tools || tools.length === 0) {
+    return [];
+  }
+
+  const matchedTool = tools.find((tool) => tool.name === toolCall.name);
+  if (!matchedTool) {
+    return [`Tool "${toolCall.name}" is not in the allowed tool list.`];
+  }
+
+  return validateValueAgainstSchema(
+    toolCall.arguments,
+    matchedTool.inputSchema,
+    "arguments",
+  );
+}
+
+function buildProtocolRepairPrompt(input: {
+  rawOutput: string;
+  issues: string[];
+  tools: ToolDefinition[] | undefined;
+}) {
+  return [
+    "The previous reply violated the required JSON response protocol.",
+    "Return exactly one JSON object and nothing else.",
+    'For normal replies use: {"type":"message","content":"your response text"}',
+    'For tool calls use: {"type":"tool_call","name":"tool_name","arguments":{"key":"value"}}',
+    "Problems to fix:",
+    ...input.issues.map((issue) => `- ${issue}`),
+    "Previous invalid reply:",
+    input.rawOutput,
+    ...(input.tools && input.tools.length > 0
+      ? ["Allowed tool definitions:", buildToolCatalogPrompt(input.tools)]
+      : []),
+  ].join("\n");
+}
+
+function shouldRepairProviderResponse(
+  response: ProviderChatResponse,
+  tools: ToolDefinition[] | undefined,
+): {
+  shouldRepair: boolean;
+  issues: string[];
+  rawOutput: string;
+} {
+  if (response.mode !== "text") {
+    try {
+      const toolCall = parseValidatedToolCall(response.toolCall);
+      const issues = validateToolCallAgainstTools(toolCall, tools);
+      return {
+        shouldRepair: issues.length > 0,
+        issues,
+        rawOutput:
+          response.outputText ??
+          JSON.stringify({
+            type: "tool_call",
+            name: response.toolCall.name,
+            arguments: toolCall.arguments,
+          }),
+      };
+    } catch (error) {
+      return {
+        shouldRepair: true,
+        issues: [
+          error instanceof Error ? error.message : String(error),
+        ],
+        rawOutput: response.outputText ?? "",
+      };
+    }
+  }
+
+  const parsed = parseStrictProtocolEnvelope(response.outputText);
+  return {
+    shouldRepair: parsed.protocolLike && parsed.envelope === null,
+    issues: parsed.error ? [parsed.error] : [],
+    rawOutput: response.outputText,
+  };
+}
 
 function createEmptyUsage(): AssistantMessage["usage"] {
   return {
@@ -337,12 +671,36 @@ function pushProviderMessage(
   messages.push({ role, content: trimmed });
 }
 
+function buildSessionInitPrompt(context: ProviderContext) {
+  const parts: string[] = [];
+
+  if (context.systemPrompt?.trim()) {
+    parts.push(context.systemPrompt.trim());
+  }
+
+  parts.push(RESPONSE_ENVELOPE_INSTRUCTION);
+
+  if ((context.tools?.length ?? 0) > 0) {
+    parts.push(buildToolCatalogPrompt(context.tools));
+  }
+
+  const prompt = parts
+    .map((part) => part.trim())
+    .filter((part) => part.length > 0)
+    .join("\n\n");
+
+  if (prompt.length === 0) {
+    return undefined;
+  }
+
+  return {
+    prompt,
+    fingerprint: createHash("sha256").update(prompt).digest("hex"),
+  };
+}
+
 function toProviderMessages(context: ProviderContext): ProviderChatRequest["messages"] {
   const messages: ProviderChatRequest["messages"] = [];
-
-  if (context.systemPrompt) {
-    pushProviderMessage(messages, "system", context.systemPrompt);
-  }
 
   for (const message of context.messages) {
     if (message.role === "user") {
@@ -371,6 +729,26 @@ function toProviderMessages(context: ProviderContext): ProviderChatRequest["mess
   }
 
   return messages;
+}
+
+function parseValidatedToolCall(input: {
+  name: string;
+  argumentsJson: string;
+}) {
+  const name = input.name.trim();
+  if (name.length === 0) {
+    throw new Error("Invalid DeepSeek tool call payload");
+  }
+
+  const parsed = JSON.parse(input.argumentsJson);
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("Invalid DeepSeek tool call payload");
+  }
+
+  return {
+    name,
+    arguments: parsed as Record<string, unknown>,
+  };
 }
 
 function toErrorMessage(error: unknown) {
@@ -612,41 +990,67 @@ export default function registerDeepSeekExtension(
             options?.signal,
           );
 
-          const response = await deps.helperClient.post<{
-            outputText: string;
-            finishReason: "stop" | "length" | "error";
-            modelLabel?: string;
-          }>(
-            current.baseUrl,
-            "/v1/provider/chat",
-            (() => {
-              const requestPayload = {
+          const sessionInit = buildSessionInitPrompt(context);
+          const sendProviderTurn = async (
+            messages: ProviderChatRequest["messages"],
+          ) => {
+            const requestPayload = {
               model: model.id,
-              messages: toProviderMessages(context),
+              messages,
+              ...(sessionInit ? { sessionInit } : {}),
               ...(typeof options?.temperature === "number"
                 ? { temperature: options.temperature }
                 : {}),
               ...(typeof options?.maxTokens === "number"
                 ? { maxOutputTokens: options.maxTokens }
                 : {}),
-              };
-              logProviderDebug("provider chat request", {
-                helperBaseUrl: current.baseUrl,
-                model: model.id,
-                request: requestPayload,
-              });
-              return requestPayload;
-            })(),
-            current.token,
-            options?.signal,
-          );
-          logProviderDebug("provider chat response", {
-            helperBaseUrl: current.baseUrl,
-            model: model.id,
-            response,
-          });
+            };
 
-          if (response.outputText.length > 0) {
+            const response = await deps.helperClient.post<ProviderChatResponse>(
+              current.baseUrl,
+              "/v1/provider/chat",
+              (() => {
+                logProviderDebug("provider chat request", {
+                  helperBaseUrl: current.baseUrl,
+                  model: model.id,
+                  request: requestPayload,
+                });
+                return requestPayload;
+              })(),
+              current.token,
+              options?.signal,
+            );
+            logProviderDebug("provider chat response", {
+              helperBaseUrl: current.baseUrl,
+              model: model.id,
+              response,
+            });
+            return response;
+          };
+
+          let response = await sendProviderTurn(toProviderMessages(context));
+          const repairDecision = shouldRepairProviderResponse(response, context.tools);
+          if (repairDecision.shouldRepair) {
+            response = await sendProviderTurn([
+              {
+                role: "user",
+                content: buildProtocolRepairPrompt({
+                  rawOutput: repairDecision.rawOutput,
+                  issues: repairDecision.issues,
+                  tools: context.tools,
+                }),
+              },
+            ]);
+
+            const postRepairDecision = shouldRepairProviderResponse(response, context.tools);
+            if (postRepairDecision.shouldRepair) {
+              throw new Error(
+                `Protocol repair failed: ${postRepairDecision.issues.join(" ")}`,
+              );
+            }
+          }
+
+          if (response.mode === "text" && response.outputText.length > 0) {
             output.content.push({ type: "text", text: "" });
             const contentIndex = output.content.length - 1;
             stream.push({ type: "text_start", contentIndex, partial: output });
@@ -668,6 +1072,61 @@ export default function registerDeepSeekExtension(
               content: response.outputText,
               partial: output,
             });
+          }
+
+          if (response.mode !== "text") {
+            const validatedToolCall = parseValidatedToolCall(response.toolCall);
+            const toolCallId = `deepseek-web-${output.content.length}`;
+
+            output.content.push({
+              type: "toolCall",
+              id: toolCallId,
+              name: validatedToolCall.name,
+              arguments: {},
+            });
+            const contentIndex = output.content.length - 1;
+            stream.push({ type: "toolcall_start", contentIndex, partial: output });
+
+            const toolCallBlock = output.content[contentIndex];
+            if (toolCallBlock?.type === "toolCall") {
+              toolCallBlock.arguments = validatedToolCall.arguments;
+            }
+
+            stream.push({
+              type: "toolcall_delta",
+              contentIndex,
+              delta: response.toolCall.argumentsJson,
+              partial: output,
+            });
+            stream.push({
+              type: "toolcall_end",
+              contentIndex,
+              toolCall: {
+                type: "toolCall",
+                id: toolCallId,
+                name: validatedToolCall.name,
+                arguments: validatedToolCall.arguments,
+              },
+              partial: output,
+            });
+
+            if (response.finishReason === "error") {
+              output.stopReason = "error";
+              output.errorMessage =
+                response.outputText || "DeepSeek web provider returned an error";
+              stream.push({ type: "error", reason: "error", error: output });
+              stream.end();
+              return;
+            }
+
+            output.stopReason = "toolUse";
+            stream.push({
+              type: "done",
+              reason: "toolUse",
+              message: output,
+            });
+            stream.end();
+            return;
           }
 
           if (response.finishReason === "error") {
