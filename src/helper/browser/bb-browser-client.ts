@@ -204,6 +204,14 @@ export class BbBrowserClient implements BrowserAutomationClient {
     try {
       tab = await this.transport.findDeepSeekTab();
     } catch (error) {
+      if (error instanceof HelperError && error.code === "NOT_BOUND") {
+        await this.transport.openDeepSeek("https://chat.deepseek.com");
+        throw new HelperError(
+          "NOT_BOUND",
+          "Opened DeepSeek in bb-browser. Finish login in that page and retry.",
+        );
+      }
+
       if (
         error instanceof Error &&
         error.message.toLowerCase().includes("no page target found")
@@ -248,15 +256,81 @@ export class BbBrowserClient implements BrowserAutomationClient {
     prompt: string;
     timeoutMs: number;
   }): Promise<SendChatResult> {
+    const promptLiteral = JSON.stringify(input.prompt);
+    const bridgeSendScript = `${INJECTED_BRIDGE_SOURCE}; window.__piDeepSeekBridge.sendPrompt({ prompt: ${promptLiteral}, timeoutMs: ${input.timeoutMs} })`;
     const pageStateScript = `${INJECTED_BRIDGE_SOURCE}; window.__piDeepSeekBridge.getPageState()`;
 
     try {
-      const baselineState = await this.transport.evaluate<{
+      const bridgeResult = await this.transport.evaluate<{
+        ok?: boolean;
+        reply?: string;
+        error?: string;
+        message?: string;
+        inputReady?: boolean;
+        busy?: boolean;
+        latestAssistantPreview?: string | null;
+        assistantCount?: number;
+        blockingMessage?: string | null;
+      }>(input.tabId, bridgeSendScript);
+
+      if (bridgeResult && typeof bridgeResult === "object" && "ok" in bridgeResult) {
+        if (bridgeResult.ok && typeof bridgeResult.reply === "string") {
+          return {
+            reply: bridgeResult.reply,
+            modelLabel: "DeepSeek Web",
+          };
+        }
+
+        if (bridgeResult.error === "PAGE_UNAVAILABLE") {
+          throw new HelperError(
+            "PAGE_UNAVAILABLE",
+            bridgeResult.message ??
+              "DeepSeek requires manual verification in the browser tab before chatting",
+          );
+        }
+
+        if (bridgeResult.error === "TIMEOUT") {
+          throw new HelperError(
+            "TIMEOUT",
+            bridgeResult.message ?? "The page did not finish streaming in time",
+          );
+        }
+
+        if (bridgeResult.error) {
+          throw new HelperError(
+            "AUTOMATION_DESYNC",
+            bridgeResult.message ?? bridgeResult.error,
+          );
+        }
+      }
+
+      const baselineState =
+        bridgeResult &&
+        typeof bridgeResult === "object" &&
+        "latestAssistantPreview" in bridgeResult &&
+        "assistantCount" in bridgeResult
+          ? {
+              inputReady: bridgeResult.inputReady ?? true,
+              busy: bridgeResult.busy ?? false,
+              latestAssistantPreview: bridgeResult.latestAssistantPreview ?? null,
+              assistantCount: bridgeResult.assistantCount ?? 0,
+              blockingMessage: bridgeResult.blockingMessage ?? null,
+            }
+          : await this.transport.evaluate<{
         inputReady: boolean;
         busy: boolean;
         latestAssistantPreview: string | null;
         assistantCount: number;
+        blockingMessage?: string | null;
       }>(input.tabId, pageStateScript);
+
+      if (baselineState.blockingMessage) {
+        throw new HelperError(
+          "PAGE_UNAVAILABLE",
+          "DeepSeek requires manual verification in the browser tab before chatting",
+        );
+      }
+
       await this.transport.submitPrompt(input.tabId, input.prompt);
 
       const baselineReply = (baselineState.latestAssistantPreview ?? "").trim();
@@ -277,7 +351,15 @@ export class BbBrowserClient implements BrowserAutomationClient {
           busy: boolean;
           latestAssistantPreview: string | null;
           assistantCount: number;
+          blockingMessage?: string | null;
         }>(input.tabId, pageStateScript);
+
+        if (state.blockingMessage) {
+          throw new HelperError(
+            "PAGE_UNAVAILABLE",
+            "DeepSeek requires manual verification in the browser tab before chatting",
+          );
+        }
 
         const nextReply = (state.latestAssistantPreview ?? "").trim();
         const assistantCountIncreased = state.assistantCount > previousAssistantCount;
@@ -326,7 +408,16 @@ export class BbBrowserClient implements BrowserAutomationClient {
         busy: boolean;
         latestAssistantPreview: string | null;
         assistantCount: number;
+        blockingMessage?: string | null;
       }>(input.tabId, pageStateScript);
+
+      if (finalState.blockingMessage) {
+        throw new HelperError(
+          "PAGE_UNAVAILABLE",
+          "DeepSeek requires manual verification in the browser tab before chatting",
+        );
+      }
+
       const finalReply = (finalState.latestAssistantPreview ?? "").trim();
       const hasRecoveredReply =
         finalState.assistantCount > baselineAssistantCount ||

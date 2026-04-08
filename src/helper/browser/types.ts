@@ -5,6 +5,7 @@ export interface PageStateSummary {
   busy: boolean;
   latestAssistantPreview: string | null;
   assistantCount: number;
+  blockingMessage?: string | null;
 }
 
 export interface BindResult {

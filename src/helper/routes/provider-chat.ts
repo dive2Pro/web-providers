@@ -8,32 +8,11 @@ import { HelperError } from "../errors";
 import type { ProviderRequestDebugRecord } from "../types";
 
 function buildProviderPrompt(messages: ProviderChatRequest["messages"]) {
-  type ProviderMessage = ProviderChatRequest["messages"][number];
-  type SystemMessage = { role: "system"; content: string };
-  type HistoryMessage = { role: "user" | "assistant"; content: string };
-
-  const systemMessages = messages.filter(
-    (message: ProviderMessage): message is SystemMessage => message.role === "system",
-  );
-  const system = systemMessages
-    .map((message) => message.content)
-    .join("\n");
-
-  const nonSystem = messages.filter(
-    (message: ProviderMessage): message is HistoryMessage => message.role !== "system",
-  );
-  const currentUser = [...nonSystem]
+  const currentUser = [...messages]
     .reverse()
     .find((message) => message.role === "user");
-  const currentUserIndex = currentUser
-    ? nonSystem.lastIndexOf(currentUser)
-    : nonSystem.length;
-  const history = nonSystem
-    .slice(0, currentUserIndex)
-    .map((message) => `${message.role === "user" ? "User" : "Assistant"}: ${message.content}`)
-    .join("\n");
 
-  return `[System Instructions]\n${system}\n\n[Conversation History]\n${history ? `${history}\n` : ""}\n[Current User Request]\n${currentUser?.content ?? ""}`;
+  return currentUser?.content ?? "";
 }
 
 export function registerProviderChatRoute(app: FastifyInstance, ctx: AppContext) {

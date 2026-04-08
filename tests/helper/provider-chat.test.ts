@@ -50,14 +50,13 @@ describe("provider chat route", () => {
 
     expect(response.statusCode).toBe(200);
     expect(response.json()).toEqual({
-      outputText:
-        "reply:[System Instructions]\nYou are terse.\n\n[Conversation History]\n\n[Current User Request]\nhello",
+      outputText: "reply:hello",
       finishReason: "stop",
       modelLabel: "DeepSeek Web",
     });
   });
 
-  it("includes assistant turns in the conversation history section", async () => {
+  it("forwards only the latest user turn because DeepSeek web keeps its own chat history", async () => {
     let capturedPrompt = "";
 
     const app = buildApp({
@@ -108,8 +107,7 @@ describe("provider chat route", () => {
       },
     });
 
-    expect(capturedPrompt).toContain("[Conversation History]\nUser: hello\nAssistant: hi");
-    expect(capturedPrompt).toContain("[Current User Request]\ncontinue");
+    expect(capturedPrompt).toBe("continue");
   });
 
   it("records the latest provider request for debugging", async () => {
@@ -179,15 +177,13 @@ describe("provider chat route", () => {
         { role: "system", content: "You are terse." },
         { role: "user", content: "hello" },
       ],
-      prompt:
-        "[System Instructions]\nYou are terse.\n\n[Conversation History]\n\n[Current User Request]\nhello",
+      prompt: "hello",
       session: {
         tabId: "tab-1",
         url: "https://chat.deepseek.com/",
       },
       response: {
-        outputText:
-          "reply:[System Instructions]\nYou are terse.\n\n[Conversation History]\n\n[Current User Request]\nhello",
+        outputText: "reply:hello",
         finishReason: "stop",
         modelLabel: "DeepSeek Web",
       },
@@ -249,8 +245,7 @@ describe("provider chat route", () => {
         model: "deepseek-web-chat",
         messages: [{ role: "user", content: "hey" }],
       },
-      prompt:
-        "[System Instructions]\n\n\n[Conversation History]\n\n[Current User Request]\nhey",
+      prompt: "hey",
       response: null,
       error: {
         code: "AUTOMATION_DESYNC",

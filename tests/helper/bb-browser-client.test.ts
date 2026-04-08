@@ -132,6 +132,30 @@ describe("BbBrowserClient", () => {
     expect(opened).toEqual(["https://chat.deepseek.com"]);
   });
 
+  it("opens DeepSeek when no DeepSeek tab is currently available", async () => {
+    const opened: string[] = [];
+
+    const client = new BbBrowserClient({
+      getConnectionStatus: async () => "connected",
+      findDeepSeekTab: async () => {
+        throw new HelperError("NOT_BOUND", "No logged-in DeepSeek tab is available");
+      },
+      openDeepSeek: async (url: string) => {
+        opened.push(url);
+      },
+      submitPrompt: async () => undefined,
+      evaluate: async <T>() => undefined as T,
+    });
+
+    await expect(client.bindDeepSeekTab()).rejects.toEqual(
+      new HelperError(
+        "NOT_BOUND",
+        "Opened DeepSeek in bb-browser. Finish login in that page and retry.",
+      ),
+    );
+    expect(opened).toEqual(["https://chat.deepseek.com"]);
+  });
+
   it("translates page timeout responses into HelperError", async () => {
     const client = new BbBrowserClient({
       getConnectionStatus: async () => "connected",
@@ -169,6 +193,83 @@ describe("BbBrowserClient", () => {
     ).rejects.toEqual(
       new HelperError("TIMEOUT", "The page did not finish streaming in time"),
     );
+  });
+
+  it("fails fast when DeepSeek shows a manual verification interstitial", async () => {
+    const client = new BbBrowserClient({
+      getConnectionStatus: async () => "connected",
+      findDeepSeekTab: async () => ({
+        id: "tab-1",
+        url: "https://chat.deepseek.com/",
+      }),
+      openDeepSeek: async () => undefined,
+      submitPrompt: async () => undefined,
+      evaluate: async <T>(_tabId: string, script: string) => {
+        if (script.includes("getPageState")) {
+          return {
+            inputReady: true,
+            busy: false,
+            latestAssistantPreview: null,
+            assistantCount: 0,
+            blockingMessage: "One more step before you proceed...",
+          } as T;
+        }
+
+        return undefined as T;
+      },
+    });
+
+    await expect(
+      client.sendChatPrompt({
+        tabId: "tab-1",
+        prompt: "hello",
+        timeoutMs: 1000,
+      }),
+    ).rejects.toEqual(
+      new HelperError(
+        "PAGE_UNAVAILABLE",
+        "DeepSeek requires manual verification in the browser tab before chatting",
+      ),
+    );
+  });
+
+  it("uses the injected bridge stream result when available", async () => {
+    let submittedPrompt: string | null = null;
+
+    const client = new BbBrowserClient({
+      getConnectionStatus: async () => "connected",
+      findDeepSeekTab: async () => ({
+        id: "tab-1",
+        url: "https://chat.deepseek.com/",
+      }),
+      openDeepSeek: async () => undefined,
+      submitPrompt: async (_tabId: string, prompt: string) => {
+        submittedPrompt = prompt;
+      },
+      evaluate: async <T>(_tabId: string, script: string) => {
+        if (script.includes("sendPrompt({")) {
+          return {
+            ok: true,
+            reply: "streamed reply",
+          } as T;
+        }
+
+        return undefined as T;
+      },
+    });
+
+    await expect(
+      client.sendChatPrompt({
+        tabId: "tab-1",
+        prompt: "hello",
+        timeoutMs: 3000,
+      }),
+    ).resolves.toEqual({
+      reply: "streamed reply",
+      modelLabel: "DeepSeek Web",
+    });
+
+    expect(submittedPrompt).toBeNull();
   });
 
   it("submits prompt through transport and returns fresh assistant reply", async () => {
