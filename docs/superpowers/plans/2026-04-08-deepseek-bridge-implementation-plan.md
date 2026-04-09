@@ -104,7 +104,7 @@ Expected: FAIL with a module resolution error for `src/helper/app`
 ```json
 // package.json
 {
-  "name": "deepseek-web-bridge",
+  "name": "web-providers",
   "private": true,
   "type": "module",
   "scripts": {

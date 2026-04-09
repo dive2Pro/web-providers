@@ -24,8 +24,14 @@ export function buildApp(deps: AppDeps) {
     browserClient: deps.browserClient,
     state: new HelperState(),
   };
+  const unauthenticatedPaths = new Set(["/v1/debug/provider-last"]);
 
   app.addHook("onRequest", async (request, reply) => {
+    const pathname = request.url.split("?")[0] ?? request.url;
+    if (unauthenticatedPaths.has(pathname)) {
+      return;
+    }
+
     if (request.headers.authorization !== `Bearer ${deps.token}`) {
       return reply.code(401).send({ error: "UNAUTHORIZED" });
     }

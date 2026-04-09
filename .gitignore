@@ -3,6 +3,8 @@ node_modules/
 
 # Build output
 dist/
+slides-dist/
+slides/slides-dist/
 
 # Environment files
 .env

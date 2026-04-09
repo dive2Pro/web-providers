@@ -1,7 +1,77 @@
 import { describe, expect, it } from "vitest";
 import { buildApp } from "../../src/helper/app";
+import { HelperError } from "../../src/helper/errors";
 
 describe("provider chat route", () => {
+  it("requires provider on provider chat requests and stores debug state per provider", async () => {
+    const app = buildApp({
+      token: "test-token",
+      browserClient: {
+        getConnectionStatus: async () => "connected",
+        bindProviderTab: async () => ({
+          tabId: "tab-qwen",
+          url: "https://chat.qwen.ai/",
+          loginState: "logged_in",
+          bridgeInjected: true,
+          pageState: {
+            inputReady: true,
+            busy: false,
+            latestAssistantPreview: null,
+            assistantCount: 0,
+          },
+        }),
+        resetProvider: async () => undefined,
+        startNewChat: async () => undefined,
+        sendChatPrompt: async () => ({
+          mode: "text",
+          outputText: "qwen:hello",
+          modelLabel: "Qwen Web",
+        }),
+      } as never,
+    });
+
+    const bindResponse = await app.inject({
+      method: "POST",
+      url: "/v1/bind",
+      headers: { authorization: "Bearer test-token" },
+      payload: { provider: "qwen-web" },
+    });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/provider/chat",
+      headers: {
+        authorization: "Bearer test-token",
+      },
+      payload: {
+        provider: "qwen-web",
+        model: "qwen-web-chat",
+        messages: [{ role: "user", content: "hello" }],
+      },
+    });
+
+    const debugResponse = await app.inject({
+      method: "GET",
+      url: "/v1/debug/provider-last?provider=qwen-web",
+    });
+
+    expect(bindResponse.statusCode).toBe(200);
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      mode: "text",
+      outputText: "qwen:hello",
+      modelLabel: "Qwen Web",
+    });
+    expect(debugResponse.statusCode).toBe(200);
+    expect(debugResponse.json()).toMatchObject({
+      provider: "qwen-web",
+      rawRequest: expect.objectContaining({
+        provider: "qwen-web",
+        model: "qwen-web-chat",
+      }),
+    });
+  });
+
   it("accepts provider messages and returns structured text output", async () => {
     const app = buildApp({
       token: "test-token",
@@ -58,6 +128,61 @@ describe("provider chat route", () => {
     expect(response.json()).toEqual({
       mode: "text",
       outputText: "reply:hello",
+      finishReason: "stop",
+      modelLabel: "DeepSeek Web",
+    });
+  });
+
+  it("preserves thinking text on structured text output", async () => {
+    const app = buildApp({
+      token: "test-token",
+      browserClient: {
+        getConnectionStatus: async () => "connected",
+        bindDeepSeekTab: async () => ({
+          tabId: "tab-1",
+          url: "https://chat.deepseek.com/",
+          loginState: "logged_in",
+          bridgeInjected: true,
+          pageState: {
+            inputReady: true,
+            busy: false,
+            latestAssistantPreview: null,
+            assistantCount: 0,
+          },
+        }),
+        resetPageBridge: async () => undefined,
+        sendChatPrompt: async () => ({
+          mode: "text",
+          thinkingText: "think step",
+          outputText: "final answer",
+          modelLabel: "DeepSeek Web",
+        }),
+      } as never,
+    });
+
+    await app.inject({
+      method: "POST",
+      url: "/v1/bind",
+      headers: { authorization: "Bearer test-token" },
+    });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/provider/chat",
+      headers: {
+        authorization: "Bearer test-token",
+      },
+      payload: {
+        model: "deepseek-web-chat",
+        messages: [{ role: "user", content: "hello" }],
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({
+      mode: "text",
+      thinkingText: "think step",
+      outputText: "final answer",
       finishReason: "stop",
       modelLabel: "DeepSeek Web",
     });
@@ -227,6 +352,7 @@ describe("provider chat route", () => {
         messages: [{ role: "user", content: "hello" }],
         sessionInit: {
           fingerprint: "fp-1",
+          sessionKey: "session-1",
           prompt: "You are terse.",
         },
       },
@@ -286,6 +412,7 @@ describe("provider chat route", () => {
         messages: [{ role: "user", content: "hello" }],
         sessionInit: {
           fingerprint: "fp-1",
+          sessionKey: "session-1",
           prompt: "You are terse.",
         },
       },
@@ -300,6 +427,7 @@ describe("provider chat route", () => {
         messages: [{ role: "user", content: "continue" }],
         sessionInit: {
           fingerprint: "fp-1",
+          sessionKey: "session-1",
           prompt: "You are terse.",
         },
       },
@@ -307,6 +435,81 @@ describe("provider chat route", () => {
 
     expect(freshChatCount).toBe(1);
     expect(prompts).toEqual(["You are terse.\n\nhello", "continue"]);
+  });
+
+  it("starts a fresh provider chat when the session key changes even if the fingerprint is unchanged", async () => {
+    const prompts: string[] = [];
+    let freshChatCount = 0;
+
+    const app = buildApp({
+      token: "test-token",
+      browserClient: {
+        getConnectionStatus: async () => "connected",
+        bindDeepSeekTab: async () => ({
+          tabId: "tab-1",
+          url: "https://chat.deepseek.com/",
+          loginState: "logged_in",
+          bridgeInjected: true,
+          pageState: {
+            inputReady: true,
+            busy: false,
+            latestAssistantPreview: null,
+            assistantCount: 0,
+          },
+        }),
+        resetPageBridge: async () => undefined,
+        startNewChat: async () => {
+          freshChatCount += 1;
+        },
+        sendChatPrompt: async ({ prompt }: { prompt: string }) => {
+          prompts.push(prompt);
+          return {
+            mode: "text",
+            outputText: "ok",
+            modelLabel: "DeepSeek Web",
+          };
+        },
+      } as never,
+    });
+
+    await app.inject({
+      method: "POST",
+      url: "/v1/bind",
+      headers: { authorization: "Bearer test-token" },
+    });
+
+    await app.inject({
+      method: "POST",
+      url: "/v1/provider/chat",
+      headers: { authorization: "Bearer test-token" },
+      payload: {
+        model: "deepseek-web-chat",
+        messages: [{ role: "user", content: "hello" }],
+        sessionInit: {
+          fingerprint: "fp-1",
+          sessionKey: "session-1",
+          prompt: "You are terse.",
+        },
+      },
+    });
+
+    await app.inject({
+      method: "POST",
+      url: "/v1/provider/chat",
+      headers: { authorization: "Bearer test-token" },
+      payload: {
+        model: "deepseek-web-chat",
+        messages: [{ role: "user", content: "hello again" }],
+        sessionInit: {
+          fingerprint: "fp-1",
+          sessionKey: "session-2",
+          prompt: "You are terse.",
+        },
+      },
+    });
+
+    expect(freshChatCount).toBe(2);
+    expect(prompts).toEqual(["You are terse.\n\nhello", "You are terse.\n\nhello again"]);
   });
 
   it("preserves provider initialization across repeated binds on the same tab", async () => {
@@ -359,6 +562,7 @@ describe("provider chat route", () => {
         messages: [{ role: "user", content: "hello" }],
         sessionInit: {
           fingerprint: "fp-1",
+          sessionKey: "session-1",
           prompt: "You are terse.",
         },
       },
@@ -379,6 +583,7 @@ describe("provider chat route", () => {
         messages: [{ role: "user", content: "continue" }],
         sessionInit: {
           fingerprint: "fp-1",
+          sessionKey: "session-1",
           prompt: "You are terse.",
         },
       },
@@ -445,6 +650,7 @@ describe("provider chat route", () => {
         messages: [{ role: "user", content: "hello" }],
         sessionInit: {
           fingerprint: "fp-1",
+          sessionKey: "session-1",
           prompt: "You are terse.",
         },
       },
@@ -465,6 +671,7 @@ describe("provider chat route", () => {
         messages: [{ role: "user", content: "continue" }],
         sessionInit: {
           fingerprint: "fp-1",
+          sessionKey: "session-1",
           prompt: "You are terse.",
         },
       },
@@ -626,6 +833,88 @@ describe("provider chat route", () => {
       error: {
         code: "AUTOMATION_DESYNC",
         message: "Unexpected automation failure: boom",
+      },
+    });
+  });
+
+  it("preserves automation debug when provider chat fails with HelperError", async () => {
+    const app = buildApp({
+      token: "test-token",
+      browserClient: {
+        getConnectionStatus: async () => "connected",
+        bindDeepSeekTab: async () => ({
+          tabId: "tab-1",
+          url: "https://chat.deepseek.com/",
+          loginState: "logged_in",
+          bridgeInjected: true,
+          pageState: {
+            inputReady: true,
+            busy: false,
+            latestAssistantPreview: null,
+            assistantCount: 0,
+          },
+        }),
+        resetPageBridge: async () => undefined,
+        sendChatPrompt: async () => {
+          throw new HelperError("TIMEOUT", "The page did not finish streaming in time", {
+            source: "client_error",
+            freshSession: false,
+            completionObserved: true,
+            trace: [
+              {
+                phase: "poll",
+                completionStatus: "finished",
+                completionTurnPreview: "{\"",
+              },
+            ],
+          });
+        },
+      } as never,
+    });
+
+    await app.inject({
+      method: "POST",
+      url: "/v1/bind",
+      headers: { authorization: "Bearer test-token" },
+    });
+
+    const requestResponse = await app.inject({
+      method: "POST",
+      url: "/v1/provider/chat",
+      headers: { authorization: "Bearer test-token" },
+      payload: {
+        model: "deepseek-web-chat",
+        messages: [{ role: "user", content: "hey" }],
+      },
+    });
+
+    expect(requestResponse.statusCode).toBe(409);
+
+    const debugResponse = await app.inject({
+      method: "GET",
+      url: "/v1/debug/provider-last",
+      headers: { authorization: "Bearer test-token" },
+    });
+
+    expect(debugResponse.statusCode).toBe(200);
+    expect(debugResponse.json()).toMatchObject({
+      status: "failed",
+      prompt: "hey",
+      automation: {
+        source: "client_error",
+        freshSession: false,
+        completionObserved: true,
+        trace: [
+          {
+            phase: "poll",
+            completionStatus: "finished",
+            completionTurnPreview: "{\"",
+          },
+        ],
+      },
+      error: {
+        code: "TIMEOUT",
+        message: "The page did not finish streaming in time",
       },
     });
   });

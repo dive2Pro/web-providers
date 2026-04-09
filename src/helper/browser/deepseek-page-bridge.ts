@@ -184,23 +184,25 @@ function detectJsonEnvelope(text: string): JsonEnvelopeDetection | null {
       return null;
     }
 
-    if (parsed.type === "message" && typeof parsed.content === "string") {
+    const parsedObject = parsed as Record<string, unknown>;
+
+    if (parsedObject.type === "message" && typeof parsedObject.content === "string") {
       return {
         kind: "message",
-        content: parsed.content,
+        content: parsedObject.content,
       };
     }
 
-    if (parsed.type === "tool_call" && typeof parsed.name === "string") {
-      const name = parsed.name.trim();
+    if (parsedObject.type === "tool_call" && typeof parsedObject.name === "string") {
+      const name = parsedObject.name.trim();
       if (name.length === 0) {
         return null;
       }
 
       if (
-        !parsed.arguments ||
-        typeof parsed.arguments !== "object" ||
-        Array.isArray(parsed.arguments)
+        !parsedObject.arguments ||
+        typeof parsedObject.arguments !== "object" ||
+        Array.isArray(parsedObject.arguments)
       ) {
         return null;
       }
@@ -209,7 +211,7 @@ function detectJsonEnvelope(text: string): JsonEnvelopeDetection | null {
         kind: "tool_call",
         toolCall: {
           name,
-          argumentsJson: JSON.stringify(parsed.arguments),
+          argumentsJson: JSON.stringify(parsedObject.arguments),
         },
       };
     }
@@ -239,14 +241,17 @@ export function detectJsonFallbackToolCall(text: string) {
 
 export function classifyCompletionTurn(input: {
   reply: string;
+  thinking?: string;
   rawEvents: CompletionRawEvent[];
 }): CompletionTurn {
   const outputText = input.reply.trim();
+  const thinkingText = input.thinking?.trim() ?? "";
   const nativeToolCall = detectNativeToolCall(input.rawEvents);
   if (nativeToolCall) {
     return {
       mode: "native_tool_call",
       toolCall: nativeToolCall,
+      ...(thinkingText.length > 0 ? { thinkingText } : {}),
       ...(outputText.length > 0 ? { outputText } : {}),
     };
   }
@@ -256,6 +261,7 @@ export function classifyCompletionTurn(input: {
     return {
       mode: "json_fallback",
       toolCall: jsonEnvelope.toolCall,
+      ...(thinkingText.length > 0 ? { thinkingText } : {}),
       outputText,
     };
   }
@@ -263,12 +269,14 @@ export function classifyCompletionTurn(input: {
   if (jsonEnvelope?.kind === "message") {
     return {
       mode: "text",
+      ...(thinkingText.length > 0 ? { thinkingText } : {}),
       outputText: jsonEnvelope.content,
     };
   }
 
   return {
     mode: "text",
+    ...(thinkingText.length > 0 ? { thinkingText } : {}),
     outputText,
   };
 }
@@ -276,7 +284,7 @@ export function classifyCompletionTurn(input: {
 export const INJECTED_BRIDGE_SOURCE = `
 (() => {
   const KEY = "__piDeepSeekBridge";
-  const VERSION = 10;
+  const VERSION = 12;
   const __name = (target, _value) => target;
   const detectNativeToolCall = ${detectNativeToolCall.toString()};
   const detectJsonEnvelope = ${detectJsonEnvelope.toString()};
@@ -307,12 +315,15 @@ export const INJECTED_BRIDGE_SOURCE = `
       responseMessageId: null,
       modelType: null,
       status: "idle",
-      reply: "",
+      streamReply: "",
+      thinking: "",
       rawEvents: [],
       error: null,
       closed: false,
+      terminalAt: 0,
       lastPatchPath: null,
       lastPatchOp: null,
+      activeFragmentType: null,
     };
   }
 
@@ -327,6 +338,11 @@ export const INJECTED_BRIDGE_SOURCE = `
   function markCompletionObserved() {
     completionState.observed = true;
     completionState.lastEventAt = Date.now();
+  }
+
+  function markCompletionTerminal() {
+    completionState.terminalAt = Date.now();
+    completionState.lastEventAt = completionState.terminalAt;
   }
 
   function normalizeCompletionStatus(value) {
@@ -365,7 +381,8 @@ export const INJECTED_BRIDGE_SOURCE = `
         at: Date.now(),
       });
       completionState.closed = true;
-      if (completionState.status === "streaming" && completionState.reply.trim().length > 0) {
+      markCompletionTerminal();
+      if (completionState.status === "streaming" && completionState.streamReply.trim().length > 0) {
         completionState.status = "finished";
       }
       return;
@@ -414,8 +431,10 @@ export const INJECTED_BRIDGE_SOURCE = `
         ? parsed.o
         : null;
 
-    if (patchPath || patchOp) {
+    if (patchPath) {
       completionState.lastPatchPath = patchPath;
+    }
+    if (patchOp) {
       completionState.lastPatchOp = patchOp;
     }
 
@@ -429,18 +448,27 @@ export const INJECTED_BRIDGE_SOURCE = `
     ) {
       const response = parsed.v.response;
       if (Array.isArray(response.fragments)) {
-        const fullReply = response.fragments
+        completionState.streamReply = response.fragments
           .filter((fragment) => fragment?.type === "RESPONSE")
           .map((fragment) => (typeof fragment.content === "string" ? fragment.content : ""))
           .join("");
-        if (fullReply.length > 0) {
-          completionState.reply = fullReply;
-        }
+        completionState.thinking = response.fragments
+          .filter((fragment) => fragment?.type === "THINK")
+          .map((fragment) => (typeof fragment.content === "string" ? fragment.content : ""))
+          .join("");
+        const lastFragment = response.fragments.at(-1);
+        completionState.activeFragmentType =
+          lastFragment && typeof lastFragment.type === "string"
+            ? lastFragment.type
+            : null;
       }
 
       const nextStatus = normalizeCompletionStatus(response.status);
       if (nextStatus) {
         completionState.status = nextStatus;
+        if (nextStatus === "finished") {
+          markCompletionTerminal();
+        }
       }
 
       return;
@@ -449,11 +477,41 @@ export const INJECTED_BRIDGE_SOURCE = `
     if (
       parsed &&
       typeof parsed === "object" &&
-      parsed.p === "response/fragments/-1/content" &&
+      parsed.p === "response/fragments" &&
       parsed.o === "APPEND" &&
+      Array.isArray(parsed.v)
+    ) {
+      const appendedFragments = parsed.v.filter(
+        (fragment) => fragment && typeof fragment === "object",
+      );
+      for (const fragment of appendedFragments) {
+        const fragmentType =
+          typeof fragment.type === "string" ? fragment.type : null;
+        const fragmentContent =
+          typeof fragment.content === "string" ? fragment.content : "";
+
+        if (fragmentType === "THINK") {
+          completionState.thinking += fragmentContent;
+        } else if (fragmentType === "RESPONSE") {
+          completionState.streamReply += fragmentContent;
+        }
+
+        completionState.activeFragmentType = fragmentType;
+      }
+    }
+
+    if (
+      parsed &&
+      typeof parsed === "object" &&
+      parsed.p === "response/fragments/-1/content" &&
+      (parsed.o === "APPEND" || !("o" in parsed)) &&
       typeof parsed.v === "string"
     ) {
-      completionState.reply += parsed.v;
+      if (completionState.activeFragmentType === "THINK") {
+        completionState.thinking += parsed.v;
+      } else {
+        completionState.streamReply += parsed.v;
+      }
       completionState.status = "streaming";
       return;
     }
@@ -467,7 +525,11 @@ export const INJECTED_BRIDGE_SOURCE = `
       completionState.lastPatchPath === "response/fragments/-1/content" &&
       completionState.lastPatchOp === "APPEND"
     ) {
-      completionState.reply += parsed.v;
+      if (completionState.activeFragmentType === "THINK") {
+        completionState.thinking += parsed.v;
+      } else {
+        completionState.streamReply += parsed.v;
+      }
       completionState.status = "streaming";
       return;
     }
@@ -481,6 +543,9 @@ export const INJECTED_BRIDGE_SOURCE = `
       const nextStatus = normalizeCompletionStatus(parsed.v);
       if (nextStatus) {
         completionState.status = nextStatus;
+        if (nextStatus === "finished") {
+          markCompletionTerminal();
+        }
       }
       return;
     }
@@ -501,6 +566,9 @@ export const INJECTED_BRIDGE_SOURCE = `
       const nextStatus = normalizeCompletionStatus(statusPatch?.v);
       if (nextStatus) {
         completionState.status = nextStatus;
+        if (nextStatus === "finished") {
+          markCompletionTerminal();
+        }
       }
     }
   }
@@ -587,8 +655,9 @@ export const INJECTED_BRIDGE_SOURCE = `
               applyCompletionPayload(eventType, dataLines.join("\\n"));
             }
 
-            if (completionState.status === "streaming" && completionState.reply.trim().length > 0) {
+            if (completionState.status === "streaming" && completionState.streamReply.trim().length > 0) {
               completionState.status = "finished";
+              markCompletionTerminal();
             }
           }
         });
@@ -717,6 +786,77 @@ export const INJECTED_BRIDGE_SOURCE = `
     composer.value = nextValue;
   }
 
+  function dispatchPromptSubmission({ prompt, method = "auto" }) {
+    const composer = findComposer();
+    if (!composer) {
+      return { ok: false, error: "AUTOMATION_DESYNC" };
+    }
+
+    composer.focus();
+    setComposerValue(composer, prompt);
+    composer.dispatchEvent(new Event("input", { bubbles: true }));
+
+    const sendButton = findSendButton(composer);
+    const canClickButton = sendButton instanceof HTMLElement;
+    const preferredMethod =
+      method === "auto"
+        ? (canClickButton ? "button" : "keyboard")
+        : method;
+
+    if (preferredMethod === "button" && canClickButton) {
+      sendButton.click();
+      return { ok: true, method: "button" };
+    }
+
+    composer.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        bubbles: true,
+        cancelable: true,
+        key: "Enter",
+        code: "Enter",
+      })
+    );
+
+    return { ok: true, method: "keyboard" };
+  }
+
+  async function waitForSubmissionStart({ baselineState, timeoutMs }) {
+    const startedAt = Date.now();
+    const baselineReply = (baselineState?.latestAssistantPreview || "").trim();
+    const baselineAssistantCount = baselineState?.assistantCount || 0;
+
+    while (Date.now() - startedAt < timeoutMs) {
+      const pageState = window[KEY].getPageState();
+      const nextText = (pageState.latestAssistantPreview || "").trim();
+
+      if (pageState.blockingMessage) {
+        return {
+          ok: false,
+          error: "PAGE_UNAVAILABLE",
+          message: "DeepSeek requires manual verification in the browser tab before chatting",
+        };
+      }
+
+      if (
+        completionState.observed ||
+        completionState.status !== "idle" ||
+        pageState.busy ||
+        pageState.assistantCount > baselineAssistantCount ||
+        (nextText.length > 0 && nextText !== baselineReply)
+      ) {
+        return { ok: true };
+      }
+
+      await sleep(50);
+    }
+
+    return {
+      ok: false,
+      error: "AUTOMATION_DESYNC",
+      message: "Prompt submission did not start a DeepSeek response",
+    };
+  }
+
   function latestAssistantNode() {
     const dsMessages = Array.from(document.querySelectorAll(".ds-message"));
     for (let index = dsMessages.length - 1; index >= 0; index -= 1) {
@@ -756,17 +896,19 @@ export const INJECTED_BRIDGE_SOURCE = `
 
   async function waitForReply(timeoutMs, baselineState) {
     const startedAt = Date.now();
-    const baselineReply = (baselineState?.latestAssistantPreview || "").trim();
-    const baselineAssistantCount = baselineState?.assistantCount || 0;
-    let latestFreshDomText = "";
-    let previousFreshDomText = "";
-    let sawFreshDomReply = false;
-    let stableCount = 0;
-    let lastFreshDomChangeAt = 0;
 
     while (Date.now() - startedAt < timeoutMs) {
       const pageState = window[KEY].getPageState();
-      const streamedReply = completionState.reply.trim();
+      const streamedReply = completionState.streamReply.trim();
+      const streamedTurn =
+        streamedReply.length > 0
+          ? classifyCompletionTurn({
+              reply: streamedReply,
+              thinking: completionState.thinking,
+              rawEvents: completionState.rawEvents,
+            })
+          : null;
+      const terminalObserved = completionState.status === "finished" || completionState.closed;
 
       if (pageState.blockingMessage) {
         return {
@@ -776,69 +918,12 @@ export const INJECTED_BRIDGE_SOURCE = `
         };
       }
 
-      if (completionState.status === "finished" && streamedReply.length > 0) {
+      if (terminalObserved && streamedTurn) {
         return {
           ok: true,
-          turn: classifyCompletionTurn({
-            reply: streamedReply,
-            rawEvents: completionState.rawEvents,
-          }),
+          turn: streamedTurn,
           meta: {
             source: "bridge_stream",
-            completionObserved: completionState.observed,
-          },
-        };
-      }
-
-      if (streamedReply.length > 0 && completionState.closed) {
-        return {
-          ok: true,
-          turn: classifyCompletionTurn({
-            reply: streamedReply,
-            rawEvents: completionState.rawEvents,
-          }),
-          meta: {
-            source: "bridge_stream",
-            completionObserved: completionState.observed,
-          },
-        };
-      }
-
-      const nextText = (pageState.latestAssistantPreview || "").trim();
-      const hasFreshDomReply =
-        pageState.assistantCount > baselineAssistantCount ||
-        (nextText.length > 0 && nextText !== baselineReply);
-
-      if (hasFreshDomReply && nextText.length > 0) {
-        sawFreshDomReply = true;
-        latestFreshDomText = nextText;
-
-        if (nextText !== previousFreshDomText) {
-          previousFreshDomText = nextText;
-          stableCount = 0;
-          lastFreshDomChangeAt = Date.now();
-        } else {
-          stableCount += 1;
-        }
-      } else {
-        stableCount = 0;
-      }
-
-      if (
-        !completionState.observed &&
-        sawFreshDomReply &&
-        !pageState.busy &&
-        stableCount >= 3 &&
-        Date.now() - lastFreshDomChangeAt >= 2_000
-      ) {
-        return {
-          ok: true,
-          turn: classifyCompletionTurn({
-            reply: latestFreshDomText,
-            rawEvents: completionState.rawEvents,
-          }),
-          meta: {
-            source: "bridge_dom_fallback",
             completionObserved: completionState.observed,
           },
         };
@@ -847,12 +932,13 @@ export const INJECTED_BRIDGE_SOURCE = `
       await sleep(250);
     }
 
-    const fallbackReply = completionState.reply.trim() || latestFreshDomText;
-    if (fallbackReply.length > 0) {
+    const streamedReply = completionState.streamReply.trim();
+    if (streamedReply.length > 0) {
       return {
         ok: true,
         turn: classifyCompletionTurn({
-          reply: fallbackReply,
+          reply: streamedReply,
+          thinking: completionState.thinking,
           rawEvents: completionState.rawEvents,
         }),
         meta: {
@@ -878,44 +964,87 @@ export const INJECTED_BRIDGE_SOURCE = `
       const blockingMessage = pageText.includes("One more step before you proceed")
         ? "One more step before you proceed..."
         : null;
-      const streamedReply = completionState.reply.trim();
       const domReply = latestAssistant ? (latestAssistant.textContent || "").trim() || null : null;
       return {
         inputReady: Boolean(composer),
         busy: Boolean(findStopButton()) || completionState.status === "streaming",
-        latestAssistantPreview: streamedReply || domReply,
+        latestAssistantPreview: domReply,
         assistantCount:
-          completionState.observed && (streamedReply.length > 0 || completionState.responseMessageId !== null)
+          completionState.observed &&
+          (completionState.streamReply.trim().length > 0 ||
+            completionState.responseMessageId !== null)
             ? Math.max(assistantMessageCount(), 1)
             : assistantMessageCount(),
         blockingMessage,
       };
     },
-    async submitPrompt({ prompt }) {
-      const composer = findComposer();
-      if (!composer) {
-        return { ok: false, error: "AUTOMATION_DESYNC" };
-      }
-
-      composer.focus();
-      setComposerValue(composer, prompt);
-      composer.dispatchEvent(new Event("input", { bubbles: true }));
-
-      const sendButton = findSendButton(composer);
-      if (sendButton instanceof HTMLElement) {
-        sendButton.click();
-      } else {
-        composer.dispatchEvent(
-          new KeyboardEvent("keydown", {
-            bubbles: true,
-            cancelable: true,
-            key: "Enter",
-            code: "Enter",
-          })
-        );
+    getCompletionState() {
+      const streamReply = completionState.streamReply.trim();
+      return {
+        observed: completionState.observed,
+        status: completionState.status,
+        closed: completionState.closed,
+        terminalAt: completionState.terminalAt || null,
+        turn:
+          streamReply.length > 0
+            ? classifyCompletionTurn({
+                reply: streamReply,
+                thinking: completionState.thinking,
+                rawEvents: completionState.rawEvents,
+              })
+            : null,
+      };
+    },
+    submitPrompt({ prompt }) {
+      const submitted = dispatchPromptSubmission({ prompt });
+      if (!submitted.ok) {
+        return submitted;
       }
 
       return { ok: true };
+    },
+    async startPrompt({ prompt }) {
+      const SUBMISSION_START_TIMEOUT_MS = 1200;
+      const baselineState = window[KEY].getPageState();
+      resetCompletionState();
+
+      const primarySubmission = dispatchPromptSubmission({ prompt, method: "button" });
+      if (!primarySubmission.ok) {
+        return primarySubmission;
+      }
+
+      const primaryStart = await waitForSubmissionStart({
+        baselineState,
+        timeoutMs: SUBMISSION_START_TIMEOUT_MS,
+      });
+      if (primaryStart.ok) {
+        return {
+          ok: true,
+          baselineState,
+        };
+      }
+
+      if (primarySubmission.method === "keyboard") {
+        return primaryStart;
+      }
+
+      const fallbackSubmission = dispatchPromptSubmission({ prompt, method: "keyboard" });
+      if (!fallbackSubmission.ok) {
+        return fallbackSubmission;
+      }
+
+      const fallbackStart = await waitForSubmissionStart({
+        baselineState,
+        timeoutMs: SUBMISSION_START_TIMEOUT_MS,
+      });
+      if (!fallbackStart.ok) {
+        return fallbackStart;
+      }
+
+      return {
+        ok: true,
+        baselineState,
+      };
     },
     async startNewChat() {
       const newChatButton = findNewChatButton();
@@ -932,9 +1061,13 @@ export const INJECTED_BRIDGE_SOURCE = `
       return { ok: true };
     },
     async sendPrompt({ prompt, timeoutMs }) {
-      const baselineState = window[KEY].getPageState();
-      resetCompletionState();
-      const submitted = await window[KEY].submitPrompt({ prompt });
+      const started = await window[KEY].startPrompt({ prompt });
+      if (!started.ok) {
+        return started;
+      }
+
+      const baselineState = started.baselineState;
+      const submitted = started;
       if (!submitted.ok) {
         return submitted;
       }

@@ -906,7 +906,7 @@ git commit -m "feat: refine provider lifecycle and context mapping"
 ```json
 // package.json
 {
-  "name": "deepseek-web-bridge",
+  "name": "web-providers",
   "private": true,
   "type": "module",
   "scripts": {
@@ -943,7 +943,7 @@ Expected: `OK`
 - [ ] **Step 4: Capture the manual `pi` verification checklist**
 
 ```md
-1. Start `pi` from `/Users/yc/ai/webai-no-fee`
+1. Start `pi` from `/Users/yc/ai/web-providers`
 2. Run `/reload`
 3. Confirm provider `deepseek-web` is available
 4. Select model `deepseek-web-chat`

@@ -1,17 +1,19 @@
 import type { FastifyInstance } from "fastify";
 import type {
+  ProviderId,
   ProviderChatRequest,
   ProviderChatResponse,
 } from "../../shared/contracts";
 import type { AppContext } from "../app";
 import { HelperError } from "../errors";
-import type { ProviderRequestDebugRecord } from "../types";
+import type { BoundSession, ProviderRequestDebugRecord } from "../types";
 
 function buildProviderPrompt(input: {
   messages: ProviderChatRequest["messages"];
   sessionInit?: ProviderChatRequest["sessionInit"];
   providerInitialized: boolean;
   providerInitFingerprint: string | null;
+  providerSessionKey: string | null;
 }) {
   const currentUser = [...input.messages]
     .reverse()
@@ -19,15 +21,20 @@ function buildProviderPrompt(input: {
 
   const userPrompt = currentUser?.content ?? "";
   const nextFingerprint = input.sessionInit?.fingerprint ?? null;
+  const nextSessionKey = input.sessionInit?.sessionKey ?? null;
   const shouldStartFresh =
     nextFingerprint !== null &&
-    (!input.providerInitialized || input.providerInitFingerprint !== nextFingerprint);
+    nextSessionKey !== null &&
+    (!input.providerInitialized ||
+      input.providerInitFingerprint !== nextFingerprint ||
+      input.providerSessionKey !== nextSessionKey);
 
   if (!shouldStartFresh) {
     return {
       prompt: userPrompt,
       shouldStartFresh: false,
       nextFingerprint: input.providerInitFingerprint,
+      nextSessionKey: input.providerSessionKey,
     };
   }
 
@@ -37,18 +44,114 @@ function buildProviderPrompt(input: {
     prompt: [initPrompt, userPrompt].filter((part) => part.length > 0).join("\n\n"),
     shouldStartFresh: true,
     nextFingerprint,
+    nextSessionKey,
+  };
+}
+
+function createBaseDebugRecord(
+  session: BoundSession,
+  body: ProviderChatRequest,
+  prompt: string,
+) {
+  const startedAt = new Date().toISOString();
+  const requestId = `req-${Date.now()}`;
+  const normalizedMessages = body.messages.map((message) => ({
+    role: message.role,
+    content: message.content,
+  }));
+  const rawRequest: ProviderChatRequest = {
+    provider: body.provider,
+    model: body.model,
+    messages: normalizedMessages,
+    ...(body.sessionInit
+      ? {
+          sessionInit: {
+            fingerprint: body.sessionInit.fingerprint,
+            sessionKey: body.sessionInit.sessionKey,
+            prompt: body.sessionInit.prompt,
+          },
+        }
+      : {}),
+    ...(typeof body.temperature === "number"
+      ? { temperature: body.temperature }
+      : {}),
+    ...(typeof body.maxOutputTokens === "number"
+      ? { maxOutputTokens: body.maxOutputTokens }
+      : {}),
+    ...(typeof body.abortKey === "string"
+      ? { abortKey: body.abortKey }
+      : {}),
+  };
+
+  return {
+    record: {
+      provider: body.provider,
+      requestId,
+      rawRequest,
+      normalizedMessages,
+      prompt,
+      session: {
+        tabId: session.tabId,
+        url: session.url,
+      },
+      startedAt,
+      completedAt: null,
+      status: "running",
+      response: null,
+      automation: null,
+      error: null,
+    } satisfies ProviderRequestDebugRecord,
+    startedAt,
+    requestId,
+  };
+}
+
+function toProviderResponse(result: {
+  mode: "text" | "native_tool_call" | "json_fallback";
+  thinkingText?: string;
+  outputText?: string;
+  modelLabel?: string;
+  toolCall?: {
+    name: string;
+    argumentsJson: string;
+  };
+}): ProviderChatResponse {
+  if (result.mode === "text") {
+    return {
+      mode: "text",
+      ...(typeof result.thinkingText === "string"
+        ? { thinkingText: result.thinkingText }
+        : {}),
+      outputText: result.outputText ?? "",
+      finishReason: "stop",
+      modelLabel: result.modelLabel,
+    };
+  }
+
+  return {
+    mode: result.mode,
+    toolCall: result.toolCall as { name: string; argumentsJson: string },
+    finishReason: "stop",
+    modelLabel: result.modelLabel,
+    ...(typeof result.thinkingText === "string"
+      ? { thinkingText: result.thinkingText }
+      : {}),
+    ...(typeof result.outputText === "string"
+      ? { outputText: result.outputText }
+      : {}),
   };
 }
 
 export function registerProviderChatRoute(app: FastifyInstance, ctx: AppContext) {
   app.post("/v1/provider/chat", async (request, reply) => {
     const body = request.body as ProviderChatRequest;
-    const session = ctx.state.getBoundSession();
+    const provider = (body.provider ?? "deepseek-web") as ProviderId;
+    const session = ctx.state.getBoundSession(provider);
 
     if (!session) {
       return reply.code(409).send({
         error: "NOT_BOUND",
-        message: "Bind a DeepSeek tab before provider chat",
+        message: `Bind a ${provider} tab before provider chat`,
       });
     }
 
@@ -64,69 +167,33 @@ export function registerProviderChatRoute(app: FastifyInstance, ctx: AppContext)
       sessionInit: body.sessionInit,
       providerInitialized: session.providerInitialized,
       providerInitFingerprint: session.providerInitFingerprint,
+      providerSessionKey: session.providerSessionKey,
     });
     const prompt = promptInput.prompt;
-    const startedAt = new Date().toISOString();
-    const requestId = `req-${Date.now()}`;
-    const normalizedMessages = body.messages.map((message) => ({
-      role: message.role,
-      content: message.content,
-    }));
-    const rawRequest: ProviderChatRequest = {
-      model: body.model,
-      messages: normalizedMessages,
-      ...(body.sessionInit
-        ? {
-            sessionInit: {
-              fingerprint: body.sessionInit.fingerprint,
-              prompt: body.sessionInit.prompt,
-            },
-          }
-        : {}),
-      ...(typeof body.temperature === "number"
-        ? { temperature: body.temperature }
-        : {}),
-      ...(typeof body.maxOutputTokens === "number"
-        ? { maxOutputTokens: body.maxOutputTokens }
-        : {}),
-      ...(typeof body.abortKey === "string"
-        ? { abortKey: body.abortKey }
-        : {}),
-    };
-    const baseDebugRecord: ProviderRequestDebugRecord = {
-      requestId,
-      rawRequest,
-      normalizedMessages,
-      prompt,
-      session: {
-        tabId: session.tabId,
-        url: session.url,
-      },
-      startedAt,
-      completedAt: null,
-      status: "running",
-      response: null,
-      automation: null,
-      error: null,
-    };
-    ctx.state.setLastProviderRequest(baseDebugRecord);
-
+    const debugSeed = createBaseDebugRecord(session, { ...body, provider }, prompt);
+    const baseDebugRecord = debugSeed.record;
+    ctx.state.setLastProviderRequest(provider, baseDebugRecord);
     ctx.state.setActiveRequest({
-      requestId,
+      requestId: debugSeed.requestId,
       prompt,
       accumulatedReply: "",
-      startedAt,
-      lastEventAt: startedAt,
+      startedAt: debugSeed.startedAt,
+      lastEventAt: debugSeed.startedAt,
       status: "running",
       finalErrorCode: null,
     });
 
     try {
       if (promptInput.shouldStartFresh) {
-        await ctx.browserClient.startNewChat(session.tabId);
+        await ctx.browserClient.startNewChat(
+          ctx.browserClient.bindProviderTab
+            ? { provider, tabId: session.tabId }
+            : session.tabId,
+        );
       }
 
       const result = await ctx.browserClient.sendChatPrompt({
+        provider,
         tabId: session.tabId,
         prompt,
         timeoutMs: 30_000,
@@ -135,24 +202,8 @@ export function registerProviderChatRoute(app: FastifyInstance, ctx: AppContext)
 
       ctx.state.setActiveRequest(null);
 
-      const response: ProviderChatResponse =
-        result.mode === "text"
-          ? {
-              mode: "text",
-              outputText: result.outputText,
-              finishReason: "stop",
-              modelLabel: result.modelLabel,
-            }
-          : {
-              mode: result.mode,
-              toolCall: result.toolCall,
-              finishReason: "stop",
-              modelLabel: result.modelLabel,
-              ...(typeof result.outputText === "string"
-                ? { outputText: result.outputText }
-                : {}),
-            };
-      ctx.state.setLastProviderRequest({
+      const response = toProviderResponse(result);
+      ctx.state.setLastProviderRequest(provider, {
         ...baseDebugRecord,
         completedAt: new Date().toISOString(),
         status: "completed",
@@ -160,14 +211,20 @@ export function registerProviderChatRoute(app: FastifyInstance, ctx: AppContext)
         automation: result.debug ?? null,
       });
       if (promptInput.shouldStartFresh || body.sessionInit?.fingerprint) {
-        ctx.state.setBoundSession({
+        const nextConversationId =
+          provider === "deepseek-web"
+            ? `conv-${session.tabId}`
+            : `conv-${provider}-${session.tabId}-${Date.now()}`;
+        ctx.state.setBoundSession(provider, {
           ...session,
           conversationId: promptInput.shouldStartFresh
-            ? `conv-${session.tabId}-${Date.now()}`
+            ? nextConversationId
             : session.conversationId,
           providerInitialized: true,
           providerInitFingerprint:
             body.sessionInit?.fingerprint ?? session.providerInitFingerprint,
+          providerSessionKey:
+            body.sessionInit?.sessionKey ?? session.providerSessionKey,
         });
       }
 
@@ -184,11 +241,11 @@ export function registerProviderChatRoute(app: FastifyInstance, ctx: AppContext)
               "AUTOMATION_DESYNC",
               `Unexpected automation failure: ${rootCauseMessage}`,
             );
-      ctx.state.setLastProviderRequest({
+      ctx.state.setLastProviderRequest(provider, {
         ...baseDebugRecord,
         completedAt: new Date().toISOString(),
         status: "failed",
-        automation: null,
+        automation: helperError.automationDebug,
         error: {
           code: helperError.code,
           message: helperError.message,

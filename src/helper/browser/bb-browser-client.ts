@@ -1,8 +1,22 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { HelperError } from "../errors";
-import type { BrowserAutomationClient, BindResult, SendChatResult } from "./types";
+import type {
+  BrowserAutomationClient,
+  BindResult,
+  PageStateSummary,
+  SendChatAutomationDebug,
+  SendChatResult,
+} from "./types";
 import { assertDeepSeekUrl, INJECTED_BRIDGE_SOURCE } from "./deepseek-page-bridge";
+import { createProviderRegistry } from "../providers/registry";
+import {
+  INJECTED_QWEN_BRIDGE_SOURCE,
+  QWEN_PAGE_STATE_SCRIPT,
+  QWEN_PROGRESS_SCRIPT,
+  QWEN_RESET_COMPLETION_SCRIPT,
+  QWEN_START_NEW_CHAT_SCRIPT,
+} from "../providers/qwen/page-bridge";
 
 const execFileAsync = promisify(execFile);
 
@@ -27,7 +41,9 @@ interface BbBrowserTabListEnvelope {
 export interface BbBrowserTransport {
   getConnectionStatus(): Promise<"connected" | "disconnected">;
   findDeepSeekTab(): Promise<{ id: string; url: string }>;
+  findQwenTab?(): Promise<{ id: string; url: string }>;
   openDeepSeek(url: string): Promise<void>;
+  openQwen?(url: string): Promise<void>;
   evaluate<T>(tabId: string, script: string): Promise<T>;
   submitPrompt(tabId: string, prompt: string): Promise<void>;
 }
@@ -149,6 +165,17 @@ export function createBbBrowserTransport(): BbBrowserTransport {
       return tab;
     },
 
+    async findQwenTab() {
+      const list = await listTabs();
+      const tab = list.find((entry) => entry.url.includes("chat.qwen.ai"));
+
+      if (!tab) {
+        throw new HelperError("NOT_BOUND", "No logged-in Qwen tab is available");
+      }
+
+      return tab;
+    },
+
     async evaluate<T>(tabId: string, script: string): Promise<T> {
       await selectTabById(tabId);
       const raw = await runBbBrowserJson(["eval", script]);
@@ -188,70 +215,132 @@ export function createBbBrowserTransport(): BbBrowserTransport {
     async openDeepSeek(url: string) {
       await runBbBrowserJson(["open", url]);
     },
+
+    async openQwen(url: string) {
+      await runBbBrowserJson(["open", url]);
+    },
   };
 }
 
+function isBrowserAutomationDebugEnabled() {
+  return process.env.PI_DEEPSEEK_DEBUG === "1";
+}
+
+function previewDebugText(text: string | null | undefined, maxLength = 120) {
+  if (typeof text !== "string") {
+    return text ?? null;
+  }
+
+  if (text.length <= maxLength) {
+    return text;
+  }
+
+  return `${text.slice(0, maxLength)}...`;
+}
+
+function pushAutomationTrace(
+  trace: NonNullable<SendChatAutomationDebug["trace"]> | null,
+  entry: NonNullable<SendChatAutomationDebug["trace"]>[number],
+) {
+  if (!trace) {
+    return;
+  }
+
+  trace.push(entry);
+  if (trace.length > 12) {
+    trace.splice(0, trace.length - 12);
+  }
+}
+
+function buildAutomationDebug(input: {
+  source: SendChatAutomationDebug["source"];
+  freshSession: boolean;
+  completionObserved?: boolean;
+  baselineReply?: string;
+  latestReply?: string;
+  finalReply?: string;
+  startMode?: SendChatAutomationDebug["startMode"];
+  trace?: SendChatAutomationDebug["trace"] | null;
+}): SendChatAutomationDebug {
+  const debugEnabled = isBrowserAutomationDebugEnabled();
+  return {
+    source: input.source,
+    freshSession: input.freshSession,
+    ...(debugEnabled && typeof input.completionObserved === "boolean"
+      ? { completionObserved: input.completionObserved }
+      : {}),
+    ...(typeof input.baselineReply === "string" ? { baselineReply: input.baselineReply } : {}),
+    ...(typeof input.latestReply === "string" ? { latestReply: input.latestReply } : {}),
+    ...(typeof input.finalReply === "string" ? { finalReply: input.finalReply } : {}),
+    ...(debugEnabled && input.startMode
+      ? { startMode: input.startMode }
+      : {}),
+    ...(input.trace && input.trace.length > 0
+      ? { trace: input.trace }
+      : {}),
+  };
+}
+
+function looksLikeIncompleteStructuredText(text: string | null | undefined) {
+  if (typeof text !== "string") {
+    return false;
+  }
+
+  const trimmed = text.trim();
+  if (!trimmed.startsWith("{")) {
+    return false;
+  }
+
+  try {
+    JSON.parse(trimmed);
+    return false;
+  } catch {
+    return true;
+  }
+}
+
 export class BbBrowserClient implements BrowserAutomationClient {
-  constructor(private readonly transport: BbBrowserTransport) {}
+  private readonly providerRegistry: ReturnType<typeof createProviderRegistry>;
+
+  constructor(private readonly transport: BbBrowserTransport) {
+    this.providerRegistry = createProviderRegistry(transport);
+  }
 
   async getConnectionStatus() {
     return this.transport.getConnectionStatus();
   }
 
   async bindDeepSeekTab(): Promise<BindResult> {
-    let tab: { id: string; url: string };
+    return this.providerRegistry["deepseek-web"].bindTab();
+  }
 
-    try {
-      tab = await this.transport.findDeepSeekTab();
-    } catch (error) {
-      if (error instanceof HelperError && error.code === "NOT_BOUND") {
-        await this.transport.openDeepSeek("https://chat.deepseek.com");
-        throw new HelperError(
-          "NOT_BOUND",
-          "Opened DeepSeek in bb-browser. Finish login in that page and retry.",
-        );
-      }
-
-      if (
-        error instanceof Error &&
-        error.message.toLowerCase().includes("no page target found")
-      ) {
-        await this.transport.openDeepSeek("https://chat.deepseek.com");
-        throw new HelperError(
-          "NOT_BOUND",
-          "Opened DeepSeek in bb-browser. Finish login in that page and retry.",
-        );
-      }
-
-      throw error;
-    }
-
-    const normalizedUrl = assertDeepSeekUrl(tab.url);
-
-    await this.transport.evaluate(tab.id, INJECTED_BRIDGE_SOURCE);
-
-    return {
-      tabId: tab.id,
-      url: normalizedUrl,
-      loginState: "logged_in",
-      bridgeInjected: true,
-      pageState: {
-        inputReady: true,
-        busy: false,
-        latestAssistantPreview: null,
-        assistantCount: 0,
-      },
-    };
+  async bindProviderTab(input: { provider: "deepseek-web" | "qwen-web" }): Promise<BindResult> {
+    return this.providerRegistry[input.provider].bindTab();
   }
 
   async resetPageBridge(tabId: string): Promise<void> {
     await this.transport.evaluate<boolean>(
       tabId,
-      "(() => { try { delete window.__piDeepSeekBridge; } catch {} window.__piDeepSeekBridge = undefined; return true; })()",
+      "(() => { try { delete window.__piDeepSeekBridge; } catch {} try { delete window.__piQwenBridge; } catch {} window.__piDeepSeekBridge = undefined; window.__piQwenBridge = undefined; return true; })()",
     );
   }
 
-  async startNewChat(tabId: string): Promise<void> {
+  async startNewChat(
+    input:
+      | string
+      | {
+          provider: "deepseek-web" | "qwen-web";
+          tabId: string;
+        },
+  ): Promise<void> {
+    if (typeof input !== "string" && input.provider === "qwen-web") {
+      await this.transport.evaluate(input.tabId, QWEN_START_NEW_CHAT_SCRIPT);
+      await new Promise((resolve) => setTimeout(resolve, 1_000));
+      await this.transport.evaluate(input.tabId, INJECTED_QWEN_BRIDGE_SOURCE);
+      return;
+    }
+
+    const tabId = typeof input === "string" ? input : input.tabId;
     try {
       await this.transport.evaluate(
         tabId,
@@ -274,169 +363,320 @@ export class BbBrowserClient implements BrowserAutomationClient {
   }
 
   async sendChatPrompt(input: {
+    provider?: "deepseek-web" | "qwen-web";
     tabId: string;
     prompt: string;
     timeoutMs: number;
     freshSession?: boolean;
   }): Promise<SendChatResult> {
+    if (input.provider === "qwen-web") {
+      return this.sendQwenChatPrompt(input);
+    }
+
+    const STREAM_TEXT_DOM_GRACE_MS = 750;
     const promptLiteral = JSON.stringify(input.prompt);
-    const bridgeSendScript = `${INJECTED_BRIDGE_SOURCE}; window.__piDeepSeekBridge.sendPrompt({ prompt: ${promptLiteral}, timeoutMs: ${input.timeoutMs} })`;
+    const startPromptScript =
+      `${INJECTED_BRIDGE_SOURCE}; window.__piDeepSeekBridge.startPrompt({ prompt: ${promptLiteral} })`;
     const pageStateScript = `${INJECTED_BRIDGE_SOURCE}; window.__piDeepSeekBridge.getPageState()`;
+    const progressScript =
+      `${INJECTED_BRIDGE_SOURCE}; ({ pageState: window.__piDeepSeekBridge.getPageState(), completionState: window.__piDeepSeekBridge.getCompletionState() })`;
+    const trace: NonNullable<SendChatAutomationDebug["trace"]> = [];
+    let baselineReply: string | undefined;
+    let latestReply: string | undefined;
+    let finalReply: string | undefined;
+    let completionObserved = false;
+    let startMode: SendChatAutomationDebug["startMode"] | undefined;
+    let shouldFallbackToTransportSubmit = false;
+    const buildFailure = (
+      code: HelperError["code"],
+      message: string,
+    ) =>
+      new HelperError(
+        code,
+        message,
+        buildAutomationDebug({
+          source: "client_error",
+          freshSession: input.freshSession === true,
+          baselineReply,
+          latestReply,
+          finalReply,
+          completionObserved,
+          startMode,
+          trace,
+        }),
+      );
 
     try {
-      const bridgeResult = await this.transport.evaluate<{
+      const startResult = await this.transport.evaluate<{
         ok?: boolean;
-        turn?: SendChatResult;
-        meta?: {
-          source?: "bridge_stream" | "bridge_dom_fallback" | "bridge_timeout_recovery";
-          completionObserved?: boolean;
+        baselineState?: {
+          inputReady?: boolean;
+          busy?: boolean;
+          latestAssistantPreview?: string | null;
+          assistantCount?: number;
+          blockingMessage?: string | null;
         };
         error?: string;
         message?: string;
-        inputReady?: boolean;
-        busy?: boolean;
-        latestAssistantPreview?: string | null;
-        assistantCount?: number;
-        blockingMessage?: string | null;
-      }>(input.tabId, bridgeSendScript);
+      }>(input.tabId, startPromptScript);
 
-      if (bridgeResult && typeof bridgeResult === "object" && "ok" in bridgeResult) {
-        if (bridgeResult.ok && bridgeResult.turn && typeof bridgeResult.turn === "object") {
-          return {
-            ...bridgeResult.turn,
-            debug: {
-              source: bridgeResult.meta?.source ?? "bridge_stream",
-              freshSession: input.freshSession === true,
-              completionObserved: bridgeResult.meta?.completionObserved,
-            },
-            modelLabel: "DeepSeek Web",
-          };
-        }
-
-        if (bridgeResult.error === "PAGE_UNAVAILABLE") {
-          throw new HelperError(
+      if (startResult && typeof startResult === "object" && "ok" in startResult) {
+        if (startResult.error === "PAGE_UNAVAILABLE") {
+          throw buildFailure(
             "PAGE_UNAVAILABLE",
-            bridgeResult.message ??
+            startResult.message ??
               "DeepSeek requires manual verification in the browser tab before chatting",
           );
         }
 
-        if (bridgeResult.error === "TIMEOUT") {
-          throw new HelperError(
+        if (startResult.error === "TIMEOUT") {
+          throw buildFailure(
             "TIMEOUT",
-            bridgeResult.message ?? "The page did not finish streaming in time",
+            startResult.message ?? "The page did not finish streaming in time",
           );
         }
 
-        if (bridgeResult.error) {
-          throw new HelperError(
-            "AUTOMATION_DESYNC",
-            bridgeResult.message ?? bridgeResult.error,
-          );
+        if (startResult.error) {
+          shouldFallbackToTransportSubmit = startResult.error === "AUTOMATION_DESYNC";
+          if (!shouldFallbackToTransportSubmit) {
+            throw buildFailure(
+              "AUTOMATION_DESYNC",
+              startResult.message ?? startResult.error,
+            );
+          }
         }
       }
 
-      const baselineState =
-        bridgeResult &&
-        typeof bridgeResult === "object" &&
-        "latestAssistantPreview" in bridgeResult &&
-        "assistantCount" in bridgeResult
-          ? {
-              inputReady: bridgeResult.inputReady ?? true,
-              busy: bridgeResult.busy ?? false,
-              latestAssistantPreview: bridgeResult.latestAssistantPreview ?? null,
-              assistantCount: bridgeResult.assistantCount ?? 0,
-              blockingMessage: bridgeResult.blockingMessage ?? null,
-            }
-          : await this.transport.evaluate<{
-        inputReady: boolean;
-        busy: boolean;
-        latestAssistantPreview: string | null;
-        assistantCount: number;
-        blockingMessage?: string | null;
-      }>(input.tabId, pageStateScript);
+      const baselineState = startResult && typeof startResult === "object" && startResult.baselineState
+        ? {
+            inputReady: startResult.baselineState.inputReady ?? true,
+            busy: startResult.baselineState.busy ?? false,
+            latestAssistantPreview: startResult.baselineState.latestAssistantPreview ?? null,
+            assistantCount: startResult.baselineState.assistantCount ?? 0,
+            blockingMessage: startResult.baselineState.blockingMessage ?? null,
+          }
+        : await this.transport.evaluate<{
+            inputReady: boolean;
+            busy: boolean;
+            latestAssistantPreview: string | null;
+            assistantCount: number;
+            blockingMessage?: string | null;
+          }>(input.tabId, pageStateScript);
 
       if (baselineState.blockingMessage) {
-        throw new HelperError(
+        throw buildFailure(
           "PAGE_UNAVAILABLE",
           "DeepSeek requires manual verification in the browser tab before chatting",
         );
       }
 
-      await this.transport.submitPrompt(input.tabId, input.prompt);
+      startMode =
+        startResult && typeof startResult === "object" && startResult.ok && !shouldFallbackToTransportSubmit
+          ? "bridge_start"
+          : "transport_submit";
 
-      const baselineReply = (baselineState.latestAssistantPreview ?? "").trim();
+      pushAutomationTrace(trace, {
+        phase: "start_prompt",
+        note:
+          shouldFallbackToTransportSubmit && startResult && typeof startResult === "object"
+            ? `bridge_start_failed:${startResult.message ?? startResult.error ?? "AUTOMATION_DESYNC"}`
+            : startMode,
+        pageBusy: baselineState.busy,
+        pageReplyPreview: previewDebugText(baselineState.latestAssistantPreview),
+        assistantCount: baselineState.assistantCount,
+      });
+
+      if (startMode === "transport_submit") {
+        await this.transport.submitPrompt(input.tabId, input.prompt);
+      }
+
+      baselineReply = (baselineState.latestAssistantPreview ?? "").trim();
       const baselineAssistantCount = baselineState.assistantCount;
       const startedAt = Date.now();
       const idleTimeoutMs = input.timeoutMs;
       const hardTimeoutMs = Math.max(input.timeoutMs * 4, 120_000);
       let lastProgressAt = startedAt;
-      let latestReply = "";
       let previousReply = baselineReply;
       let previousAssistantCount = baselineAssistantCount;
-      let sawFreshReply = false;
-      let stableCount = 0;
-      let lastFreshReplyChangeAt = 0;
 
       while (Date.now() - startedAt < hardTimeoutMs) {
-        const state = await this.transport.evaluate<{
-          inputReady: boolean;
-          busy: boolean;
-          latestAssistantPreview: string | null;
-          assistantCount: number;
-          blockingMessage?: string | null;
-        }>(input.tabId, pageStateScript);
+        const progress = await this.transport.evaluate<{
+          pageState: {
+            inputReady: boolean;
+            busy: boolean;
+            latestAssistantPreview: string | null;
+            assistantCount: number;
+            blockingMessage?: string | null;
+          };
+          completionState: {
+            observed?: boolean;
+            status?: string;
+            closed?: boolean;
+            terminalAt?: number | null;
+            turn?: SendChatResult | null;
+          };
+        }>(input.tabId, progressScript);
+        const state =
+          progress &&
+          typeof progress === "object" &&
+          "pageState" in progress &&
+          progress.pageState
+            ? progress.pageState
+            : progress &&
+                typeof progress === "object" &&
+                "inputReady" in progress &&
+                "busy" in progress &&
+                "latestAssistantPreview" in progress &&
+                "assistantCount" in progress
+              ? {
+                  inputReady: Boolean(progress.inputReady),
+                  busy: Boolean(progress.busy),
+                  latestAssistantPreview:
+                    typeof progress.latestAssistantPreview === "string" ||
+                    progress.latestAssistantPreview === null
+                      ? progress.latestAssistantPreview
+                      : null,
+                  assistantCount:
+                    typeof progress.assistantCount === "number" ? progress.assistantCount : 0,
+                  blockingMessage:
+                    "blockingMessage" in progress &&
+                    (typeof progress.blockingMessage === "string" ||
+                      progress.blockingMessage === null)
+                      ? progress.blockingMessage
+                      : null,
+                }
+              : await this.transport.evaluate<{
+                  inputReady: boolean;
+                  busy: boolean;
+                  latestAssistantPreview: string | null;
+                  assistantCount: number;
+                  blockingMessage?: string | null;
+                }>(input.tabId, pageStateScript);
+        const completionState =
+          progress &&
+          typeof progress === "object" &&
+          "completionState" in progress
+            ? progress.completionState
+            : null;
+        completionObserved = completionObserved || completionState?.observed === true;
+
+        pushAutomationTrace(trace, {
+          phase: "poll",
+          pageBusy: state.busy,
+          pageReplyPreview: previewDebugText(state.latestAssistantPreview),
+          assistantCount: state.assistantCount,
+          completionStatus:
+            completionState && typeof completionState.status === "string"
+              ? completionState.status
+              : null,
+          completionClosed:
+            completionState && typeof completionState.closed === "boolean"
+              ? completionState.closed
+              : false,
+          completionObserved:
+            completionState && typeof completionState.observed === "boolean"
+              ? completionState.observed
+              : false,
+          completionTurnMode:
+            completionState?.turn && typeof completionState.turn.mode === "string"
+              ? completionState.turn.mode
+              : null,
+          completionTurnPreview:
+            completionState?.turn?.mode === "text"
+              ? previewDebugText(completionState.turn.outputText)
+              : completionState?.turn?.outputText
+                ? previewDebugText(completionState.turn.outputText)
+                : null,
+        });
 
         if (state.blockingMessage) {
-          throw new HelperError(
+          throw buildFailure(
             "PAGE_UNAVAILABLE",
             "DeepSeek requires manual verification in the browser tab before chatting",
           );
+        }
+
+        const streamedTurn = completionState?.turn;
+        const terminalObserved =
+          completionState?.status === "finished" || completionState?.closed === true;
+
+        if (
+          terminalObserved &&
+          streamedTurn &&
+          streamedTurn.mode !== "text"
+        ) {
+          pushAutomationTrace(trace, {
+            phase: "bridge_stream_tool",
+            completionStatus:
+              completionState && typeof completionState.status === "string"
+                ? completionState.status
+                : null,
+            completionClosed:
+              completionState && typeof completionState.closed === "boolean"
+                ? completionState.closed
+                : false,
+            completionObserved,
+            completionTurnMode: streamedTurn.mode,
+            completionTurnPreview: previewDebugText(streamedTurn.outputText),
+          });
+          return {
+            ...streamedTurn,
+            debug: buildAutomationDebug({
+              source: "bridge_stream",
+              freshSession: input.freshSession === true,
+              completionObserved,
+              startMode,
+              trace,
+            }),
+            modelLabel: "DeepSeek Web",
+          };
         }
 
         const nextReply = (state.latestAssistantPreview ?? "").trim();
         const assistantCountIncreased = state.assistantCount > previousAssistantCount;
         const replyChanged = nextReply !== previousReply;
         const hasProgress = assistantCountIncreased || replyChanged || state.busy;
-        const hasFreshReply =
-          state.assistantCount > baselineAssistantCount ||
-          (nextReply.length > 0 && nextReply !== baselineReply);
-
         if (hasProgress) {
           lastProgressAt = Date.now();
           previousAssistantCount = state.assistantCount;
           previousReply = nextReply;
         }
 
-        if (hasFreshReply) {
-          sawFreshReply = true;
-          if (nextReply.length > 0) {
-            latestReply = nextReply;
-          }
-
-          if (replyChanged) {
-            stableCount = 0;
-            lastFreshReplyChangeAt = Date.now();
-          } else {
-            stableCount += 1;
-          }
-        }
-
         if (
-          sawFreshReply &&
-          !state.busy &&
-          stableCount >= 2 &&
-          (!input.freshSession || Date.now() - lastFreshReplyChangeAt >= 2_000)
+          terminalObserved &&
+          streamedTurn?.mode === "text" &&
+          typeof streamedTurn.outputText === "string"
         ) {
+          pushAutomationTrace(trace, {
+            phase: "bridge_stream_text",
+            pageBusy: state.busy,
+            pageReplyPreview: previewDebugText(state.latestAssistantPreview),
+            assistantCount: state.assistantCount,
+            completionStatus:
+              completionState && typeof completionState.status === "string"
+                ? completionState.status
+                : null,
+            completionClosed:
+              completionState && typeof completionState.closed === "boolean"
+                ? completionState.closed
+                : false,
+            completionObserved,
+            completionTurnMode: streamedTurn.mode,
+            completionTurnPreview: previewDebugText(streamedTurn.outputText),
+          });
           return {
             mode: "text",
-            outputText: latestReply || nextReply,
-            debug: {
-              source: "client_polling",
+            ...(typeof streamedTurn.thinkingText === "string"
+              ? { thinkingText: streamedTurn.thinkingText }
+              : {}),
+            outputText: streamedTurn.outputText,
+            debug: buildAutomationDebug({
+              source: "bridge_stream",
               freshSession: input.freshSession === true,
-              baselineReply,
-              latestReply: latestReply || nextReply,
-            },
+              completionObserved,
+              startMode,
+              trace,
+            }),
             modelLabel: "DeepSeek Web",
           };
         }
@@ -458,33 +698,13 @@ export class BbBrowserClient implements BrowserAutomationClient {
       }>(input.tabId, pageStateScript);
 
       if (finalState.blockingMessage) {
-        throw new HelperError(
+        throw buildFailure(
           "PAGE_UNAVAILABLE",
           "DeepSeek requires manual verification in the browser tab before chatting",
         );
       }
 
-      const finalReply = (finalState.latestAssistantPreview ?? "").trim();
-      const hasRecoveredReply =
-        finalState.assistantCount > baselineAssistantCount ||
-        (finalReply.length > 0 && finalReply !== baselineReply);
-
-      if (hasRecoveredReply) {
-        return {
-          mode: "text",
-          outputText: finalReply || latestReply,
-          debug: {
-            source: "client_recovery",
-            freshSession: input.freshSession === true,
-            baselineReply,
-            latestReply,
-            finalReply: finalReply || latestReply,
-          },
-          modelLabel: "DeepSeek Web",
-        };
-      }
-
-      throw new HelperError("TIMEOUT", "The page did not finish streaming in time");
+      throw buildFailure("TIMEOUT", "The page did not finish streaming in time");
     } catch (error) {
       if (error instanceof HelperError) {
         throw error;
@@ -492,10 +712,217 @@ export class BbBrowserClient implements BrowserAutomationClient {
 
       const message = error instanceof Error ? error.message : String(error);
       if (message.includes("请求超时")) {
-        throw new HelperError("TIMEOUT", "The page did not finish streaming in time");
+        throw buildFailure("TIMEOUT", "The page did not finish streaming in time");
       }
 
       throw error;
     }
+  }
+
+  private async sendQwenChatPrompt(input: {
+    tabId: string;
+    prompt: string;
+    timeoutMs: number;
+    freshSession?: boolean;
+  }): Promise<SendChatResult> {
+    let baselineReply = "";
+    let latestReply = "";
+    let finalReply = "";
+    let completionObserved = false;
+    const trace = isBrowserAutomationDebugEnabled() ? [] : null;
+
+    const buildFailure = (
+      code: HelperError["code"],
+      message: string,
+    ) =>
+      new HelperError(
+        code,
+        message,
+        buildAutomationDebug({
+          source: "bridge_stream",
+          freshSession: input.freshSession === true,
+          baselineReply,
+          latestReply,
+          finalReply,
+          completionObserved,
+          startMode: "transport_submit",
+          trace,
+        }),
+      );
+
+    await this.transport.evaluate(input.tabId, INJECTED_QWEN_BRIDGE_SOURCE);
+    const baselineState = await this.transport.evaluate<PageStateSummary>(
+      input.tabId,
+      QWEN_PAGE_STATE_SCRIPT,
+    );
+
+    if (!baselineState.inputReady) {
+      throw buildFailure(
+        "PAGE_UNAVAILABLE",
+        "Qwen chat composer is not ready",
+      );
+    }
+
+    baselineReply = (baselineState.latestAssistantPreview ?? "").trim();
+    await this.transport.evaluate(input.tabId, QWEN_RESET_COMPLETION_SCRIPT);
+    await this.transport.submitPrompt(input.tabId, input.prompt);
+
+    const startedAt = Date.now();
+    const idleTimeoutMs = input.timeoutMs;
+    const hardTimeoutMs = Math.max(input.timeoutMs * 4, 120_000);
+    let lastProgressAt = startedAt;
+    let previousStatus: string | null = null;
+    let previousClosed: boolean | null = null;
+    let previousTurnPreview = "";
+
+    while (Date.now() - startedAt < hardTimeoutMs) {
+      const progress = await this.transport.evaluate<{
+        pageState: PageStateSummary;
+        completionState: {
+          observed?: boolean;
+          status?: string;
+          closed?: boolean;
+          bodyPreview?: string | null;
+          parserSummary?: string | null;
+          turn?: {
+            mode: "text";
+            outputText: string;
+            thinkingText?: string;
+          } | null;
+        };
+      }>(input.tabId, QWEN_PROGRESS_SCRIPT);
+
+      completionObserved =
+        completionObserved || progress.completionState?.observed === true;
+      latestReply = (progress.pageState.latestAssistantPreview ?? "").trim();
+      pushAutomationTrace(trace, {
+        phase: "qwen_poll",
+        pageBusy: progress.pageState.busy,
+        pageReplyPreview: previewDebugText(progress.pageState.latestAssistantPreview),
+        assistantCount: progress.pageState.assistantCount,
+        completionStatus:
+          typeof progress.completionState?.status === "string"
+            ? progress.completionState.status
+            : null,
+        completionClosed:
+          typeof progress.completionState?.closed === "boolean"
+            ? progress.completionState.closed
+            : undefined,
+        completionObserved:
+          typeof progress.completionState?.observed === "boolean"
+            ? progress.completionState.observed
+            : undefined,
+        completionTurnMode:
+          progress.completionState?.turn && typeof progress.completionState.turn.mode === "string"
+            ? progress.completionState.turn.mode
+            : null,
+        completionTurnPreview:
+          progress.completionState?.turn?.outputText
+            ? previewDebugText(progress.completionState.turn.outputText)
+            : null,
+        note: [
+          typeof progress.completionState?.parserSummary === "string"
+            ? `parser=${progress.completionState.parserSummary}`
+            : null,
+          typeof progress.completionState?.bodyPreview === "string" &&
+          progress.completionState.bodyPreview.length > 0
+            ? `body=${previewDebugText(progress.completionState.bodyPreview)}`
+            : null,
+        ]
+          .filter((entry) => entry)
+          .join(" | ") || undefined,
+      });
+
+      const streamedTurn = progress.completionState?.turn;
+      const terminalObserved =
+        progress.completionState?.status === "finished" ||
+        progress.completionState?.closed === true;
+      const nextStatus =
+        typeof progress.completionState?.status === "string"
+          ? progress.completionState.status
+          : null;
+      const nextClosed =
+        typeof progress.completionState?.closed === "boolean"
+          ? progress.completionState.closed
+          : null;
+      const nextTurnPreview =
+        typeof streamedTurn?.outputText === "string" ? streamedTurn.outputText : "";
+      const hasCompletionProgress =
+        progress.completionState?.observed === true &&
+        (
+          nextStatus === "streaming" ||
+          nextStatus !== previousStatus ||
+          nextClosed !== previousClosed ||
+          nextTurnPreview !== previousTurnPreview
+        );
+
+      if (hasCompletionProgress || progress.pageState.busy) {
+        lastProgressAt = Date.now();
+      }
+      previousStatus = nextStatus;
+      previousClosed = nextClosed;
+      previousTurnPreview = nextTurnPreview;
+
+      if (
+        terminalObserved &&
+        streamedTurn?.mode === "native_tool_call" &&
+        streamedTurn.toolCall
+      ) {
+        finalReply = (streamedTurn.outputText ?? "").trim();
+        return {
+          mode: "native_tool_call",
+          ...(streamedTurn.thinkingText
+            ? { thinkingText: streamedTurn.thinkingText }
+            : {}),
+          toolCall: streamedTurn.toolCall,
+          ...(finalReply.length > 0 ? { outputText: finalReply } : {}),
+          debug: buildAutomationDebug({
+            source: "bridge_stream",
+            freshSession: input.freshSession === true,
+            baselineReply,
+            latestReply,
+            finalReply,
+            completionObserved,
+            startMode: "transport_submit",
+            trace,
+          }),
+          modelLabel: "Qwen Web",
+        };
+      }
+
+      if (
+        terminalObserved &&
+        streamedTurn?.mode === "text" &&
+        streamedTurn.outputText
+      ) {
+        finalReply = streamedTurn.outputText.trim();
+        return {
+          mode: "text",
+          ...(streamedTurn.thinkingText
+            ? { thinkingText: streamedTurn.thinkingText }
+            : {}),
+          outputText: finalReply,
+          debug: buildAutomationDebug({
+            source: "bridge_stream",
+            freshSession: input.freshSession === true,
+            baselineReply,
+            latestReply,
+            finalReply,
+            completionObserved,
+            startMode: "transport_submit",
+            trace,
+          }),
+          modelLabel: "Qwen Web",
+        };
+      }
+
+      if (Date.now() - lastProgressAt >= idleTimeoutMs) {
+        break;
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, 300));
+    }
+
+    throw buildFailure("TIMEOUT", "The page did not finish streaming in time");
   }
 }

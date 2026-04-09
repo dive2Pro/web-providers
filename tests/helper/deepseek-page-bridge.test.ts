@@ -49,12 +49,12 @@ class FakeElement {
     return this.attributes.get(name) ?? null;
   }
 
-  querySelector(_selector: string) {
+  querySelector(_selector: string): FakeElement | null {
     return null;
   }
 
-  querySelectorAll(_selector: string) {
-    return [] as FakeElement[];
+  querySelectorAll(_selector: string): FakeElement[] {
+    return [];
   }
 
   closest(_selector: string) {
@@ -63,6 +63,7 @@ class FakeElement {
 }
 
 class FakeTextarea extends FakeElement {
+  declare value: string;
   private nativeValue = "";
 
   constructor(private readonly sendButton: FakeElement) {
@@ -218,16 +219,16 @@ function createBridgeTestContext(options?: {
   };
 
   class FakeXmlHttpRequest {
-    addEventListener() {}
+    addEventListener(_type?: string, _handler?: () => void) {}
+
+    open(_method?: string, _url?: string) {
+      return undefined;
+    }
+
+    send() {
+      return undefined;
+    }
   }
-
-  FakeXmlHttpRequest.prototype.open = function open() {
-    return undefined;
-  };
-
-  FakeXmlHttpRequest.prototype.send = function send() {
-    return undefined;
-  };
 
   const windowObject: Record<string, unknown> = {
     location: {
@@ -235,7 +236,7 @@ function createBridgeTestContext(options?: {
     },
   };
 
-  const context = {
+  const context: Record<string, any> = {
     window: windowObject,
     document,
     XMLHttpRequest: FakeXmlHttpRequest,
@@ -400,6 +401,94 @@ describe("deepseek page bridge", () => {
     expect(composerSend.getAttribute("aria-disabled")).toBe("false");
   });
 
+  it("falls back to keyboard submission when clicking send does not start generation", async () => {
+    const { context, composerSend, textarea } = createBridgeTestContext();
+    let keyboardSubmitCount = 0;
+
+    class FakeStreamingXmlHttpRequest {
+      public readyState = 0;
+      public responseText = "";
+      private readonly listeners = new Map<string, Array<() => void>>();
+
+      addEventListener(type: string, handler: () => void) {
+        const current = this.listeners.get(type) ?? [];
+        current.push(handler);
+        this.listeners.set(type, current);
+      }
+
+      open(_method?: string, _url?: string) {
+        return undefined;
+      }
+
+      send() {
+        setTimeout(() => {
+          this.pushChunk(
+            [
+              "event: ready",
+              "data: {\"request_message_id\":1,\"response_message_id\":2,\"model_type\":\"default\"}",
+              "",
+              "data: {\"v\":{\"response\":{\"message_id\":2,\"status\":\"WIP\",\"fragments\":[{\"type\":\"RESPONSE\",\"content\":\"fallback worked\"}]}}}",
+              "",
+              "data: {\"p\":\"response/status\",\"o\":\"SET\",\"v\":\"FINISHED\"}",
+              "",
+              "event: close",
+              "data: {\"click_behavior\":\"none\",\"auto_resume\":false}",
+              "",
+            ].join("\n"),
+            4,
+          );
+        }, 50);
+        return undefined;
+      }
+
+      private pushChunk(chunk: string, readyState: number) {
+        this.responseText += chunk;
+        this.readyState = readyState;
+        for (const handler of this.listeners.get("readystatechange") ?? []) {
+          handler();
+        }
+      }
+    }
+
+    context.XMLHttpRequest = FakeStreamingXmlHttpRequest;
+    (context.window as Record<string, unknown>).XMLHttpRequest = FakeStreamingXmlHttpRequest;
+
+    composerSend.click = () => {
+      composerSend.clicked += 1;
+    };
+    textarea.dispatchEvent = (event: FakeEvent) => {
+      if (event.type === "keydown" && event.options?.key === "Enter") {
+        keyboardSubmitCount += 1;
+        const xhr = new FakeStreamingXmlHttpRequest();
+        xhr.open("POST", "/api/v0/chat/completion");
+        xhr.send();
+      }
+
+      return true;
+    };
+
+    vm.runInNewContext(INJECTED_BRIDGE_SOURCE, context);
+
+    const bridge = (context.window as Record<string, any>).__piDeepSeekBridge;
+    expect(bridge).toBeTruthy();
+
+    const result = await bridge.sendPrompt({ prompt: "hello", timeoutMs: 3_000 });
+
+    expect(result).toEqual({
+      ok: true,
+      turn: {
+        mode: "text",
+        outputText: "fallback worked",
+      },
+      meta: {
+        source: "bridge_stream",
+        completionObserved: true,
+      },
+    });
+    expect(composerSend.clicked).toBe(1);
+    expect(keyboardSubmitCount).toBe(1);
+  });
+
   it("does not return the previous assistant reply when no fresh reply arrives", async () => {
     const { context } = createBridgeTestContext({
       latestAssistantText: "previous assistant reply",
@@ -414,12 +503,12 @@ describe("deepseek page bridge", () => {
 
     expect(result).toEqual({
       ok: false,
-      error: "TIMEOUT",
-      message: "The page did not finish streaming in time",
+      error: "AUTOMATION_DESYNC",
+      message: "Prompt submission did not start a DeepSeek response",
     });
   });
 
-  it("waits for the DOM preview to settle before returning a fresh reply without SSE events", async () => {
+  it("does not return text from DOM alone when completion events never arrive", async () => {
     const {
       context,
       latestAssistantMarkdown,
@@ -454,15 +543,9 @@ describe("deepseek page bridge", () => {
     const result = await bridge.sendPrompt({ prompt: "hello", timeoutMs: 4_000 });
 
     expect(result).toEqual({
-      ok: true,
-      turn: {
-        mode: "text",
-        outputText: "I'm here to help with your task.",
-      },
-      meta: {
-        source: "bridge_timeout_recovery",
-        completionObserved: false,
-      },
+      ok: false,
+      error: "TIMEOUT",
+      message: "The page did not finish streaming in time",
     });
   });
 
@@ -480,7 +563,7 @@ describe("deepseek page bridge", () => {
         this.listeners.set(type, current);
       }
 
-      open() {
+      open(_method?: string, _url?: string) {
         return undefined;
       }
 
@@ -542,6 +625,362 @@ describe("deepseek page bridge", () => {
       turn: {
         mode: "text",
         outputText: "I'm here to help with your task.",
+      },
+      meta: {
+        source: "bridge_stream",
+        completionObserved: true,
+      },
+    });
+  });
+
+  it("separates THINK fragments from RESPONSE fragments in thinking mode", async () => {
+    const { context, composerSend } = createBridgeTestContext();
+
+    class FakeThinkingXmlHttpRequest {
+      public readyState = 0;
+      public responseText = "";
+      private readonly listeners = new Map<string, Array<() => void>>();
+
+      addEventListener(type: string, handler: () => void) {
+        const current = this.listeners.get(type) ?? [];
+        current.push(handler);
+        this.listeners.set(type, current);
+      }
+
+      open(_method?: string, _url?: string) {
+        return undefined;
+      }
+
+      send() {
+        setTimeout(() => {
+          this.pushChunk(
+            [
+              "event: ready",
+              "data: {\"request_message_id\":5,\"response_message_id\":6,\"model_type\":\"expert\"}",
+              "",
+              "data: {\"v\":{\"response\":{\"message_id\":6,\"status\":\"WIP\",\"fragments\":[{\"id\":2,\"type\":\"THINK\",\"content\":\"需要\"}]}}}",
+              "",
+              "data: {\"p\":\"response/fragments/-1/content\",\"o\":\"APPEND\",\"v\":\"先理清\"}",
+              "",
+              "data: {\"p\":\"response/fragments\",\"o\":\"APPEND\",\"v\":[{\"id\":3,\"type\":\"RESPONSE\",\"content\":\"最终\"}]}",
+              "",
+              "data: {\"p\":\"response/fragments/-1/content\",\"o\":\"APPEND\",\"v\":\"答案\"}",
+              "",
+              "data: {\"p\":\"response/status\",\"o\":\"SET\",\"v\":\"FINISHED\"}",
+              "",
+              "event: close",
+              "data: {\"click_behavior\":\"none\",\"auto_resume\":false}",
+              "",
+            ].join("\n"),
+            4,
+          );
+        }, 50);
+        return undefined;
+      }
+
+      private pushChunk(chunk: string, readyState: number) {
+        this.responseText += chunk;
+        this.readyState = readyState;
+        for (const handler of this.listeners.get("readystatechange") ?? []) {
+          handler();
+        }
+      }
+    }
+
+    context.XMLHttpRequest = FakeThinkingXmlHttpRequest;
+    (context.window as Record<string, unknown>).XMLHttpRequest = FakeThinkingXmlHttpRequest;
+
+    composerSend.click = () => {
+      const xhr = new FakeThinkingXmlHttpRequest();
+      xhr.open("POST", "/api/v0/chat/completion");
+      xhr.send();
+      composerSend.clicked += 1;
+    };
+
+    vm.runInNewContext(INJECTED_BRIDGE_SOURCE, context);
+
+    const bridge = (context.window as Record<string, any>).__piDeepSeekBridge;
+    expect(bridge).toBeTruthy();
+
+    const result = await bridge.sendPrompt({ prompt: "hello", timeoutMs: 2_000 });
+
+    expect(result).toEqual({
+      ok: true,
+      turn: {
+        mode: "text",
+        thinkingText: "需要先理清",
+        outputText: "最终答案",
+      },
+      meta: {
+        source: "bridge_stream",
+        completionObserved: true,
+      },
+    });
+  });
+
+  it("returns the captured completion text even when DOM shows a cleaner final reply", async () => {
+    const {
+      context,
+      composerSend,
+      latestAssistantMarkdown,
+      latestAssistantMessage,
+    } = createBridgeTestContext({
+      latestAssistantText: "",
+      assistantVisible: true,
+    });
+
+    class FakePartialJsonXmlHttpRequest {
+      public readyState = 0;
+      public responseText = "";
+      private readonly listeners = new Map<string, Array<() => void>>();
+
+      addEventListener(type: string, handler: () => void) {
+        const current = this.listeners.get(type) ?? [];
+        current.push(handler);
+        this.listeners.set(type, current);
+      }
+
+      open(_method?: string, _url?: string) {
+        return undefined;
+      }
+
+      send() {
+        setTimeout(() => {
+          this.pushChunk(
+            [
+              "event: ready",
+              "data: {\"request_message_id\":7,\"response_message_id\":8,\"model_type\":\"default\"}",
+              "",
+              "data: {\"v\":{\"response\":{\"message_id\":8,\"status\":\"WIP\",\"fragments\":[{\"type\":\"RESPONSE\",\"content\":\"{\\\"\"}]}}}",
+              "",
+              "event: close",
+              "data: {\"click_behavior\":\"none\",\"auto_resume\":false}",
+              "",
+            ].join("\n"),
+            4,
+          );
+        }, 50);
+        return undefined;
+      }
+
+      private pushChunk(chunk: string, readyState: number) {
+        this.responseText += chunk;
+        this.readyState = readyState;
+        for (const handler of this.listeners.get("readystatechange") ?? []) {
+          handler();
+        }
+      }
+    }
+
+    context.XMLHttpRequest = FakePartialJsonXmlHttpRequest;
+    (context.window as Record<string, unknown>).XMLHttpRequest = FakePartialJsonXmlHttpRequest;
+
+    composerSend.click = () => {
+      const xhr = new FakePartialJsonXmlHttpRequest();
+      xhr.open("POST", "/api/v0/chat/completion");
+      xhr.send();
+      composerSend.clicked += 1;
+    };
+
+    setTimeout(() => {
+      if (latestAssistantMarkdown) {
+        latestAssistantMarkdown.textContent = "你好，我在。";
+      }
+      if (latestAssistantMessage) {
+        latestAssistantMessage.textContent = "你好，我在。";
+      }
+    }, 150);
+
+    vm.runInNewContext(INJECTED_BRIDGE_SOURCE, context);
+
+    const bridge = (context.window as Record<string, any>).__piDeepSeekBridge;
+    expect(bridge).toBeTruthy();
+
+    const result = await bridge.sendPrompt({ prompt: "hello", timeoutMs: 3_000 });
+
+    expect(result).toEqual({
+      ok: true,
+      turn: {
+        mode: "text",
+        outputText: "{\"",
+      },
+      meta: {
+        source: "bridge_stream",
+        completionObserved: true,
+      },
+    });
+  });
+
+  it("captures completion content updates when patch path is present without op", async () => {
+    const { context, composerSend } = createBridgeTestContext();
+
+    class FakeImplicitAppendXmlHttpRequest {
+      public readyState = 0;
+      public responseText = "";
+      private readonly listeners = new Map<string, Array<() => void>>();
+
+      addEventListener(type: string, handler: () => void) {
+        const current = this.listeners.get(type) ?? [];
+        current.push(handler);
+        this.listeners.set(type, current);
+      }
+
+      open(_method?: string, _url?: string) {
+        return undefined;
+      }
+
+      send() {
+        setTimeout(() => {
+          this.pushChunk(
+            [
+              "event: ready",
+              "data: {\"request_message_id\":11,\"response_message_id\":12,\"model_type\":\"default\"}",
+              "",
+              "data: {\"v\":{\"response\":{\"message_id\":12,\"status\":\"WIP\",\"fragments\":[{\"id\":2,\"type\":\"THINK\",\"content\":\"We\"}]}}}",
+              "",
+              "data: {\"p\":\"response/fragments/-1/content\",\"o\":\"APPEND\",\"v\":\" need\"}",
+              "",
+              "data: {\"p\":\"response/fragments\",\"o\":\"APPEND\",\"v\":[{\"id\":3,\"type\":\"RESPONSE\",\"content\":\"{\\\"\"}]}",
+              "",
+              "data: {\"p\":\"response/fragments/-1/content\",\"v\":\"type\"}",
+              "",
+              "data: {\"v\":\"\\\":\\\"\"}",
+              "",
+              "data: {\"v\":\"message\"}",
+              "",
+              "data: {\"v\":\"\\\",\\\"content\\\":\\\"\"}",
+              "",
+              "data: {\"v\":\"Hey\"}",
+              "",
+              "data: {\"v\":\"!\\\"}\"}",
+              "",
+              "data: {\"p\":\"response/status\",\"o\":\"SET\",\"v\":\"FINISHED\"}",
+              "",
+              "event: close",
+              "data: {\"click_behavior\":\"none\",\"auto_resume\":false}",
+              "",
+            ].join("\n"),
+            4,
+          );
+        }, 50);
+        return undefined;
+      }
+
+      private pushChunk(chunk: string, readyState: number) {
+        this.responseText += chunk;
+        this.readyState = readyState;
+        for (const handler of this.listeners.get("readystatechange") ?? []) {
+          handler();
+        }
+      }
+    }
+
+    context.XMLHttpRequest = FakeImplicitAppendXmlHttpRequest;
+    (context.window as Record<string, unknown>).XMLHttpRequest = FakeImplicitAppendXmlHttpRequest;
+
+    composerSend.click = () => {
+      const xhr = new FakeImplicitAppendXmlHttpRequest();
+      xhr.open("POST", "/api/v0/chat/completion");
+      xhr.send();
+      composerSend.clicked += 1;
+    };
+
+    vm.runInNewContext(INJECTED_BRIDGE_SOURCE, context);
+
+    const bridge = (context.window as Record<string, any>).__piDeepSeekBridge;
+    expect(bridge).toBeTruthy();
+
+    const result = await bridge.sendPrompt({ prompt: "hello", timeoutMs: 2_000 });
+
+    expect(result).toEqual({
+      ok: true,
+      turn: {
+        mode: "text",
+        thinkingText: "We need",
+        outputText: "Hey!",
+      },
+      meta: {
+        source: "bridge_stream",
+        completionObserved: true,
+      },
+    });
+  });
+
+  it("returns streamed tool calls without waiting for assistant DOM text", async () => {
+    const { context, composerSend } = createBridgeTestContext();
+
+    class FakeToolCallXmlHttpRequest {
+      public readyState = 0;
+      public responseText = "";
+      private readonly listeners = new Map<string, Array<() => void>>();
+
+      addEventListener(type: string, handler: () => void) {
+        const current = this.listeners.get(type) ?? [];
+        current.push(handler);
+        this.listeners.set(type, current);
+      }
+
+      open(_method?: string, _url?: string) {
+        return undefined;
+      }
+
+      send() {
+        setTimeout(() => {
+          this.pushChunk(
+            [
+              "event: ready",
+              "data: {\"request_message_id\":9,\"response_message_id\":10,\"model_type\":\"default\"}",
+              "",
+              "data: {\"v\":{\"response\":{\"message_id\":10,\"status\":\"WIP\",\"fragments\":[{\"type\":\"RESPONSE\",\"content\":\"{\\\"type\\\":\\\"tool_call\\\",\\\"name\\\":\\\"read\\\",\\\"arguments\\\":{\\\"path\\\":\\\"src/app.ts\\\"}}\"}]}}}",
+              "",
+              "data: {\"p\":\"response/status\",\"o\":\"SET\",\"v\":\"FINISHED\"}",
+              "",
+              "event: close",
+              "data: {\"click_behavior\":\"none\",\"auto_resume\":false}",
+              "",
+            ].join("\n"),
+            4,
+          );
+        }, 50);
+        return undefined;
+      }
+
+      private pushChunk(chunk: string, readyState: number) {
+        this.responseText += chunk;
+        this.readyState = readyState;
+        for (const handler of this.listeners.get("readystatechange") ?? []) {
+          handler();
+        }
+      }
+    }
+
+    context.XMLHttpRequest = FakeToolCallXmlHttpRequest;
+    (context.window as Record<string, unknown>).XMLHttpRequest = FakeToolCallXmlHttpRequest;
+
+    composerSend.click = () => {
+      const xhr = new FakeToolCallXmlHttpRequest();
+      xhr.open("POST", "/api/v0/chat/completion");
+      xhr.send();
+      composerSend.clicked += 1;
+    };
+
+    vm.runInNewContext(INJECTED_BRIDGE_SOURCE, context);
+
+    const bridge = (context.window as Record<string, any>).__piDeepSeekBridge;
+    expect(bridge).toBeTruthy();
+
+    const result = await bridge.sendPrompt({ prompt: "hello", timeoutMs: 2_000 });
+
+    expect(result).toEqual({
+      ok: true,
+      turn: {
+        mode: "json_fallback",
+        toolCall: {
+          name: "read",
+          argumentsJson: "{\"path\":\"src/app.ts\"}",
+        },
+        outputText:
+          "{\"type\":\"tool_call\",\"name\":\"read\",\"arguments\":{\"path\":\"src/app.ts\"}}",
       },
       meta: {
         source: "bridge_stream",

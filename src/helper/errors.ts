@@ -1,3 +1,5 @@
+import type { SendChatAutomationDebug } from "./browser/types";
+
 export class HelperError extends Error {
   constructor(
     public readonly code:
@@ -7,6 +9,7 @@ export class HelperError extends Error {
       | "TIMEOUT"
       | "AUTOMATION_DESYNC",
     message: string,
+    public readonly automationDebug: SendChatAutomationDebug | null = null,
   ) {
     super(message);
   }

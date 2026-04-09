@@ -1,4 +1,7 @@
-import type { BrowserConnectionStatus } from "../../shared/contracts";
+import type {
+  BrowserConnectionStatus,
+  ProviderId,
+} from "../../shared/contracts";
 
 export interface PageStateSummary {
   inputReady: boolean;
@@ -24,12 +27,14 @@ export interface ProviderToolCall {
 export interface ProviderToolCallTurn {
   mode: "native_tool_call" | "json_fallback";
   toolCall: ProviderToolCall;
+  thinkingText?: string;
   outputText?: string;
   modelLabel?: string;
 }
 
 export interface ProviderTextTurn {
   mode: "text";
+  thinkingText?: string;
   outputText: string;
   modelLabel?: string;
 }
@@ -40,12 +45,26 @@ export interface SendChatAutomationDebug {
     | "bridge_dom_fallback"
     | "bridge_timeout_recovery"
     | "client_polling"
-    | "client_recovery";
+    | "client_recovery"
+    | "client_error";
   freshSession: boolean;
   completionObserved?: boolean;
   baselineReply?: string;
   latestReply?: string;
   finalReply?: string;
+  startMode?: "bridge_start" | "transport_submit";
+  trace?: Array<{
+    phase: string;
+    pageBusy?: boolean;
+    pageReplyPreview?: string | null;
+    assistantCount?: number;
+    completionStatus?: string | null;
+    completionClosed?: boolean;
+    completionObserved?: boolean;
+    completionTurnMode?: string | null;
+    completionTurnPreview?: string | null;
+    note?: string;
+  }>;
 }
 
 export type SendChatResult =
@@ -59,10 +78,20 @@ export interface ChatTextResult {
 
 export interface BrowserAutomationClient {
   getConnectionStatus(): Promise<BrowserConnectionStatus>;
+  bindProviderTab?(input: { provider: ProviderId }): Promise<BindResult>;
   bindDeepSeekTab(): Promise<BindResult>;
+  resetProvider?(input: { provider: ProviderId; tabId: string }): Promise<void>;
   resetPageBridge(tabId: string): Promise<void>;
-  startNewChat(tabId: string): Promise<void>;
+  startNewChat(
+    input:
+      | string
+      | {
+          provider: ProviderId;
+          tabId: string;
+        },
+  ): Promise<void>;
   sendChatPrompt(input: {
+    provider?: ProviderId;
     tabId: string;
     prompt: string;
     timeoutMs: number;
