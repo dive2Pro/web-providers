@@ -161,6 +161,105 @@ async function collectEventTypes(stream: AssistantMessageEventStreamLike) {
 }
 
 describe("pi provider extension", () => {
+  it("registers deepseek-web and qwen-web from one runtime", () => {
+    const providers: Array<{ name: string; config: ProviderConfig }> = [];
+
+    registerDeepSeekExtension(
+      {
+        registerProvider(name, config) {
+          providers.push({ name: String(name), config: config as ProviderConfig });
+        },
+        on() {},
+      },
+      {
+        spawnHelper: async () => ({
+          baseUrl: "http://127.0.0.1:4318",
+          token: "token-123",
+          stop: async () => undefined,
+        }),
+        helperClient: {
+          post: async <T>() =>
+            ({ mode: "text", outputText: "ok", finishReason: "stop" } as T),
+        },
+        randomToken: () => "token-123",
+      },
+    );
+
+    expect(providers.map((entry) => entry.name)).toEqual([
+      "deepseek-web",
+      "qwen-web",
+    ]);
+  });
+
+  it("sends provider-aware helper requests for qwen-web", async () => {
+    const calls: Array<{ path: string; body: Record<string, unknown> }> = [];
+    let qwenConfig: ProviderConfig | undefined;
+
+    registerDeepSeekExtension(
+      {
+        registerProvider(name, config) {
+          if (name === "qwen-web") {
+            qwenConfig = config as ProviderConfig;
+          }
+        },
+        on() {},
+      },
+      {
+        spawnHelper: async () => ({
+          baseUrl: "http://127.0.0.1:4318",
+          token: "token-123",
+          stop: async () => undefined,
+        }),
+        helperClient: {
+          post: async <T>(
+            _baseUrl: string,
+            path: string,
+            body: Record<string, unknown>,
+          ) => {
+            calls.push({ path, body });
+            if (path === "/v1/bind") {
+              return { ok: true } as T;
+            }
+
+            return {
+              mode: "text",
+              outputText: "qwen reply",
+              finishReason: "stop",
+            } as T;
+          },
+        },
+        randomToken: () => "token-123",
+      },
+    );
+
+    const stream = qwenConfig?.streamSimple?.(
+      {
+        id: "qwen-web-chat",
+        api: "qwen-web-api",
+        provider: "qwen-web",
+      },
+      {
+        messages: [
+          {
+            role: "user",
+            content: "hello",
+            timestamp: Date.now(),
+          },
+        ],
+      },
+    );
+
+    await stream?.result();
+
+    const bindCall = calls.find((call) => call.path === "/v1/bind");
+    const chatCall = calls.find((call) => call.path === "/v1/provider/chat");
+    expect(bindCall?.body).toEqual({ provider: "qwen-web" });
+    expect(chatCall?.body).toMatchObject({
+      provider: "qwen-web",
+      model: "qwen-web-chat",
+    });
+  });
+
   it("registers the deepseek-web provider and model", () => {
     const providers: Array<{ name: string; config: ProviderConfig }> = [];
     const events: string[] = [];
@@ -188,8 +287,10 @@ describe("pi provider extension", () => {
       },
     );
 
-    expect(providers).toHaveLength(1);
-    expect(providers[0]).toMatchObject({
+    expect(providers).toHaveLength(2);
+    const deepseekProvider = providers.find((provider) => provider.name === "deepseek-web");
+    expect(deepseekProvider).toBeDefined();
+    expect(deepseekProvider).toMatchObject({
       name: "deepseek-web",
       config: {
         baseUrl: "http://127.0.0.1",
@@ -292,7 +393,9 @@ describe("pi provider extension", () => {
     ]);
 
     expect(calls[0]).toBe("spawn:token-123:4318");
-    expect(calls[1]).toBe("post:http://127.0.0.1:4318:/v1/bind:token-123:{}");
+    expect(calls[1]).toBe(
+      'post:http://127.0.0.1:4318:/v1/bind:token-123:{"provider":"deepseek-web"}',
+    );
     expect(calls[2]).toContain('post:http://127.0.0.1:4318:/v1/provider/chat:token-123:');
     expect(calls[2]).toContain('"model":"deepseek-web-chat"');
     expect(calls[2]).toContain('"messages":[{"role":"user","content":"hello"}]');
@@ -488,6 +591,7 @@ describe("pi provider extension", () => {
     expect(providerChatCall?.body.sessionInit).toMatchObject({
       prompt: expect.stringContaining('"type":"message"'),
       fingerprint: expect.any(String),
+      sessionKey: expect.any(String),
     });
     const providerSessionInit =
       (providerChatCall?.body as { sessionInit?: { prompt?: string } } | undefined)?.sessionInit;
@@ -564,12 +668,12 @@ describe("pi provider extension", () => {
                 toolCall: {
                   name: "bash",
                   argumentsJson:
-                    "{\"command\":\"ls -la /Users/yc/code/webai-no-fee/src\",\"description\":\"List src directory structure\"}",
+                    "{\"command\":\"ls -la /Users/yc/code/web-providers/src\",\"description\":\"List src directory structure\"}",
                 },
                 finishReason: "stop",
                 modelLabel: "DeepSeek Web",
                 outputText:
-                  "{\"type\":\"tool_call\",\"name\":\"bash\",\"arguments\":{\"command\":\"ls -la /Users/yc/code/webai-no-fee/src\",\"description\":\"List src directory structure\"}}",
+                  "{\"type\":\"tool_call\",\"name\":\"bash\",\"arguments\":{\"command\":\"ls -la /Users/yc/code/web-providers/src\",\"description\":\"List src directory structure\"}}",
               } as T;
             }
 
@@ -577,12 +681,12 @@ describe("pi provider extension", () => {
               mode: "json_fallback",
               toolCall: {
                 name: "bash",
-                argumentsJson: "{\"cmd\":\"ls -la /Users/yc/code/webai-no-fee/src\"}",
+                argumentsJson: "{\"cmd\":\"ls -la /Users/yc/code/web-providers/src\"}",
               },
               finishReason: "stop",
               modelLabel: "DeepSeek Web",
               outputText:
-                "{\"type\":\"tool_call\",\"name\":\"bash\",\"arguments\":{\"cmd\":\"ls -la /Users/yc/code/webai-no-fee/src\"}}",
+                "{\"type\":\"tool_call\",\"name\":\"bash\",\"arguments\":{\"cmd\":\"ls -la /Users/yc/code/web-providers/src\"}}",
             } as T;
           },
         },
@@ -653,7 +757,7 @@ describe("pi provider extension", () => {
         type: "toolCall",
         id: "deepseek-web-0",
         name: "bash",
-        arguments: { cmd: "ls -la /Users/yc/code/webai-no-fee/src" },
+        arguments: { cmd: "ls -la /Users/yc/code/web-providers/src" },
       },
       partial: expect.objectContaining({
         stopReason: "toolUse",
@@ -1069,5 +1173,80 @@ describe("pi provider extension", () => {
     await shutdownHandler?.();
 
     expect(calls).toEqual(["stop"]);
+  });
+
+  it("reuses one helper instance across deepseek and qwen streams", async () => {
+    const calls: string[] = [];
+    const configs = new Map<string, ProviderConfig>();
+
+    registerDeepSeekExtension(
+      {
+        registerProvider(name, config) {
+          configs.set(String(name), config as ProviderConfig);
+        },
+        on() {},
+      },
+      {
+        spawnHelper: async ({ token, port }) => {
+          calls.push(`spawn:${token}:${port}`);
+          return {
+            baseUrl: `http://127.0.0.1:${port}`,
+            token,
+            stop: async () => undefined,
+          };
+        },
+        helperClient: {
+          post: async <T>(
+            _baseUrl: string,
+            path: string,
+            body: Record<string, unknown>,
+          ) => {
+            calls.push(`${path}:${JSON.stringify(body)}`);
+            if (path === "/v1/bind") {
+              return { ok: true } as T;
+            }
+
+            return {
+              mode: "text",
+              outputText: "ok",
+              finishReason: "stop",
+            } as T;
+          },
+        },
+        randomToken: () => "token-123",
+      },
+    );
+
+    await configs
+      .get("deepseek-web")
+      ?.streamSimple?.(
+        {
+          id: "deepseek-web-chat",
+          api: "deepseek-web-api",
+          provider: "deepseek-web",
+        },
+        {
+          messages: [{ role: "user", content: "hello", timestamp: Date.now() }],
+        },
+      )
+      .result();
+
+    await configs
+      .get("qwen-web")
+      ?.streamSimple?.(
+        {
+          id: "qwen-web-chat",
+          api: "qwen-web-api",
+          provider: "qwen-web",
+        },
+        {
+          messages: [{ role: "user", content: "hello", timestamp: Date.now() }],
+        },
+      )
+      .result();
+
+    expect(calls.filter((call) => call.startsWith("spawn:"))).toHaveLength(1);
+    expect(calls.some((call) => call.includes('"provider":"deepseek-web"'))).toBe(true);
+    expect(calls.some((call) => call.includes('"provider":"qwen-web"'))).toBe(true);
   });
 });

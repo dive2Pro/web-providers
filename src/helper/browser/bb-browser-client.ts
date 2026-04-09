@@ -4,10 +4,19 @@ import { HelperError } from "../errors";
 import type {
   BrowserAutomationClient,
   BindResult,
+  PageStateSummary,
   SendChatAutomationDebug,
   SendChatResult,
 } from "./types";
 import { assertDeepSeekUrl, INJECTED_BRIDGE_SOURCE } from "./deepseek-page-bridge";
+import { createProviderRegistry } from "../providers/registry";
+import {
+  INJECTED_QWEN_BRIDGE_SOURCE,
+  QWEN_PAGE_STATE_SCRIPT,
+  QWEN_PROGRESS_SCRIPT,
+  QWEN_RESET_COMPLETION_SCRIPT,
+  QWEN_START_NEW_CHAT_SCRIPT,
+} from "../providers/qwen/page-bridge";
 
 const execFileAsync = promisify(execFile);
 
@@ -32,7 +41,9 @@ interface BbBrowserTabListEnvelope {
 export interface BbBrowserTransport {
   getConnectionStatus(): Promise<"connected" | "disconnected">;
   findDeepSeekTab(): Promise<{ id: string; url: string }>;
+  findQwenTab?(): Promise<{ id: string; url: string }>;
   openDeepSeek(url: string): Promise<void>;
+  openQwen?(url: string): Promise<void>;
   evaluate<T>(tabId: string, script: string): Promise<T>;
   submitPrompt(tabId: string, prompt: string): Promise<void>;
 }
@@ -154,6 +165,17 @@ export function createBbBrowserTransport(): BbBrowserTransport {
       return tab;
     },
 
+    async findQwenTab() {
+      const list = await listTabs();
+      const tab = list.find((entry) => entry.url.includes("chat.qwen.ai"));
+
+      if (!tab) {
+        throw new HelperError("NOT_BOUND", "No logged-in Qwen tab is available");
+      }
+
+      return tab;
+    },
+
     async evaluate<T>(tabId: string, script: string): Promise<T> {
       await selectTabById(tabId);
       const raw = await runBbBrowserJson(["eval", script]);
@@ -191,6 +213,10 @@ export function createBbBrowserTransport(): BbBrowserTransport {
     },
 
     async openDeepSeek(url: string) {
+      await runBbBrowserJson(["open", url]);
+    },
+
+    async openQwen(url: string) {
       await runBbBrowserJson(["open", url]);
     },
   };
@@ -249,7 +275,7 @@ function buildAutomationDebug(input: {
     ...(debugEnabled && input.startMode
       ? { startMode: input.startMode }
       : {}),
-    ...(debugEnabled && input.trace && input.trace.length > 0
+    ...(input.trace && input.trace.length > 0
       ? { trace: input.trace }
       : {}),
   };
@@ -274,66 +300,47 @@ function looksLikeIncompleteStructuredText(text: string | null | undefined) {
 }
 
 export class BbBrowserClient implements BrowserAutomationClient {
-  constructor(private readonly transport: BbBrowserTransport) {}
+  private readonly providerRegistry: ReturnType<typeof createProviderRegistry>;
+
+  constructor(private readonly transport: BbBrowserTransport) {
+    this.providerRegistry = createProviderRegistry(transport);
+  }
 
   async getConnectionStatus() {
     return this.transport.getConnectionStatus();
   }
 
   async bindDeepSeekTab(): Promise<BindResult> {
-    let tab: { id: string; url: string };
+    return this.providerRegistry["deepseek-web"].bindTab();
+  }
 
-    try {
-      tab = await this.transport.findDeepSeekTab();
-    } catch (error) {
-      if (error instanceof HelperError && error.code === "NOT_BOUND") {
-        await this.transport.openDeepSeek("https://chat.deepseek.com");
-        throw new HelperError(
-          "NOT_BOUND",
-          "Opened DeepSeek in bb-browser. Finish login in that page and retry.",
-        );
-      }
-
-      if (
-        error instanceof Error &&
-        error.message.toLowerCase().includes("no page target found")
-      ) {
-        await this.transport.openDeepSeek("https://chat.deepseek.com");
-        throw new HelperError(
-          "NOT_BOUND",
-          "Opened DeepSeek in bb-browser. Finish login in that page and retry.",
-        );
-      }
-
-      throw error;
-    }
-
-    const normalizedUrl = assertDeepSeekUrl(tab.url);
-
-    await this.transport.evaluate(tab.id, INJECTED_BRIDGE_SOURCE);
-
-    return {
-      tabId: tab.id,
-      url: normalizedUrl,
-      loginState: "logged_in",
-      bridgeInjected: true,
-      pageState: {
-        inputReady: true,
-        busy: false,
-        latestAssistantPreview: null,
-        assistantCount: 0,
-      },
-    };
+  async bindProviderTab(input: { provider: "deepseek-web" | "qwen-web" }): Promise<BindResult> {
+    return this.providerRegistry[input.provider].bindTab();
   }
 
   async resetPageBridge(tabId: string): Promise<void> {
     await this.transport.evaluate<boolean>(
       tabId,
-      "(() => { try { delete window.__piDeepSeekBridge; } catch {} window.__piDeepSeekBridge = undefined; return true; })()",
+      "(() => { try { delete window.__piDeepSeekBridge; } catch {} try { delete window.__piQwenBridge; } catch {} window.__piDeepSeekBridge = undefined; window.__piQwenBridge = undefined; return true; })()",
     );
   }
 
-  async startNewChat(tabId: string): Promise<void> {
+  async startNewChat(
+    input:
+      | string
+      | {
+          provider: "deepseek-web" | "qwen-web";
+          tabId: string;
+        },
+  ): Promise<void> {
+    if (typeof input !== "string" && input.provider === "qwen-web") {
+      await this.transport.evaluate(input.tabId, QWEN_START_NEW_CHAT_SCRIPT);
+      await new Promise((resolve) => setTimeout(resolve, 1_000));
+      await this.transport.evaluate(input.tabId, INJECTED_QWEN_BRIDGE_SOURCE);
+      return;
+    }
+
+    const tabId = typeof input === "string" ? input : input.tabId;
     try {
       await this.transport.evaluate(
         tabId,
@@ -356,11 +363,16 @@ export class BbBrowserClient implements BrowserAutomationClient {
   }
 
   async sendChatPrompt(input: {
+    provider?: "deepseek-web" | "qwen-web";
     tabId: string;
     prompt: string;
     timeoutMs: number;
     freshSession?: boolean;
   }): Promise<SendChatResult> {
+    if (input.provider === "qwen-web") {
+      return this.sendQwenChatPrompt(input);
+    }
+
     const STREAM_TEXT_DOM_GRACE_MS = 750;
     const promptLiteral = JSON.stringify(input.prompt);
     const startPromptScript =
@@ -368,7 +380,7 @@ export class BbBrowserClient implements BrowserAutomationClient {
     const pageStateScript = `${INJECTED_BRIDGE_SOURCE}; window.__piDeepSeekBridge.getPageState()`;
     const progressScript =
       `${INJECTED_BRIDGE_SOURCE}; ({ pageState: window.__piDeepSeekBridge.getPageState(), completionState: window.__piDeepSeekBridge.getCompletionState() })`;
-    const trace = isBrowserAutomationDebugEnabled() ? [] : null;
+    const trace: NonNullable<SendChatAutomationDebug["trace"]> = [];
     let baselineReply: string | undefined;
     let latestReply: string | undefined;
     let finalReply: string | undefined;
@@ -705,5 +717,170 @@ export class BbBrowserClient implements BrowserAutomationClient {
 
       throw error;
     }
+  }
+
+  private async sendQwenChatPrompt(input: {
+    tabId: string;
+    prompt: string;
+    timeoutMs: number;
+    freshSession?: boolean;
+  }): Promise<SendChatResult> {
+    let baselineReply = "";
+    let latestReply = "";
+    let finalReply = "";
+    let completionObserved = false;
+    const trace = isBrowserAutomationDebugEnabled() ? [] : null;
+
+    const buildFailure = (
+      code: HelperError["code"],
+      message: string,
+    ) =>
+      new HelperError(
+        code,
+        message,
+        buildAutomationDebug({
+          source: "bridge_stream",
+          freshSession: input.freshSession === true,
+          baselineReply,
+          latestReply,
+          finalReply,
+          completionObserved,
+          startMode: "transport_submit",
+          trace,
+        }),
+      );
+
+    await this.transport.evaluate(input.tabId, INJECTED_QWEN_BRIDGE_SOURCE);
+    const baselineState = await this.transport.evaluate<PageStateSummary>(
+      input.tabId,
+      QWEN_PAGE_STATE_SCRIPT,
+    );
+
+    if (!baselineState.inputReady) {
+      throw buildFailure(
+        "PAGE_UNAVAILABLE",
+        "Qwen chat composer is not ready",
+      );
+    }
+
+    baselineReply = (baselineState.latestAssistantPreview ?? "").trim();
+    await this.transport.evaluate(input.tabId, QWEN_RESET_COMPLETION_SCRIPT);
+    await this.transport.submitPrompt(input.tabId, input.prompt);
+
+    const startedAt = Date.now();
+    while (Date.now() - startedAt < input.timeoutMs) {
+      const progress = await this.transport.evaluate<{
+        pageState: PageStateSummary;
+        completionState: {
+          observed?: boolean;
+          status?: string;
+          closed?: boolean;
+          bodyPreview?: string | null;
+          parserSummary?: string | null;
+          turn?: {
+            mode: "text";
+            outputText: string;
+            thinkingText?: string;
+          } | null;
+        };
+      }>(input.tabId, QWEN_PROGRESS_SCRIPT);
+
+      completionObserved =
+        completionObserved || progress.completionState?.observed === true;
+      latestReply = (progress.pageState.latestAssistantPreview ?? "").trim();
+      pushAutomationTrace(trace, {
+        phase: "qwen_poll",
+        pageBusy: progress.pageState.busy,
+        pageReplyPreview: previewDebugText(progress.pageState.latestAssistantPreview),
+        assistantCount: progress.pageState.assistantCount,
+        completionStatus:
+          typeof progress.completionState?.status === "string"
+            ? progress.completionState.status
+            : null,
+        completionClosed:
+          typeof progress.completionState?.closed === "boolean"
+            ? progress.completionState.closed
+            : undefined,
+        completionObserved:
+          typeof progress.completionState?.observed === "boolean"
+            ? progress.completionState.observed
+            : undefined,
+        completionTurnMode:
+          progress.completionState?.turn && typeof progress.completionState.turn.mode === "string"
+            ? progress.completionState.turn.mode
+            : null,
+        completionTurnPreview:
+          progress.completionState?.turn?.outputText
+            ? previewDebugText(progress.completionState.turn.outputText)
+            : null,
+        note: [
+          typeof progress.completionState?.parserSummary === "string"
+            ? `parser=${progress.completionState.parserSummary}`
+            : null,
+          typeof progress.completionState?.bodyPreview === "string" &&
+          progress.completionState.bodyPreview.length > 0
+            ? `body=${previewDebugText(progress.completionState.bodyPreview)}`
+            : null,
+        ]
+          .filter((entry) => entry)
+          .join(" | ") || undefined,
+      });
+
+      if (
+        progress.completionState?.status === "finished" &&
+        progress.completionState.turn?.mode === "native_tool_call" &&
+        progress.completionState.turn.toolCall
+      ) {
+        finalReply = (progress.completionState.turn.outputText ?? "").trim();
+        return {
+          mode: "native_tool_call",
+          ...(progress.completionState.turn.thinkingText
+            ? { thinkingText: progress.completionState.turn.thinkingText }
+            : {}),
+          toolCall: progress.completionState.turn.toolCall,
+          ...(finalReply.length > 0 ? { outputText: finalReply } : {}),
+          debug: buildAutomationDebug({
+            source: "bridge_stream",
+            freshSession: input.freshSession === true,
+            baselineReply,
+            latestReply,
+            finalReply,
+            completionObserved,
+            startMode: "transport_submit",
+            trace,
+          }),
+          modelLabel: "Qwen Web",
+        };
+      }
+
+      if (
+        progress.completionState?.status === "finished" &&
+        progress.completionState.turn?.outputText
+      ) {
+        finalReply = progress.completionState.turn.outputText.trim();
+        return {
+          mode: "text",
+          ...(progress.completionState.turn.thinkingText
+            ? { thinkingText: progress.completionState.turn.thinkingText }
+            : {}),
+          outputText: finalReply,
+          debug: buildAutomationDebug({
+            source: "bridge_stream",
+            freshSession: input.freshSession === true,
+            baselineReply,
+            latestReply,
+            finalReply,
+            completionObserved,
+            startMode: "transport_submit",
+            trace,
+          }),
+          modelLabel: "Qwen Web",
+        };
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, 300));
+    }
+
+    throw buildFailure("TIMEOUT", "The page did not finish streaming in time");
   }
 }

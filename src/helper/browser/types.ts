@@ -1,4 +1,7 @@
-import type { BrowserConnectionStatus } from "../../shared/contracts";
+import type {
+  BrowserConnectionStatus,
+  ProviderId,
+} from "../../shared/contracts";
 
 export interface PageStateSummary {
   inputReady: boolean;
@@ -75,10 +78,20 @@ export interface ChatTextResult {
 
 export interface BrowserAutomationClient {
   getConnectionStatus(): Promise<BrowserConnectionStatus>;
+  bindProviderTab?(input: { provider: ProviderId }): Promise<BindResult>;
   bindDeepSeekTab(): Promise<BindResult>;
+  resetProvider?(input: { provider: ProviderId; tabId: string }): Promise<void>;
   resetPageBridge(tabId: string): Promise<void>;
-  startNewChat(tabId: string): Promise<void>;
+  startNewChat(
+    input:
+      | string
+      | {
+          provider: ProviderId;
+          tabId: string;
+        },
+  ): Promise<void>;
   sendChatPrompt(input: {
+    provider?: ProviderId;
     tabId: string;
     prompt: string;
     timeoutMs: number;

@@ -27,7 +27,8 @@ export function buildApp(deps: AppDeps) {
   const unauthenticatedPaths = new Set(["/v1/debug/provider-last"]);
 
   app.addHook("onRequest", async (request, reply) => {
-    if (unauthenticatedPaths.has(request.url)) {
+    const pathname = request.url.split("?")[0] ?? request.url;
+    if (unauthenticatedPaths.has(pathname)) {
       return;
     }
 

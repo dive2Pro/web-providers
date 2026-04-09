@@ -1,11 +1,13 @@
 import type { PageStateSummary } from "./browser/types";
 import type { SendChatAutomationDebug } from "./browser/types";
 import type {
+  ProviderId,
   ProviderChatRequest,
   ProviderChatResponse,
 } from "../shared/contracts";
 
 export interface BoundSession {
+  provider: ProviderId;
   tabId: string;
   url: string;
   loginState: "logged_in" | "logged_out";
@@ -14,6 +16,7 @@ export interface BoundSession {
   conversationId: string;
   providerInitialized: boolean;
   providerInitFingerprint: string | null;
+  providerSessionKey: string | null;
 }
 
 export interface ActiveRequest {
@@ -27,6 +30,7 @@ export interface ActiveRequest {
 }
 
 export interface ProviderRequestDebugRecord {
+  provider: ProviderId;
   requestId: string;
   rawRequest: ProviderChatRequest;
   normalizedMessages: ProviderChatRequest["messages"];

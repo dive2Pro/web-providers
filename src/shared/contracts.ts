@@ -28,14 +28,26 @@ export interface ChatResponse {
   rawStatus: "completed" | "timeout" | "failed";
 }
 
+export type ProviderId = "deepseek-web" | "qwen-web";
+
+export interface BindRequest {
+  provider: ProviderId;
+}
+
+export interface ResetRequest {
+  provider: ProviderId;
+}
+
 export interface ProviderChatRequest {
-  model: "deepseek-web-chat";
+  provider: ProviderId;
+  model: string;
   messages: Array<{
     role: "system" | "user" | "assistant";
     content: string;
   }>;
   sessionInit?: {
     fingerprint: string;
+    sessionKey: string;
     prompt: string;
   };
   temperature?: number;

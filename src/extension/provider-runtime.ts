@@ -291,13 +291,25 @@ export interface ExtensionDeps {
 }
 
 const projectRoot = fileURLToPath(new URL("../../", import.meta.url));
-const PROVIDER_NAME = "deepseek-web";
-const PROVIDER_API = "deepseek-web-api";
-const PROVIDER_API_KEY = "deepseek-web-local";
 const PROVIDER_BASE_URL = "http://127.0.0.1";
 const FIXED_HELPER_PORT = Number(process.env.PI_DEEPSEEK_HELPER_PORT ?? 4318);
-const MODEL_ID = "deepseek-web-chat";
 const DEBUG_PROVIDER_REQUESTS = process.env.PI_DEEPSEEK_DEBUG === "1";
+const PROVIDER_DESCRIPTORS = [
+  {
+    provider: "deepseek-web",
+    api: "deepseek-web-api",
+    apiKey: "deepseek-web-local",
+    modelId: "deepseek-web-chat",
+    modelName: "DeepSeek Web Chat",
+  },
+  {
+    provider: "qwen-web",
+    api: "qwen-web-api",
+    apiKey: "qwen-web-local",
+    modelId: "qwen-web-chat",
+    modelName: "Qwen Web Chat",
+  },
+] as const;
 const RESPONSE_ENVELOPE_INSTRUCTION = [
   "Your entire assistant reply must be exactly one JSON object.",
   'For normal replies use: {"type":"message","content":"your response text"}',
@@ -948,9 +960,19 @@ function buildSessionInitPrompt(context: ProviderContext) {
     return undefined;
   }
 
+  const firstTimestamp = [...context.messages]
+    .map((message) => message.timestamp)
+    .filter((timestamp) => Number.isFinite(timestamp))
+    .sort((left, right) => left - right)[0];
+  const sessionKey =
+    typeof firstTimestamp === "number"
+      ? `session-${firstTimestamp}`
+      : `session-${createHash("sha256").update(prompt).digest("hex")}`;
+
   return {
     prompt,
     fingerprint: createHash("sha256").update(prompt).digest("hex"),
+    sessionKey,
   };
 }
 
@@ -1180,27 +1202,28 @@ export default function registerDeepSeekExtension(
     await stopHelper();
   });
 
-  pi.registerProvider(PROVIDER_NAME, {
-    baseUrl: PROVIDER_BASE_URL,
-    apiKey: PROVIDER_API_KEY,
-    api: PROVIDER_API,
-    models: [
-      {
-        id: MODEL_ID,
-        name: "DeepSeek Web Chat",
-        reasoning: false,
-        input: ["text"],
-        cost: {
-          input: 0,
-          output: 0,
-          cacheRead: 0,
-          cacheWrite: 0,
+  for (const descriptor of PROVIDER_DESCRIPTORS) {
+    pi.registerProvider(descriptor.provider, {
+      baseUrl: PROVIDER_BASE_URL,
+      apiKey: descriptor.apiKey,
+      api: descriptor.api,
+      models: [
+        {
+          id: descriptor.modelId,
+          name: descriptor.modelName,
+          reasoning: false,
+          input: ["text"],
+          cost: {
+            input: 0,
+            output: 0,
+            cacheRead: 0,
+            cacheWrite: 0,
+          },
+          contextWindow: 64_000,
+          maxTokens: 8_000,
         },
-        contextWindow: 64_000,
-        maxTokens: 8_000,
-      },
-    ],
-    streamSimple(model, context, options) {
+      ],
+      streamSimple(model, context, options) {
       const stream = new AssistantMessageEventStream();
 
       void (async () => {
@@ -1213,7 +1236,9 @@ export default function registerDeepSeekExtension(
           await deps.helperClient.post(
             current.baseUrl,
             "/v1/bind",
-            {},
+            {
+              provider: model.provider,
+            },
             current.token,
             options?.signal,
           );
@@ -1285,7 +1310,7 @@ export default function registerDeepSeekExtension(
 
           const emitToolCall = (response: Extract<ProviderChatResponse, { mode: "native_tool_call" | "json_fallback" }>) => {
             const validatedToolCall = parseValidatedToolCall(response.toolCall);
-            const toolCallId = `deepseek-web-${output.content.length}`;
+            const toolCallId = `${model.provider}-${output.content.length}`;
 
             output.content.push({
               type: "toolCall",
@@ -1321,6 +1346,7 @@ export default function registerDeepSeekExtension(
           };
 
           const buildRequestPayload = (messages: ProviderChatRequest["messages"]) => ({
+            provider: model.provider,
             model: model.id,
             messages,
             ...(sessionInit ? { sessionInit } : {}),
@@ -1498,6 +1524,7 @@ export default function registerDeepSeekExtension(
       })();
 
       return stream;
-    },
-  });
+      },
+    });
+  }
 }

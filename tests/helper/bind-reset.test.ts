@@ -3,6 +3,72 @@ import { buildApp } from "../../src/helper/app";
 import { HelperError } from "../../src/helper/errors";
 
 describe("bind and reset", () => {
+  it("keeps DeepSeek and Qwen binds isolated", async () => {
+    const resetCalls: Array<{ provider: string; tabId: string }> = [];
+
+    const app = buildApp({
+      token: "test-token",
+      browserClient: {
+        getConnectionStatus: async () => "connected",
+        bindProviderTab: async ({ provider }: { provider: string }) => ({
+          tabId: provider === "deepseek-web" ? "tab-deepseek" : "tab-qwen",
+          url:
+            provider === "deepseek-web"
+              ? "https://chat.deepseek.com/"
+              : "https://chat.qwen.ai/",
+          loginState: "logged_in",
+          bridgeInjected: true,
+          pageState: {
+            inputReady: true,
+            busy: false,
+            latestAssistantPreview: null,
+            assistantCount: 0,
+          },
+        }),
+        resetProvider: async ({
+          provider,
+          tabId,
+        }: {
+          provider: string;
+          tabId: string;
+        }) => {
+          resetCalls.push({ provider, tabId });
+        },
+      } as never,
+    });
+
+    const deepseekBind = await app.inject({
+      method: "POST",
+      url: "/v1/bind",
+      headers: { authorization: "Bearer test-token" },
+      payload: { provider: "deepseek-web" },
+    });
+
+    const qwenBind = await app.inject({
+      method: "POST",
+      url: "/v1/bind",
+      headers: { authorization: "Bearer test-token" },
+      payload: { provider: "qwen-web" },
+    });
+
+    const deepseekReset = await app.inject({
+      method: "POST",
+      url: "/v1/reset",
+      headers: { authorization: "Bearer test-token" },
+      payload: { provider: "deepseek-web" },
+    });
+
+    expect(deepseekBind.statusCode).toBe(200);
+    expect(qwenBind.statusCode).toBe(200);
+    expect(deepseekReset.statusCode).toBe(200);
+    expect(resetCalls).toEqual([
+      {
+        provider: "deepseek-web",
+        tabId: "tab-deepseek",
+      },
+    ]);
+  });
+
   it("binds a DeepSeek tab and reports bound health", async () => {
     const app = buildApp({
       token: "test-token",
