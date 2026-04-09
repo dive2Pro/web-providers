@@ -492,6 +492,70 @@ describe("BbBrowserClient", () => {
     expect(submitted).toEqual(["read src/app.ts"]);
   });
 
+  it("returns a completed Qwen reply once the completion stream closes, even if status is idle", async () => {
+    const submitted: string[] = [];
+
+    const client = new BbBrowserClient({
+      getConnectionStatus: async () => "connected",
+      findDeepSeekTab: async () => ({
+        id: "tab-1",
+        url: "https://chat.deepseek.com/",
+      }),
+      openDeepSeek: async () => undefined,
+      submitPrompt: async (_tabId: string, prompt: string) => {
+        submitted.push(prompt);
+      },
+      evaluate: async <T>(_tabId: string, script: string) => {
+        if (script.includes("__piQwenBridge.getPageState()")) {
+          if (script.includes("__piQwenBridge.getCompletionState()")) {
+            return {
+              pageState: {
+                inputReady: true,
+                busy: false,
+                latestAssistantPreview: "qwen from stream",
+                assistantCount: 1,
+              },
+              completionState: {
+                observed: true,
+                status: "idle",
+                closed: true,
+                turn: {
+                  mode: "text",
+                  outputText: "qwen from stream",
+                  thinkingText: "Thinking completed",
+                },
+              },
+            } as T;
+          }
+
+          return {
+            inputReady: true,
+            busy: false,
+            latestAssistantPreview: "",
+            assistantCount: 0,
+          } as T;
+        }
+
+        return undefined as T;
+      },
+    });
+
+    await expect(
+      client.sendChatPrompt({
+        provider: "qwen-web",
+        tabId: "tab-qwen",
+        prompt: "reply with qwen from stream",
+        timeoutMs: 2_000,
+      }),
+    ).resolves.toMatchObject({
+      mode: "text",
+      outputText: "qwen from stream",
+      thinkingText: "Thinking completed",
+      modelLabel: "Qwen Web",
+    });
+    expect(submitted).toEqual(["reply with qwen from stream"]);
+  });
+
   it("does not return a stale finished Qwen completion from the previous turn", async () => {
     let pollCount = 0;
     let resetCount = 0;
@@ -599,6 +663,89 @@ describe("BbBrowserClient", () => {
     });
     expect(resetCount).toBe(1);
     expect(submitted).toEqual(["who are you"]);
+  });
+
+  it("waits for the Qwen completion stream to finish instead of timing out on the base timeout while streaming", async () => {
+    let pollCount = 0;
+    const submitted: string[] = [];
+
+    const client = new BbBrowserClient({
+      getConnectionStatus: async () => "connected",
+      findDeepSeekTab: async () => ({
+        id: "tab-1",
+        url: "https://chat.deepseek.com/",
+      }),
+      openDeepSeek: async () => undefined,
+      submitPrompt: async (_tabId: string, prompt: string) => {
+        submitted.push(prompt);
+      },
+      evaluate: async <T>(_tabId: string, script: string) => {
+        if (script.includes("__piQwenBridge.getPageState()")) {
+          if (script.includes("__piQwenBridge.getCompletionState()")) {
+            pollCount += 1;
+
+            if (pollCount < 3) {
+              return {
+                pageState: {
+                  inputReady: true,
+                  busy: true,
+                  latestAssistantPreview: "",
+                  assistantCount: 1,
+                },
+                completionState: {
+                  observed: true,
+                  status: "streaming",
+                  closed: false,
+                  turn: null,
+                },
+              } as T;
+            }
+
+            return {
+              pageState: {
+                inputReady: true,
+                busy: false,
+                latestAssistantPreview: "qwen after long stream",
+                assistantCount: 1,
+              },
+              completionState: {
+                observed: true,
+                status: "finished",
+                closed: true,
+                turn: {
+                  mode: "text",
+                  outputText: "qwen after long stream",
+                },
+              },
+            } as T;
+          }
+
+          return {
+            inputReady: true,
+            busy: false,
+            latestAssistantPreview: "",
+            assistantCount: 0,
+          } as T;
+        }
+
+        return undefined as T;
+      },
+    });
+
+    await expect(
+      client.sendChatPrompt({
+        provider: "qwen-web",
+        tabId: "tab-qwen",
+        prompt: "reply after a long stream",
+        timeoutMs: 50,
+      }),
+    ).resolves.toMatchObject({
+      mode: "text",
+      outputText: "qwen after long stream",
+      modelLabel: "Qwen Web",
+    });
+    expect(submitted).toEqual(["reply after a long stream"]);
+    expect(pollCount).toBeGreaterThanOrEqual(3);
   });
 
   it("returns completion text and trace even when the completion body is an incomplete JSON prefix", async () => {

@@ -2,6 +2,7 @@ import { HelperError } from "../../errors";
 
 export const QWEN_HOST_ALLOWLIST = new Set(["chat.qwen.ai"]);
 const QWEN_COMPLETION_PATH = "/api/v2/chat/completions";
+export const QWEN_BRIDGE_VERSION = 5;
 
 export function assertQwenUrl(rawUrl: string) {
   const url = new URL(rawUrl);
@@ -246,16 +247,22 @@ export function parseQwenCompletionSse(body: string) {
 }
 
 function createQwenBridge() {
+  const normalizeToolCall = normalizeQwenToolCall.toString();
+  const parseDeltaText = parseQwenDeltaText.toString();
   const parseState = parseQwenCompletionSseState.toString();
   const parseSse = parseQwenCompletionSse.toString();
 
   return `(() => {
+    ${normalizeToolCall}
+    ${parseDeltaText}
     ${parseState}
     ${parseSse}
     const COMPLETION_PATH = ${JSON.stringify(QWEN_COMPLETION_PATH)};
+    const BRIDGE_VERSION = ${JSON.stringify(QWEN_BRIDGE_VERSION)};
 
     function createCompletionState() {
       return {
+        version: BRIDGE_VERSION,
         observed: false,
         status: "idle",
         closed: false,
@@ -263,14 +270,19 @@ function createQwenBridge() {
         streamReply: "",
         toolCall: null,
         bodyPreview: "",
+        bodyTailPreview: "",
         parserSummary: "",
+        lastError: "",
         lastEventAt: 0,
         terminalAt: 0,
       };
     }
 
     function ensureState() {
-      if (!window.__piQwenBridgeState) {
+      if (
+        !window.__piQwenBridgeState ||
+        window.__piQwenBridgeState.version !== BRIDGE_VERSION
+      ) {
         window.__piQwenBridgeState = createCompletionState();
       }
 
@@ -327,7 +339,9 @@ function createQwenBridge() {
         closed: state.closed,
         terminalAt: state.terminalAt || null,
         bodyPreview: state.bodyPreview || null,
+        bodyTailPreview: state.bodyTailPreview || null,
         parserSummary: state.parserSummary || null,
+        lastError: state.lastError || null,
         turn: toolCall
           ? {
               mode: "native_tool_call",
@@ -346,7 +360,7 @@ function createQwenBridge() {
     }
 
     function ensureFetchPatched() {
-      if (window.__piQwenFetchPatched) {
+      if (window.__piQwenFetchPatchedVersion === BRIDGE_VERSION) {
         return;
       }
 
@@ -363,109 +377,43 @@ function createQwenBridge() {
         state.observed = true;
         state.status = "streaming";
         state.lastEventAt = Date.now();
+        state.lastError = "";
 
         const clone = response.clone();
-        const reader = clone.body && typeof clone.body.getReader === "function"
-          ? clone.body.getReader()
-          : null;
-
-        if (!reader) {
-          clone.text().then((body) => {
-            const parsed = parseQwenCompletionSseState(body);
-            state.bodyPreview = body.trim().slice(0, 1200);
-            state.parserSummary = JSON.stringify({
-              mode: parsed.mode,
-              finished: parsed.finished,
-              hasThinking: Boolean(parsed.thinkingText),
-              hasOutputText: Boolean(parsed.outputText),
-              hasToolCall: Boolean(parsed.mode !== "text" && parsed.toolCall),
-            });
-            state.thinking = parsed.thinkingText || "";
-            state.streamReply = parsed.outputText || "";
-            state.toolCall = parsed.mode !== "text" ? parsed.toolCall : null;
-            state.status =
-              parsed.finished || state.streamReply.trim().length > 0 || state.toolCall
-                ? "finished"
-                : "idle";
-            state.closed = true;
-            state.terminalAt = Date.now();
-            state.lastEventAt = state.terminalAt;
-          }).catch(() => {
-            state.status = "idle";
-            state.closed = true;
-            state.terminalAt = Date.now();
-            state.lastEventAt = state.terminalAt;
+        clone.text().then((body) => {
+          const parsed = parseQwenCompletionSseState(body);
+          state.bodyPreview = body.trim().slice(0, 1200);
+          state.bodyTailPreview = body.trim().slice(-1200);
+          state.parserSummary = JSON.stringify({
+            mode: parsed.mode,
+            finished: parsed.finished,
+            hasThinking: Boolean(parsed.thinkingText),
+            hasOutputText: Boolean(parsed.outputText),
+            hasToolCall: Boolean(parsed.mode !== "text" && parsed.toolCall),
           });
-
-          return response;
-        }
-
-        const decoder = new TextDecoder();
-        let body = "";
-
-        (async () => {
-          try {
-            while (true) {
-              const { value, done } = await reader.read();
-              if (value) {
-                body += decoder.decode(value, { stream: !done });
-                const parsed = parseQwenCompletionSseState(body);
-                state.bodyPreview = body.trim().slice(0, 1200);
-                state.parserSummary = JSON.stringify({
-                  mode: parsed.mode,
-                  finished: parsed.finished,
-                  hasThinking: Boolean(parsed.thinkingText),
-                  hasOutputText: Boolean(parsed.outputText),
-                  hasToolCall: Boolean(parsed.mode !== "text" && parsed.toolCall),
-                });
-                state.thinking = parsed.thinkingText || "";
-                state.streamReply = parsed.outputText || "";
-                state.toolCall = parsed.mode !== "text" ? parsed.toolCall : null;
-                state.lastEventAt = Date.now();
-
-                if (parsed.finished) {
-                  state.status = "finished";
-                  state.terminalAt = state.lastEventAt;
-                } else {
-                  state.status = "streaming";
-                }
-              }
-
-              if (done) {
-                const parsed = parseQwenCompletionSseState(body);
-                state.bodyPreview = body.trim().slice(0, 1200);
-                state.parserSummary = JSON.stringify({
-                  mode: parsed.mode,
-                  finished: parsed.finished,
-                  hasThinking: Boolean(parsed.thinkingText),
-                  hasOutputText: Boolean(parsed.outputText),
-                  hasToolCall: Boolean(parsed.mode !== "text" && parsed.toolCall),
-                });
-                state.thinking = parsed.thinkingText || "";
-                state.streamReply = parsed.outputText || "";
-                state.toolCall = parsed.mode !== "text" ? parsed.toolCall : null;
-                state.status =
-                  parsed.finished || state.streamReply.trim().length > 0 || state.toolCall
-                    ? "finished"
-                    : "idle";
-                state.closed = true;
-                state.terminalAt = Date.now();
-                state.lastEventAt = state.terminalAt;
-                break;
-              }
-            }
-          } catch {
-            state.status = "idle";
-            state.closed = true;
-            state.terminalAt = Date.now();
-            state.lastEventAt = state.terminalAt;
-          }
-        })();
+          state.thinking = parsed.thinkingText || "";
+          state.streamReply = parsed.outputText || "";
+          state.toolCall = parsed.mode !== "text" ? parsed.toolCall : null;
+          state.status =
+            parsed.finished || state.streamReply.trim().length > 0 || state.toolCall
+              ? "finished"
+              : "idle";
+          state.closed = true;
+          state.terminalAt = Date.now();
+          state.lastEventAt = state.terminalAt;
+        }).catch((error) => {
+          state.lastError = String(error);
+          state.status = "idle";
+          state.closed = true;
+          state.terminalAt = Date.now();
+          state.lastEventAt = state.terminalAt;
+        });
 
         return response;
       };
 
       window.__piQwenFetchPatched = true;
+      window.__piQwenFetchPatchedVersion = BRIDGE_VERSION;
     }
 
     function startNewChat() {

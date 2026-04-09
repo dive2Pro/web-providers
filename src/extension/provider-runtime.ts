@@ -581,6 +581,29 @@ function normalizeProtocolMessageText(response: Extract<ProviderChatResponse, { 
   return response;
 }
 
+function normalizeProtocolToolCallResponse(
+  response: Extract<ProviderChatResponse, { mode: "text" }>,
+): ProviderChatResponse {
+  const parsed = parseStrictProtocolEnvelope(response.outputText);
+  if (parsed.envelope?.type !== "tool_call") {
+    return response;
+  }
+
+  return {
+    mode: "json_fallback",
+    toolCall: {
+      name: parsed.envelope.name,
+      argumentsJson: JSON.stringify(parsed.envelope.arguments),
+    },
+    finishReason: response.finishReason,
+    modelLabel: response.modelLabel,
+    ...(typeof response.thinkingText === "string"
+      ? { thinkingText: response.thinkingText }
+      : {}),
+    outputText: response.outputText,
+  };
+}
+
 function validateValueAgainstSchema(
   value: unknown,
   schema: Record<string, unknown> | undefined,
@@ -1455,6 +1478,10 @@ export default function registerDeepSeekExtension(
                 }
               }
             }
+          }
+
+          if (response.mode === "text") {
+            response = normalizeProtocolToolCallResponse(response);
           }
 
           if (response.mode === "text") {

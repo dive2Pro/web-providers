@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   assertQwenUrl,
+  INJECTED_QWEN_BRIDGE_SOURCE,
+  QWEN_BRIDGE_VERSION,
   parseQwenCompletionSse,
 } from "../../src/helper/providers/qwen/page-bridge";
 
@@ -76,5 +78,14 @@ describe("qwen adapter", () => {
       mode: "text",
       outputText: "hello world",
     });
+  });
+
+  it("version-stamps the injected Qwen bridge so a newer bridge can re-patch the page", () => {
+    expect(QWEN_BRIDGE_VERSION).toBeGreaterThan(1);
+    expect(INJECTED_QWEN_BRIDGE_SOURCE).toContain("window.__piQwenFetchPatchedVersion");
+    expect(INJECTED_QWEN_BRIDGE_SOURCE).toContain("!== BRIDGE_VERSION");
+    expect(INJECTED_QWEN_BRIDGE_SOURCE).toContain("version: BRIDGE_VERSION");
+    expect(INJECTED_QWEN_BRIDGE_SOURCE).toContain("function parseQwenDeltaText");
+    expect(INJECTED_QWEN_BRIDGE_SOURCE).toContain("function normalizeQwenToolCall");
   });
 });

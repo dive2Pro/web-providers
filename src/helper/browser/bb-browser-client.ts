@@ -768,7 +768,14 @@ export class BbBrowserClient implements BrowserAutomationClient {
     await this.transport.submitPrompt(input.tabId, input.prompt);
 
     const startedAt = Date.now();
-    while (Date.now() - startedAt < input.timeoutMs) {
+    const idleTimeoutMs = input.timeoutMs;
+    const hardTimeoutMs = Math.max(input.timeoutMs * 4, 120_000);
+    let lastProgressAt = startedAt;
+    let previousStatus: string | null = null;
+    let previousClosed: boolean | null = null;
+    let previousTurnPreview = "";
+
+    while (Date.now() - startedAt < hardTimeoutMs) {
       const progress = await this.transport.evaluate<{
         pageState: PageStateSummary;
         completionState: {
@@ -826,18 +833,48 @@ export class BbBrowserClient implements BrowserAutomationClient {
           .join(" | ") || undefined,
       });
 
+      const streamedTurn = progress.completionState?.turn;
+      const terminalObserved =
+        progress.completionState?.status === "finished" ||
+        progress.completionState?.closed === true;
+      const nextStatus =
+        typeof progress.completionState?.status === "string"
+          ? progress.completionState.status
+          : null;
+      const nextClosed =
+        typeof progress.completionState?.closed === "boolean"
+          ? progress.completionState.closed
+          : null;
+      const nextTurnPreview =
+        typeof streamedTurn?.outputText === "string" ? streamedTurn.outputText : "";
+      const hasCompletionProgress =
+        progress.completionState?.observed === true &&
+        (
+          nextStatus === "streaming" ||
+          nextStatus !== previousStatus ||
+          nextClosed !== previousClosed ||
+          nextTurnPreview !== previousTurnPreview
+        );
+
+      if (hasCompletionProgress || progress.pageState.busy) {
+        lastProgressAt = Date.now();
+      }
+      previousStatus = nextStatus;
+      previousClosed = nextClosed;
+      previousTurnPreview = nextTurnPreview;
+
       if (
-        progress.completionState?.status === "finished" &&
-        progress.completionState.turn?.mode === "native_tool_call" &&
-        progress.completionState.turn.toolCall
+        terminalObserved &&
+        streamedTurn?.mode === "native_tool_call" &&
+        streamedTurn.toolCall
       ) {
-        finalReply = (progress.completionState.turn.outputText ?? "").trim();
+        finalReply = (streamedTurn.outputText ?? "").trim();
         return {
           mode: "native_tool_call",
-          ...(progress.completionState.turn.thinkingText
-            ? { thinkingText: progress.completionState.turn.thinkingText }
+          ...(streamedTurn.thinkingText
+            ? { thinkingText: streamedTurn.thinkingText }
             : {}),
-          toolCall: progress.completionState.turn.toolCall,
+          toolCall: streamedTurn.toolCall,
           ...(finalReply.length > 0 ? { outputText: finalReply } : {}),
           debug: buildAutomationDebug({
             source: "bridge_stream",
@@ -854,14 +891,15 @@ export class BbBrowserClient implements BrowserAutomationClient {
       }
 
       if (
-        progress.completionState?.status === "finished" &&
-        progress.completionState.turn?.outputText
+        terminalObserved &&
+        streamedTurn?.mode === "text" &&
+        streamedTurn.outputText
       ) {
-        finalReply = progress.completionState.turn.outputText.trim();
+        finalReply = streamedTurn.outputText.trim();
         return {
           mode: "text",
-          ...(progress.completionState.turn.thinkingText
-            ? { thinkingText: progress.completionState.turn.thinkingText }
+          ...(streamedTurn.thinkingText
+            ? { thinkingText: streamedTurn.thinkingText }
             : {}),
           outputText: finalReply,
           debug: buildAutomationDebug({
@@ -876,6 +914,10 @@ export class BbBrowserClient implements BrowserAutomationClient {
           }),
           modelLabel: "Qwen Web",
         };
+      }
+
+      if (Date.now() - lastProgressAt >= idleTimeoutMs) {
+        break;
       }
 
       await new Promise((resolve) => setTimeout(resolve, 300));

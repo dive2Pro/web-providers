@@ -11,6 +11,8 @@ lineNumbers: false
 drawings:
   persist: false
 exportFilename: pi-provider-bb-browser-sharing
+setup: |
+  import { GithubIcon } from 'lucide-vue-next'
 ---
 
 <div class="absolute inset-0 bg-gradient-to-br from-slate-950 via-slate-900 to-amber-950 opacity-95"></div>
@@ -20,7 +22,7 @@ exportFilename: pi-provider-bb-browser-sharing
 <div class="relative z-10 flex h-full flex-col justify-between text-stone-100">
   <div>
     <div class="inline-flex rounded-full border border-amber-300/30 px-4 py-1 text-xs uppercase tracking-[0.3em] text-amber-200">
-      GitHub · github.com/dive2Pro/web-providers
+      <GithubIcon class="w-3 h-3 mr-1" /> · github.com/dive2Pro/web-providers
     </div>
     <h1 class="mt-6 text-5xl font-black leading-tight tracking-tight">
       web-providers
