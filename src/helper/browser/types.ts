@@ -24,12 +24,14 @@ export interface ProviderToolCall {
 export interface ProviderToolCallTurn {
   mode: "native_tool_call" | "json_fallback";
   toolCall: ProviderToolCall;
+  thinkingText?: string;
   outputText?: string;
   modelLabel?: string;
 }
 
 export interface ProviderTextTurn {
   mode: "text";
+  thinkingText?: string;
   outputText: string;
   modelLabel?: string;
 }

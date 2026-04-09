@@ -46,12 +46,14 @@ export interface ProviderChatRequest {
 export type ProviderChatResponse =
   | {
       mode: "text";
+      thinkingText?: string;
       outputText: string;
       finishReason: "stop" | "length" | "error";
       modelLabel?: string;
     }
   | {
       mode: "native_tool_call" | "json_fallback";
+      thinkingText?: string;
       toolCall: {
         name: string;
         argumentsJson: string;

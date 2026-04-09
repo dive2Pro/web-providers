@@ -708,6 +708,7 @@ describe("deepseek page bridge", () => {
       ok: true,
       turn: {
         mode: "text",
+        thinkingText: "需要先理清",
         outputText: "最终答案",
       },
       meta: {
@@ -895,6 +896,7 @@ describe("deepseek page bridge", () => {
       ok: true,
       turn: {
         mode: "text",
+        thinkingText: "We need",
         outputText: "Hey!",
       },
       meta: {

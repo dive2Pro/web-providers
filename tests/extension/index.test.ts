@@ -3,6 +3,7 @@ import registerDeepSeekExtension from "../../.pi/extensions/deepseek-web/index";
 
 type TextContent = { type: "text"; text: string };
 type ImageContent = { type: "image"; data: string; mimeType: string };
+type ThinkingContent = { type: "thinking"; thinking: string };
 type ToolCallContent = {
   type: "toolCall";
   id: string;
@@ -18,7 +19,7 @@ type UserMessage = {
 
 type AssistantMessage = {
   role: "assistant";
-  content: Array<TextContent | ToolCallContent>;
+  content: Array<TextContent | ThinkingContent | ToolCallContent>;
   api: string;
   provider: string;
   model: string;
@@ -77,6 +78,19 @@ type StreamEvent =
     }
   | {
       type: "text_end";
+      contentIndex: number;
+      content: string;
+      partial: AssistantMessage;
+    }
+  | { type: "thinking_start"; contentIndex: number; partial: AssistantMessage }
+  | {
+      type: "thinking_delta";
+      contentIndex: number;
+      delta: string;
+      partial: AssistantMessage;
+    }
+  | {
+      type: "thinking_end";
       contentIndex: number;
       content: string;
       partial: AssistantMessage;
@@ -295,6 +309,88 @@ describe("pi provider extension", () => {
       stopReason: "stop",
       content: [{ type: "text", text: "reply" }],
     });
+  });
+
+  it("emits thinking and final text as separate text blocks", async () => {
+    let config: ProviderConfig | undefined;
+
+    registerDeepSeekExtension(
+      {
+        registerProvider(_name, providerConfig) {
+          config = providerConfig as ProviderConfig;
+        },
+        on() {},
+      },
+      {
+        spawnHelper: async () => ({
+          baseUrl: "http://127.0.0.1:4318",
+          token: "token-123",
+          stop: async () => undefined,
+        }),
+        helperClient: {
+          post: async <T>(_baseUrl: string, path: string) => {
+            if (path === "/v1/bind") {
+              return { ok: true } as T;
+            }
+
+            return {
+              mode: "text",
+              thinkingText: "first think",
+              outputText: "then answer",
+              finishReason: "stop",
+              modelLabel: "DeepSeek Web",
+            } as T;
+          },
+        },
+        randomToken: () => "token-123",
+      },
+    );
+
+    const stream = config?.streamSimple?.(
+      {
+        id: "deepseek-web-chat",
+        api: "deepseek-web-api",
+        provider: "deepseek-web",
+      },
+      {
+        messages: [
+          {
+            role: "user",
+            content: "hello",
+            timestamp: Date.now(),
+          },
+        ],
+      },
+      {
+        signal: new AbortController().signal,
+      },
+    );
+
+    const [result, eventTypes] = await Promise.all([
+      stream?.result(),
+      collectEventTypes(stream as AssistantMessageEventStreamLike),
+    ]);
+
+    expect(eventTypes).toEqual([
+      "start",
+      "thinking_start",
+      "thinking_delta",
+      "thinking_end",
+      "text_start",
+      "text_delta",
+      "text_end",
+      "done",
+    ]);
+    expect(result).toMatchObject({
+      stopReason: "stop",
+    });
+    const visibleThinkingBlocks = result?.content.filter(
+      (part): part is ThinkingContent => part.type === "thinking" && part.thinking.trim().length > 0,
+    );
+    expect(visibleThinkingBlocks).toEqual([]);
+    expect(result?.content.filter((part) => part.type === "text")).toEqual([
+      { type: "text", text: "then answer" },
+    ]);
   });
 
 

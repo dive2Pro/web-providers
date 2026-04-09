@@ -64,6 +64,61 @@ describe("provider chat route", () => {
     });
   });
 
+  it("preserves thinking text on structured text output", async () => {
+    const app = buildApp({
+      token: "test-token",
+      browserClient: {
+        getConnectionStatus: async () => "connected",
+        bindDeepSeekTab: async () => ({
+          tabId: "tab-1",
+          url: "https://chat.deepseek.com/",
+          loginState: "logged_in",
+          bridgeInjected: true,
+          pageState: {
+            inputReady: true,
+            busy: false,
+            latestAssistantPreview: null,
+            assistantCount: 0,
+          },
+        }),
+        resetPageBridge: async () => undefined,
+        sendChatPrompt: async () => ({
+          mode: "text",
+          thinkingText: "think step",
+          outputText: "final answer",
+          modelLabel: "DeepSeek Web",
+        }),
+      } as never,
+    });
+
+    await app.inject({
+      method: "POST",
+      url: "/v1/bind",
+      headers: { authorization: "Bearer test-token" },
+    });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/provider/chat",
+      headers: {
+        authorization: "Bearer test-token",
+      },
+      payload: {
+        model: "deepseek-web-chat",
+        messages: [{ role: "user", content: "hello" }],
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({
+      mode: "text",
+      thinkingText: "think step",
+      outputText: "final answer",
+      finishReason: "stop",
+      modelLabel: "DeepSeek Web",
+    });
+  });
+
   it("accepts provider messages and returns structured tool-call output", async () => {
     const app = buildApp({
       token: "test-token",

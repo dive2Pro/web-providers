@@ -15,6 +15,7 @@ interface ManagedHelper {
 
 type TextContent = { type: "text"; text: string };
 type ImageContent = { type: "image"; data: string; mimeType: string };
+type ThinkingContent = { type: "thinking"; thinking: string };
 type ToolCallContent = {
   type: "toolCall";
   id: string;
@@ -30,7 +31,7 @@ type UserMessage = {
 
 type AssistantMessage = {
   role: "assistant";
-  content: Array<TextContent | ToolCallContent>;
+  content: Array<TextContent | ThinkingContent | ToolCallContent>;
   api: string;
   provider: string;
   model: string;
@@ -108,6 +109,19 @@ type AssistantMessageEvent =
     }
   | {
       type: "text_end";
+      contentIndex: number;
+      content: string;
+      partial: AssistantMessage;
+    }
+  | { type: "thinking_start"; contentIndex: number; partial: AssistantMessage }
+  | {
+      type: "thinking_delta";
+      contentIndex: number;
+      delta: string;
+      partial: AssistantMessage;
+    }
+  | {
+      type: "thinking_end";
       contentIndex: number;
       content: string;
       partial: AssistantMessage;
@@ -833,6 +847,30 @@ function createAssistantOutput(model: ProviderModel): AssistantMessage {
   };
 }
 
+function cloneAssistantOutput(output: AssistantMessage): AssistantMessage {
+  return {
+    ...output,
+    content: output.content.map((part) => {
+      if (part.type === "text") {
+        return { ...part };
+      }
+
+      if (part.type === "thinking") {
+        return { ...part };
+      }
+
+      return {
+        ...part,
+        arguments: { ...part.arguments },
+      };
+    }),
+    usage: {
+      ...output.usage,
+      cost: { ...output.usage.cost },
+    },
+  };
+}
+
 function flattenUserContent(content: UserMessage["content"]) {
   if (typeof content === "string") {
     return content;
@@ -851,6 +889,10 @@ function flattenAssistantContent(content: AssistantMessage["content"]) {
     .map((part) => {
       if (part.type === "text") {
         return part.text;
+      }
+
+      if (part.type === "thinking") {
+        return "";
       }
 
       const toolCallPart = part as ToolCallContent;
@@ -1205,6 +1247,42 @@ export default function registerDeepSeekExtension(
             });
           };
 
+          const emitThinking = (thinking: string) => {
+            if (thinking.length === 0) {
+              return;
+            }
+
+            output.content.push({ type: "thinking", thinking: "" });
+            const contentIndex = output.content.length - 1;
+            stream.push({
+              type: "thinking_start",
+              contentIndex,
+              partial: cloneAssistantOutput(output),
+            });
+
+            const thinkingPart = output.content[contentIndex];
+            if (thinkingPart?.type === "thinking") {
+              thinkingPart.thinking += thinking;
+            }
+
+            stream.push({
+              type: "thinking_delta",
+              contentIndex,
+              delta: thinking,
+              partial: cloneAssistantOutput(output),
+            });
+            stream.push({
+              type: "thinking_end",
+              contentIndex,
+              content: thinking,
+              partial: cloneAssistantOutput(output),
+            });
+
+            if (thinkingPart?.type === "thinking") {
+              thinkingPart.thinking = "";
+            }
+          };
+
           const emitToolCall = (response: Extract<ProviderChatResponse, { mode: "native_tool_call" | "json_fallback" }>) => {
             const validatedToolCall = parseValidatedToolCall(response.toolCall);
             const toolCallId = `deepseek-web-${output.content.length}`;
@@ -1355,6 +1433,10 @@ export default function registerDeepSeekExtension(
 
           if (response.mode === "text") {
             response = normalizeProtocolMessageText(response);
+          }
+
+          if (typeof response.thinkingText === "string" && response.thinkingText.trim().length > 0) {
+            emitThinking(response.thinkingText.trim());
           }
 
           if (response.mode === "text" && response.outputText.length > 0) {

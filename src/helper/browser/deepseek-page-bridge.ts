@@ -241,14 +241,17 @@ export function detectJsonFallbackToolCall(text: string) {
 
 export function classifyCompletionTurn(input: {
   reply: string;
+  thinking?: string;
   rawEvents: CompletionRawEvent[];
 }): CompletionTurn {
   const outputText = input.reply.trim();
+  const thinkingText = input.thinking?.trim() ?? "";
   const nativeToolCall = detectNativeToolCall(input.rawEvents);
   if (nativeToolCall) {
     return {
       mode: "native_tool_call",
       toolCall: nativeToolCall,
+      ...(thinkingText.length > 0 ? { thinkingText } : {}),
       ...(outputText.length > 0 ? { outputText } : {}),
     };
   }
@@ -258,6 +261,7 @@ export function classifyCompletionTurn(input: {
     return {
       mode: "json_fallback",
       toolCall: jsonEnvelope.toolCall,
+      ...(thinkingText.length > 0 ? { thinkingText } : {}),
       outputText,
     };
   }
@@ -265,12 +269,14 @@ export function classifyCompletionTurn(input: {
   if (jsonEnvelope?.kind === "message") {
     return {
       mode: "text",
+      ...(thinkingText.length > 0 ? { thinkingText } : {}),
       outputText: jsonEnvelope.content,
     };
   }
 
   return {
     mode: "text",
+    ...(thinkingText.length > 0 ? { thinkingText } : {}),
     outputText,
   };
 }
@@ -278,7 +284,7 @@ export function classifyCompletionTurn(input: {
 export const INJECTED_BRIDGE_SOURCE = `
 (() => {
   const KEY = "__piDeepSeekBridge";
-  const VERSION = 11;
+  const VERSION = 12;
   const __name = (target, _value) => target;
   const detectNativeToolCall = ${detectNativeToolCall.toString()};
   const detectJsonEnvelope = ${detectJsonEnvelope.toString()};
@@ -898,6 +904,7 @@ export const INJECTED_BRIDGE_SOURCE = `
         streamedReply.length > 0
           ? classifyCompletionTurn({
               reply: streamedReply,
+              thinking: completionState.thinking,
               rawEvents: completionState.rawEvents,
             })
           : null;
@@ -931,6 +938,7 @@ export const INJECTED_BRIDGE_SOURCE = `
         ok: true,
         turn: classifyCompletionTurn({
           reply: streamedReply,
+          thinking: completionState.thinking,
           rawEvents: completionState.rawEvents,
         }),
         meta: {
@@ -981,6 +989,7 @@ export const INJECTED_BRIDGE_SOURCE = `
           streamReply.length > 0
             ? classifyCompletionTurn({
                 reply: streamReply,
+                thinking: completionState.thinking,
                 rawEvents: completionState.rawEvents,
               })
             : null,

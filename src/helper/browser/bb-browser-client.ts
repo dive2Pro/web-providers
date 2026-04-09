@@ -654,6 +654,9 @@ export class BbBrowserClient implements BrowserAutomationClient {
           });
           return {
             mode: "text",
+            ...(typeof streamedTurn.thinkingText === "string"
+              ? { thinkingText: streamedTurn.thinkingText }
+              : {}),
             outputText: streamedTurn.outputText,
             debug: buildAutomationDebug({
               source: "bridge_stream",

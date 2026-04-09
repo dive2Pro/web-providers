@@ -429,6 +429,68 @@ describe("BbBrowserClient", () => {
     expect(submittedPrompt).toBeNull();
   });
 
+  it("preserves thinking text from the injected bridge stream result", async () => {
+    const client = new BbBrowserClient({
+      getConnectionStatus: async () => "connected",
+      findDeepSeekTab: async () => ({
+        id: "tab-1",
+        url: "https://chat.deepseek.com/",
+      }),
+      openDeepSeek: async () => undefined,
+      submitPrompt: async () => undefined,
+      evaluate: async <T>(_tabId: string, script: string) => {
+        if (script.includes("window.__piDeepSeekBridge.startPrompt(")) {
+          return {
+            ok: true,
+            baselineState: {
+              inputReady: true,
+              busy: false,
+              latestAssistantPreview: null,
+              assistantCount: 0,
+            },
+          } as T;
+        }
+
+        if (script.includes("getCompletionState()") && script.includes("getPageState()")) {
+          return {
+            pageState: {
+              inputReady: true,
+              busy: false,
+              latestAssistantPreview: null,
+              assistantCount: 0,
+            },
+            completionState: {
+              observed: true,
+              status: "finished",
+              closed: true,
+              terminalAt: Date.now() - 1_000,
+              turn: {
+                mode: "text",
+                thinkingText: "first think",
+                outputText: "then answer",
+              },
+            },
+          } as T;
+        }
+
+        return undefined as T;
+      },
+    });
+
+    await expect(
+      client.sendChatPrompt({
+        tabId: "tab-1",
+        prompt: "hello",
+        timeoutMs: 3000,
+      }),
+    ).resolves.toMatchObject({
+      mode: "text",
+      thinkingText: "first think",
+      outputText: "then answer",
+      modelLabel: "DeepSeek Web",
+    });
+  });
+
   it("includes bridge polling trace when PI_DEEPSEEK_DEBUG is enabled", async () => {
     const previousDebug = process.env.PI_DEEPSEEK_DEBUG;
     process.env.PI_DEEPSEEK_DEBUG = "1";

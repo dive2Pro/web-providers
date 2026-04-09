@@ -97,6 +97,7 @@ function createBaseDebugRecord(
 
 function toProviderResponse(result: {
   mode: "text" | "native_tool_call" | "json_fallback";
+  thinkingText?: string;
   outputText?: string;
   modelLabel?: string;
   toolCall?: {
@@ -107,6 +108,9 @@ function toProviderResponse(result: {
   if (result.mode === "text") {
     return {
       mode: "text",
+      ...(typeof result.thinkingText === "string"
+        ? { thinkingText: result.thinkingText }
+        : {}),
       outputText: result.outputText ?? "",
       finishReason: "stop",
       modelLabel: result.modelLabel,
@@ -118,6 +122,9 @@ function toProviderResponse(result: {
     toolCall: result.toolCall as { name: string; argumentsJson: string },
     finishReason: "stop",
     modelLabel: result.modelLabel,
+    ...(typeof result.thinkingText === "string"
+      ? { thinkingText: result.thinkingText }
+      : {}),
     ...(typeof result.outputText === "string"
       ? { outputText: result.outputText }
       : {}),
