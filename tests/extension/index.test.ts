@@ -171,7 +171,6 @@ describe("pi provider extension", () => {
             ({ mode: "text", outputText: "ok", finishReason: "stop" } as T),
         },
         randomToken: () => "token-123",
-        pickPort: async () => 4318,
       },
     );
 
@@ -245,7 +244,6 @@ describe("pi provider extension", () => {
           },
         },
         randomToken: () => "token-123",
-        pickPort: async () => 4318,
       },
     );
 
@@ -299,6 +297,7 @@ describe("pi provider extension", () => {
     });
   });
 
+
   it("injects fallback instructions and emits pi tool-call events for structured tool turns", async () => {
     const calls: Array<{
       path: string;
@@ -343,7 +342,6 @@ describe("pi provider extension", () => {
           },
         },
         randomToken: () => "token-123",
-        pickPort: async () => 4318,
       },
     );
 
@@ -395,9 +393,11 @@ describe("pi provider extension", () => {
       prompt: expect.stringContaining('"type":"message"'),
       fingerprint: expect.any(String),
     });
-    expect(String(providerChatCall?.body.sessionInit?.prompt ?? "")).toContain('"type":"tool_call"');
-    expect(String(providerChatCall?.body.sessionInit?.prompt ?? "")).toContain("Tool name: bash");
-    expect(String(providerChatCall?.body.sessionInit?.prompt ?? "")).toContain("\"cmd\"");
+    const providerSessionInit =
+      (providerChatCall?.body as { sessionInit?: { prompt?: string } } | undefined)?.sessionInit;
+    expect(String(providerSessionInit?.prompt ?? "")).toContain('"type":"tool_call"');
+    expect(String(providerSessionInit?.prompt ?? "")).toContain("Tool name: bash");
+    expect(String(providerSessionInit?.prompt ?? "")).toContain("\"cmd\"");
     expect(events.map((event) => event.type)).toEqual([
       "start",
       "toolcall_start",
@@ -491,7 +491,6 @@ describe("pi provider extension", () => {
           },
         },
         randomToken: () => "token-123",
-        pickPort: async () => 4318,
       },
     );
 
@@ -536,10 +535,12 @@ describe("pi provider extension", () => {
 
     const providerCalls = calls.filter((call) => call.path === "/v1/provider/chat");
     expect(providerCalls).toHaveLength(2);
-    expect(String(providerCalls[1]?.body.messages?.[0]?.content ?? "")).toContain(
+    const repairMessages =
+      (providerCalls[1]?.body as { messages?: Array<{ content?: string }> } | undefined)?.messages;
+    expect(String(repairMessages?.[0]?.content ?? "")).toContain(
       "The previous reply violated the required JSON response protocol",
     );
-    expect(String(providerCalls[1]?.body.messages?.[0]?.content ?? "")).toContain(
+    expect(String(repairMessages?.[0]?.content ?? "")).toContain(
       "\"cmd\"",
     );
     expect(events.map((event) => event.type)).toEqual([
@@ -617,7 +618,6 @@ describe("pi provider extension", () => {
           },
         },
         randomToken: () => "token-123",
-        pickPort: async () => 4318,
       },
     );
 
@@ -647,14 +647,273 @@ describe("pi provider extension", () => {
     ]);
 
     const providerCalls = calls.filter((call) => call.path === "/v1/provider/chat");
-    expect(providerCalls).toHaveLength(2);
-    expect(String(providerCalls[1]?.body.messages?.[0]?.content ?? "")).toContain(
-      "Return exactly one JSON object",
-    );
+    expect(providerCalls).toHaveLength(1);
     expect(eventTypes).toEqual(["start", "text_start", "text_delta", "text_end", "done"]);
     expect(result).toMatchObject({
       stopReason: "stop",
       content: [{ type: "text", text: "hello" }],
+    });
+  });
+
+  it("salvages the last valid message object when repair output contains extra protocol text", async () => {
+    let config: ProviderConfig | undefined;
+    let providerChatCount = 0;
+
+    registerDeepSeekExtension(
+      {
+        registerProvider(_name, providerConfig) {
+          config = providerConfig as ProviderConfig;
+        },
+        on() {},
+      },
+      {
+        spawnHelper: async () => ({
+          baseUrl: "http://127.0.0.1:4318",
+          token: "token-123",
+          stop: async () => undefined,
+        }),
+        helperClient: {
+          post: async <T>(_baseUrl: string, path: string) => {
+            if (path === "/v1/bind") {
+              return { ok: true } as T;
+            }
+
+            providerChatCount += 1;
+            if (providerChatCount === 1) {
+              return {
+                mode: "text",
+                outputText: "{",
+                finishReason: "stop",
+                modelLabel: "DeepSeek Web",
+              } as T;
+            }
+
+            return {
+              mode: "text",
+              outputText: [
+                "The previous reply violated the required JSON response protocol.",
+                "Return exactly one JSON object and nothing else.",
+                "",
+                '{"type":"message","content":"I\'m ready to coordinate."}',
+              ].join("\n"),
+              finishReason: "stop",
+              modelLabel: "DeepSeek Web",
+            } as T;
+          },
+        },
+        randomToken: () => "token-123",
+      },
+    );
+
+    const stream = config?.streamSimple?.(
+      {
+        id: "deepseek-web-chat",
+        api: "deepseek-web-api",
+        provider: "deepseek-web",
+      },
+      {
+        messages: [
+          {
+            role: "user",
+            content: "hey",
+            timestamp: Date.now(),
+          },
+        ],
+      },
+      {
+        signal: new AbortController().signal,
+      },
+    );
+
+    const result = await stream?.result();
+
+    expect(providerChatCount).toBe(2);
+    expect(result).toMatchObject({
+      stopReason: "stop",
+      content: [{ type: "text", text: "I'm ready to coordinate." }],
+    });
+  });
+
+  it("retries with a minimal repair prompt when the model echoes the repair instructions", async () => {
+    const calls: Array<{
+      path: string;
+      body: Record<string, unknown>;
+    }> = [];
+    let config: ProviderConfig | undefined;
+    let providerChatCount = 0;
+
+    registerDeepSeekExtension(
+      {
+        registerProvider(_name, providerConfig) {
+          config = providerConfig as ProviderConfig;
+        },
+        on() {},
+      },
+      {
+        spawnHelper: async () => ({
+          baseUrl: "http://127.0.0.1:4318",
+          token: "token-123",
+          stop: async () => undefined,
+        }),
+        helperClient: {
+          post: async <T>(
+            _baseUrl: string,
+            path: string,
+            body: Record<string, unknown>,
+          ) => {
+            calls.push({ path, body });
+
+            if (path === "/v1/bind") {
+              return { ok: true } as T;
+            }
+
+            providerChatCount += 1;
+            if (providerChatCount === 1) {
+              return {
+                mode: "text",
+                outputText: "{",
+                finishReason: "stop",
+                modelLabel: "DeepSeek Web",
+              } as T;
+            }
+
+            if (providerChatCount === 2) {
+              return {
+                mode: "text",
+                outputText: [
+                  "The previous reply violated the required JSON response protocol.",
+                  "Return exactly one JSON object and nothing else.",
+                  'For normal replies use: {"type":"message","content":"your response text"}',
+                ].join("\n"),
+                finishReason: "stop",
+                modelLabel: "DeepSeek Web",
+              } as T;
+            }
+
+            return {
+              mode: "text",
+              outputText: '{"type":"message","content":"Recovered on minimal repair."}',
+              finishReason: "stop",
+              modelLabel: "DeepSeek Web",
+            } as T;
+          },
+        },
+        randomToken: () => "token-123",
+      },
+    );
+
+    const stream = config?.streamSimple?.(
+      {
+        id: "deepseek-web-chat",
+        api: "deepseek-web-api",
+        provider: "deepseek-web",
+      },
+      {
+        messages: [
+          {
+            role: "user",
+            content: "hey",
+            timestamp: Date.now(),
+          },
+        ],
+      },
+      {
+        signal: new AbortController().signal,
+      },
+    );
+
+    const result = await stream?.result();
+
+    const providerCalls = calls.filter((call) => call.path === "/v1/provider/chat");
+    expect(providerCalls).toHaveLength(3);
+    const minimalRepairMessage =
+      (providerCalls[2]?.body as { messages?: Array<{ content?: string }> } | undefined)?.messages?.[0]
+        ?.content ?? "";
+    expect(minimalRepairMessage).toContain("Return exactly one JSON object and nothing else.");
+    expect(minimalRepairMessage).not.toContain("Previous invalid reply:");
+    expect(result).toMatchObject({
+      stopReason: "stop",
+      content: [{ type: "text", text: "Recovered on minimal repair." }],
+    });
+  });
+
+  it("falls back to recovered plain text when repair still returns boilerplate plus a normal answer", async () => {
+    let config: ProviderConfig | undefined;
+    let providerChatCount = 0;
+
+    registerDeepSeekExtension(
+      {
+        registerProvider(_name, providerConfig) {
+          config = providerConfig as ProviderConfig;
+        },
+        on() {},
+      },
+      {
+        spawnHelper: async () => ({
+          baseUrl: "http://127.0.0.1:4318",
+          token: "token-123",
+          stop: async () => undefined,
+        }),
+        helperClient: {
+          post: async <T>(_baseUrl: string, path: string) => {
+            if (path === "/v1/bind") {
+              return { ok: true } as T;
+            }
+
+            providerChatCount += 1;
+            if (providerChatCount === 1) {
+              return {
+                mode: "text",
+                outputText: "{",
+                finishReason: "stop",
+                modelLabel: "DeepSeek Web",
+              } as T;
+            }
+
+            return {
+              mode: "text",
+              outputText: [
+                "The previous reply violated the required JSON response protocol.",
+                "Return exactly one JSON object and nothing else.",
+                'For normal replies use: {"type":"message","content":"your response text"}',
+                "",
+                "你好，我在。",
+              ].join("\n"),
+              finishReason: "stop",
+              modelLabel: "DeepSeek Web",
+            } as T;
+          },
+        },
+        randomToken: () => "token-123",
+      },
+    );
+
+    const stream = config?.streamSimple?.(
+      {
+        id: "deepseek-web-chat",
+        api: "deepseek-web-api",
+        provider: "deepseek-web",
+      },
+      {
+        messages: [
+          {
+            role: "user",
+            content: "hey",
+            timestamp: Date.now(),
+          },
+        ],
+      },
+      {
+        signal: new AbortController().signal,
+      },
+    );
+
+    const result = await stream?.result();
+
+    expect(providerChatCount).toBe(2);
+    expect(result).toMatchObject({
+      stopReason: "stop",
+      content: [{ type: "text", text: "你好，我在。" }],
     });
   });
 
@@ -687,7 +946,6 @@ describe("pi provider extension", () => {
             ({ mode: "text", outputText: "ok", finishReason: "stop" } as T),
         },
         randomToken: () => "token-123",
-        pickPort: async () => 4318,
       },
     );
 

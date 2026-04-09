@@ -1,9 +1,11 @@
 import { createHash, randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { createServer } from "node:net";
 import { fileURLToPath } from "node:url";
-import type { ProviderChatRequest, ProviderChatResponse } from "../shared/contracts";
+import type {
+  ProviderChatRequest,
+  ProviderChatResponse,
+} from "../shared/contracts";
 
 interface ManagedHelper {
   baseUrl: string;
@@ -12,7 +14,6 @@ interface ManagedHelper {
 }
 
 type TextContent = { type: "text"; text: string };
-type ThinkingContent = { type: "thinking"; thinking: string };
 type ImageContent = { type: "image"; data: string; mimeType: string };
 type ToolCallContent = {
   type: "toolCall";
@@ -29,7 +30,7 @@ type UserMessage = {
 
 type AssistantMessage = {
   role: "assistant";
-  content: Array<TextContent | ThinkingContent | ToolCallContent>;
+  content: Array<TextContent | ToolCallContent>;
   api: string;
   provider: string;
   model: string;
@@ -273,7 +274,6 @@ export interface ExtensionDeps {
     ): Promise<T>;
   };
   randomToken(): string;
-  pickPort(): Promise<number>;
 }
 
 const projectRoot = fileURLToPath(new URL("../../", import.meta.url));
@@ -281,6 +281,7 @@ const PROVIDER_NAME = "deepseek-web";
 const PROVIDER_API = "deepseek-web-api";
 const PROVIDER_API_KEY = "deepseek-web-local";
 const PROVIDER_BASE_URL = "http://127.0.0.1";
+const FIXED_HELPER_PORT = Number(process.env.PI_DEEPSEEK_HELPER_PORT ?? 4318);
 const MODEL_ID = "deepseek-web-chat";
 const DEBUG_PROVIDER_REQUESTS = process.env.PI_DEEPSEEK_DEBUG === "1";
 const RESPONSE_ENVELOPE_INSTRUCTION = [
@@ -316,6 +317,150 @@ function parseStrictProtocolEnvelope(text: string): {
   protocolLike: boolean;
   error: string | null;
 } {
+  function parseEnvelopeObject(candidate: Record<string, unknown>): ProtocolEnvelope | null {
+    if (candidate.type === "message") {
+      if (
+        Object.keys(candidate).length !== 2 ||
+        typeof candidate.content !== "string"
+      ) {
+        return null;
+      }
+
+      return {
+        type: "message",
+        content: candidate.content,
+      };
+    }
+
+    if (candidate.type === "tool_call") {
+      if (
+        Object.keys(candidate).length !== 3 ||
+        typeof candidate.name !== "string" ||
+        !candidate.arguments ||
+        typeof candidate.arguments !== "object" ||
+        Array.isArray(candidate.arguments)
+      ) {
+        return null;
+      }
+
+      return {
+        type: "tool_call",
+        name: candidate.name,
+        arguments: candidate.arguments as Record<string, unknown>,
+      };
+    }
+
+    return null;
+  }
+
+  function isPlaceholderEnvelope(envelope: ProtocolEnvelope) {
+    if (
+      envelope.type === "message" &&
+      envelope.content.trim() === "your response text"
+    ) {
+      return true;
+    }
+
+    if (
+      envelope.type === "tool_call" &&
+      envelope.name.trim() === "tool_name"
+    ) {
+      return true;
+    }
+
+    return false;
+  }
+
+  function extractEmbeddedObjects(source: string) {
+    const objects: Array<{ json: string; startIndex: number }> = [];
+    let depth = 0;
+    let startIndex = -1;
+    let inString = false;
+    let escaped = false;
+
+    for (let index = 0; index < source.length; index += 1) {
+      const char = source[index];
+
+      if (inString) {
+        if (escaped) {
+          escaped = false;
+          continue;
+        }
+
+        if (char === "\\") {
+          escaped = true;
+          continue;
+        }
+
+        if (char === "\"") {
+          inString = false;
+        }
+        continue;
+      }
+
+      if (char === "\"") {
+        inString = true;
+        continue;
+      }
+
+      if (char === "{") {
+        if (depth === 0) {
+          startIndex = index;
+        }
+        depth += 1;
+        continue;
+      }
+
+      if (char === "}") {
+        if (depth === 0) {
+          continue;
+        }
+
+        depth -= 1;
+        if (depth === 0 && startIndex >= 0) {
+          objects.push({
+            json: source.slice(startIndex, index + 1),
+            startIndex,
+          });
+          startIndex = -1;
+        }
+      }
+    }
+
+    return objects;
+  }
+
+  function findEmbeddedEnvelope(source: string) {
+    return extractEmbeddedObjects(source)
+      .map((entry) => {
+        const prefix = source
+          .slice(Math.max(0, entry.startIndex - 80), entry.startIndex)
+          .toLowerCase();
+        if (
+          prefix.includes("for normal replies use:") ||
+          prefix.includes("for tool calls use:")
+        ) {
+          return null;
+        }
+
+        try {
+          const parsedEntry = JSON.parse(entry.json);
+          if (!parsedEntry || typeof parsedEntry !== "object" || Array.isArray(parsedEntry)) {
+            return null;
+          }
+          const parsedEnvelope = parseEnvelopeObject(parsedEntry as Record<string, unknown>);
+          if (!parsedEnvelope || isPlaceholderEnvelope(parsedEnvelope)) {
+            return null;
+          }
+          return parsedEnvelope;
+        } catch {
+          return null;
+        }
+      })
+      .filter((entry): entry is ProtocolEnvelope => entry !== null)
+      .at(-1);
+  }
+
   const trimmed = text.trim();
   const protocolLike =
     /"type"\s*:\s*"(message|tool_call)"/.test(text) || trimmed.startsWith("{");
@@ -332,6 +477,14 @@ function parseStrictProtocolEnvelope(text: string): {
   try {
     parsed = JSON.parse(trimmed);
   } catch {
+    const embeddedEnvelope = findEmbeddedEnvelope(text);
+    if (embeddedEnvelope) {
+      return {
+        envelope: embeddedEnvelope,
+        protocolLike: true,
+        error: null,
+      };
+    }
     return {
       envelope: null,
       protocolLike,
@@ -348,52 +501,38 @@ function parseStrictProtocolEnvelope(text: string): {
   }
 
   const candidate = parsed as Record<string, unknown>;
-  if (candidate.type === "message") {
-    if (
-      Object.keys(candidate).length !== 2 ||
-      typeof candidate.content !== "string"
-    ) {
-      return {
-        envelope: null,
-        protocolLike: true,
-        error: 'Message replies must match {"type":"message","content":"..."} exactly.',
-      };
-    }
-
+  const directEnvelope = parseEnvelopeObject(candidate);
+  if (directEnvelope) {
     return {
-      envelope: {
-        type: "message",
-        content: candidate.content,
-      },
+      envelope: directEnvelope,
       protocolLike: true,
       error: null,
     };
   }
 
-  if (candidate.type === "tool_call") {
-    if (
-      Object.keys(candidate).length !== 3 ||
-      typeof candidate.name !== "string" ||
-      !candidate.arguments ||
-      typeof candidate.arguments !== "object" ||
-      Array.isArray(candidate.arguments)
-    ) {
-      return {
-        envelope: null,
-        protocolLike: true,
-        error:
-          'Tool calls must match {"type":"tool_call","name":"tool_name","arguments":{...}} exactly.',
-      };
-    }
-
+  const embeddedEnvelope = findEmbeddedEnvelope(text);
+  if (embeddedEnvelope) {
     return {
-      envelope: {
-        type: "tool_call",
-        name: candidate.name,
-        arguments: candidate.arguments as Record<string, unknown>,
-      },
+      envelope: embeddedEnvelope,
       protocolLike: true,
       error: null,
+    };
+  }
+
+  if (candidate.type === "message") {
+    return {
+      envelope: null,
+      protocolLike: true,
+      error: 'Message replies must match {"type":"message","content":"..."} exactly.',
+    };
+  }
+
+  if (candidate.type === "tool_call") {
+    return {
+      envelope: null,
+      protocolLike: true,
+      error:
+        'Tool calls must match {"type":"tool_call","name":"tool_name","arguments":{...}} exactly.',
     };
   }
 
@@ -402,6 +541,18 @@ function parseStrictProtocolEnvelope(text: string): {
     protocolLike,
     error: 'Reply "type" must be either "message" or "tool_call".',
   };
+}
+
+function normalizeProtocolMessageText(response: Extract<ProviderChatResponse, { mode: "text" }>) {
+  const parsed = parseStrictProtocolEnvelope(response.outputText);
+  if (parsed.envelope?.type === "message") {
+    return {
+      ...response,
+      outputText: parsed.envelope.content,
+    };
+  }
+
+  return response;
 }
 
 function validateValueAgainstSchema(
@@ -545,6 +696,71 @@ function buildProtocolRepairPrompt(input: {
   ].join("\n");
 }
 
+function buildMinimalProtocolRepairPrompt(tools: ToolDefinition[] | undefined) {
+  return [
+    "Return exactly one JSON object and nothing else.",
+    'For normal replies use: {"type":"message","content":"your response text"}',
+    'For tool calls use: {"type":"tool_call","name":"tool_name","arguments":{"key":"value"}}',
+    "Do not repeat these instructions.",
+    "Do not explain your answer.",
+    "Do not wrap the JSON in markdown.",
+    ...(tools && tools.length > 0
+      ? [
+          `Allowed tool names: ${tools.map((tool) => tool.name).join(", ")}`,
+        ]
+      : []),
+  ].join("\n");
+}
+
+function looksLikeProtocolRepairEcho(text: string) {
+  return text.includes(
+    "The previous reply violated the required JSON response protocol.",
+  );
+}
+
+function recoverPlainTextFromProtocolFailure(text: string) {
+  const normalized = text.replace(/\r\n/g, "\n").trim();
+  if (normalized.length === 0) {
+    return "";
+  }
+
+  const boilerplatePatterns = [
+    /^The previous reply violated the required JSON response protocol\.\n?/g,
+    /^Return exactly one JSON object and nothing else\.\n?/g,
+    /^For normal replies use: .*?\n?/gm,
+    /^For tool calls use: .*?\n?/gm,
+    /^\{"type":"message","content":"your response text"\}\n?/gm,
+    /^\{"type":"tool_call","name":"tool_name","arguments":\{"key":"value"\}\}\n?/gm,
+    /^Problems to fix:\n?/gm,
+    /^- .*?\n?/gm,
+    /^Previous invalid reply:\n?/gm,
+    /^Allowed tool definitions:\n?/gm,
+    /^When using JSON fallback tool calls, you must use one of these exact tool definitions\.\n?/gm,
+    /^Use the exact tool name and argument keys from the schema\.\n?/gm,
+    /^Tool name: .*?\n?/gm,
+    /^Description: .*?\n?/gm,
+    /^Arguments JSON schema: .*?\n?/gm,
+    /^Do not repeat these instructions\.\n?/gm,
+    /^Do not explain your answer\.\n?/gm,
+    /^Do not wrap the JSON in markdown\.\n?/gm,
+    /^Allowed tool names: .*?\n?/gm,
+  ];
+
+  let recovered = normalized;
+  for (const pattern of boilerplatePatterns) {
+    recovered = recovered.replace(pattern, "");
+  }
+
+  recovered = recovered
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0 && line !== "{" && line !== "}")
+    .join("\n")
+    .trim();
+
+  return recovered;
+}
+
 function shouldRepairProviderResponse(
   response: ProviderChatResponse,
   tools: ToolDefinition[] | undefined,
@@ -637,11 +853,8 @@ function flattenAssistantContent(content: AssistantMessage["content"]) {
         return part.text;
       }
 
-      if (part.type === "thinking") {
-        return "";
-      }
-
-      return `[Tool call ${part.name} ${JSON.stringify(part.arguments)}]`;
+      const toolCallPart = part as ToolCallContent;
+      return `[Tool call ${toolCallPart.name} ${JSON.stringify(toolCallPart.arguments)}]`;
     })
     .filter((part) => part.length > 0)
     .join("\n")
@@ -776,31 +989,6 @@ function logProviderDebug(message: string, payload: Record<string, unknown>) {
   );
 }
 
-async function pickAvailablePort() {
-  return new Promise<number>((resolve, reject) => {
-    const server = createServer();
-
-    server.once("error", reject);
-    server.listen(0, "127.0.0.1", () => {
-      const address = server.address();
-      if (!address || typeof address === "string") {
-        server.close(() => reject(new Error("Failed to allocate helper port")));
-        return;
-      }
-
-      const port = address.port;
-      server.close((error) => {
-        if (error) {
-          reject(error);
-          return;
-        }
-
-        resolve(port);
-      });
-    });
-  });
-}
-
 async function postJson<T>(
   baseUrl: string,
   path: string,
@@ -904,7 +1092,6 @@ function defaultDeps(): ExtensionDeps {
       post: postJson,
     },
     randomToken: () => randomUUID(),
-    pickPort: pickAvailablePort,
   };
 }
 
@@ -923,8 +1110,7 @@ export default function registerDeepSeekExtension(
     if (!helperPromise) {
       helperPromise = (async () => {
         const token = deps.randomToken();
-        const port = await deps.pickPort();
-        const started = await deps.spawnHelper({ token, port });
+        const started = await deps.spawnHelper({ token, port: FIXED_HELPER_PORT });
         helper = started;
         return started;
       })().catch((error) => {
@@ -991,90 +1177,35 @@ export default function registerDeepSeekExtension(
           );
 
           const sessionInit = buildSessionInitPrompt(context);
-          const sendProviderTurn = async (
-            messages: ProviderChatRequest["messages"],
-          ) => {
-            const requestPayload = {
-              model: model.id,
-              messages,
-              ...(sessionInit ? { sessionInit } : {}),
-              ...(typeof options?.temperature === "number"
-                ? { temperature: options.temperature }
-                : {}),
-              ...(typeof options?.maxTokens === "number"
-                ? { maxOutputTokens: options.maxTokens }
-                : {}),
-            };
-
-            const response = await deps.helperClient.post<ProviderChatResponse>(
-              current.baseUrl,
-              "/v1/provider/chat",
-              (() => {
-                logProviderDebug("provider chat request", {
-                  helperBaseUrl: current.baseUrl,
-                  model: model.id,
-                  request: requestPayload,
-                });
-                return requestPayload;
-              })(),
-              current.token,
-              options?.signal,
-            );
-            logProviderDebug("provider chat response", {
-              helperBaseUrl: current.baseUrl,
-              model: model.id,
-              response,
-            });
-            return response;
-          };
-
-          let response = await sendProviderTurn(toProviderMessages(context));
-          const repairDecision = shouldRepairProviderResponse(response, context.tools);
-          if (repairDecision.shouldRepair) {
-            response = await sendProviderTurn([
-              {
-                role: "user",
-                content: buildProtocolRepairPrompt({
-                  rawOutput: repairDecision.rawOutput,
-                  issues: repairDecision.issues,
-                  tools: context.tools,
-                }),
-              },
-            ]);
-
-            const postRepairDecision = shouldRepairProviderResponse(response, context.tools);
-            if (postRepairDecision.shouldRepair) {
-              throw new Error(
-                `Protocol repair failed: ${postRepairDecision.issues.join(" ")}`,
-              );
+          const emitText = (text: string) => {
+            if (text.length === 0) {
+              return;
             }
-          }
 
-          if (response.mode === "text" && response.outputText.length > 0) {
             output.content.push({ type: "text", text: "" });
             const contentIndex = output.content.length - 1;
             stream.push({ type: "text_start", contentIndex, partial: output });
 
             const textPart = output.content[contentIndex];
             if (textPart?.type === "text") {
-              textPart.text += response.outputText;
+              textPart.text += text;
             }
 
             stream.push({
               type: "text_delta",
               contentIndex,
-              delta: response.outputText,
+              delta: text,
               partial: output,
             });
             stream.push({
               type: "text_end",
               contentIndex,
-              content: response.outputText,
+              content: text,
               partial: output,
             });
-          }
+          };
 
-          if (response.mode !== "text") {
+          const emitToolCall = (response: Extract<ProviderChatResponse, { mode: "native_tool_call" | "json_fallback" }>) => {
             const validatedToolCall = parseValidatedToolCall(response.toolCall);
             const toolCallId = `deepseek-web-${output.content.length}`;
 
@@ -1109,6 +1240,129 @@ export default function registerDeepSeekExtension(
               },
               partial: output,
             });
+          };
+
+          const buildRequestPayload = (messages: ProviderChatRequest["messages"]) => ({
+            model: model.id,
+            messages,
+            ...(sessionInit ? { sessionInit } : {}),
+            ...(typeof options?.temperature === "number"
+              ? { temperature: options.temperature }
+              : {}),
+            ...(typeof options?.maxTokens === "number"
+              ? { maxOutputTokens: options.maxTokens }
+              : {}),
+          });
+
+          const sendProviderTurn = async (messages: ProviderChatRequest["messages"]) => {
+            const requestPayload = buildRequestPayload(messages);
+
+            const response = await deps.helperClient.post<ProviderChatResponse>(
+              current.baseUrl,
+              "/v1/provider/chat",
+              (() => {
+                logProviderDebug("provider chat request", {
+                  helperBaseUrl: current.baseUrl,
+                  model: model.id,
+                  request: requestPayload,
+                });
+                return requestPayload;
+              })(),
+              current.token,
+              options?.signal,
+            );
+            logProviderDebug("provider chat response", {
+              helperBaseUrl: current.baseUrl,
+              model: model.id,
+              response,
+            });
+            return response;
+          };
+
+          let response: ProviderChatResponse;
+          response = await sendProviderTurn(toProviderMessages(context));
+
+          const repairDecision = shouldRepairProviderResponse(response, context.tools);
+          if (repairDecision.shouldRepair) {
+            response = await sendProviderTurn([
+              {
+                role: "user",
+                content: buildProtocolRepairPrompt({
+                  rawOutput: repairDecision.rawOutput,
+                  issues: repairDecision.issues,
+                  tools: context.tools,
+                }),
+              },
+            ]);
+
+            const postRepairDecision = shouldRepairProviderResponse(response, context.tools);
+            if (postRepairDecision.shouldRepair) {
+              if (
+                response.mode === "text" &&
+                looksLikeProtocolRepairEcho(response.outputText)
+              ) {
+                const recoveredText = recoverPlainTextFromProtocolFailure(response.outputText);
+                if (recoveredText.length > 0) {
+                  response = {
+                    ...response,
+                    outputText: recoveredText,
+                  };
+                } else {
+                response = await sendProviderTurn([
+                  {
+                    role: "user",
+                    content: buildMinimalProtocolRepairPrompt(context.tools),
+                  },
+                ]);
+
+                const finalRepairDecision = shouldRepairProviderResponse(
+                  response,
+                  context.tools,
+                );
+                if (finalRepairDecision.shouldRepair) {
+                  const recoveredText = recoverPlainTextFromProtocolFailure(
+                    response.mode === "text" ? response.outputText : "",
+                  );
+                  if (response.mode === "text" && recoveredText.length > 0) {
+                    response = {
+                      ...response,
+                      outputText: recoveredText,
+                    };
+                  } else {
+                    throw new Error(
+                      `Protocol repair failed: ${finalRepairDecision.issues.join(" ")}`,
+                    );
+                  }
+                }
+                }
+              } else {
+                const recoveredText = recoverPlainTextFromProtocolFailure(
+                  response.mode === "text" ? response.outputText : "",
+                );
+                if (response.mode === "text" && recoveredText.length > 0) {
+                  response = {
+                    ...response,
+                    outputText: recoveredText,
+                  };
+                } else {
+                  throw new Error(
+                    `Protocol repair failed: ${postRepairDecision.issues.join(" ")}`,
+                  );
+                }
+              }
+            }
+          }
+
+          if (response.mode === "text") {
+            response = normalizeProtocolMessageText(response);
+          }
+
+          if (response.mode === "text" && response.outputText.length > 0) {
+            emitText(response.outputText);
+          }
+
+          if (response.mode !== "text") {
+            emitToolCall(response);
 
             if (response.finishReason === "error") {
               output.stopReason = "error";

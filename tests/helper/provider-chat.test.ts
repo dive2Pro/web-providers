@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { buildApp } from "../../src/helper/app";
+import { HelperError } from "../../src/helper/errors";
 
 describe("provider chat route", () => {
   it("accepts provider messages and returns structured text output", async () => {
@@ -626,6 +627,88 @@ describe("provider chat route", () => {
       error: {
         code: "AUTOMATION_DESYNC",
         message: "Unexpected automation failure: boom",
+      },
+    });
+  });
+
+  it("preserves automation debug when provider chat fails with HelperError", async () => {
+    const app = buildApp({
+      token: "test-token",
+      browserClient: {
+        getConnectionStatus: async () => "connected",
+        bindDeepSeekTab: async () => ({
+          tabId: "tab-1",
+          url: "https://chat.deepseek.com/",
+          loginState: "logged_in",
+          bridgeInjected: true,
+          pageState: {
+            inputReady: true,
+            busy: false,
+            latestAssistantPreview: null,
+            assistantCount: 0,
+          },
+        }),
+        resetPageBridge: async () => undefined,
+        sendChatPrompt: async () => {
+          throw new HelperError("TIMEOUT", "The page did not finish streaming in time", {
+            source: "client_error",
+            freshSession: false,
+            completionObserved: true,
+            trace: [
+              {
+                phase: "poll",
+                completionStatus: "finished",
+                completionTurnPreview: "{\"",
+              },
+            ],
+          });
+        },
+      } as never,
+    });
+
+    await app.inject({
+      method: "POST",
+      url: "/v1/bind",
+      headers: { authorization: "Bearer test-token" },
+    });
+
+    const requestResponse = await app.inject({
+      method: "POST",
+      url: "/v1/provider/chat",
+      headers: { authorization: "Bearer test-token" },
+      payload: {
+        model: "deepseek-web-chat",
+        messages: [{ role: "user", content: "hey" }],
+      },
+    });
+
+    expect(requestResponse.statusCode).toBe(409);
+
+    const debugResponse = await app.inject({
+      method: "GET",
+      url: "/v1/debug/provider-last",
+      headers: { authorization: "Bearer test-token" },
+    });
+
+    expect(debugResponse.statusCode).toBe(200);
+    expect(debugResponse.json()).toMatchObject({
+      status: "failed",
+      prompt: "hey",
+      automation: {
+        source: "client_error",
+        freshSession: false,
+        completionObserved: true,
+        trace: [
+          {
+            phase: "poll",
+            completionStatus: "finished",
+            completionTurnPreview: "{\"",
+          },
+        ],
+      },
+      error: {
+        code: "TIMEOUT",
+        message: "The page did not finish streaming in time",
       },
     });
   });
