@@ -595,7 +595,7 @@ function normalizeProtocolToolCallResponse(
       name: parsed.envelope.name,
       argumentsJson: JSON.stringify(parsed.envelope.arguments),
     },
-    finishReason: response.finishReason,
+    finishReason: response.finishReason === "error" ? "error" : "stop",
     modelLabel: response.modelLabel,
     ...(typeof response.thinkingText === "string"
       ? { thinkingText: response.thinkingText }

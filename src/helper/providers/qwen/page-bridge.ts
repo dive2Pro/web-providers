@@ -2,7 +2,7 @@ import { HelperError } from "../../errors";
 
 export const QWEN_HOST_ALLOWLIST = new Set(["chat.qwen.ai"]);
 const QWEN_COMPLETION_PATH = "/api/v2/chat/completions";
-export const QWEN_BRIDGE_VERSION = 5;
+export const QWEN_BRIDGE_VERSION = 6;
 
 export function assertQwenUrl(rawUrl: string) {
   const url = new URL(rawUrl);
@@ -314,16 +314,45 @@ function createQwenBridge() {
       return document.querySelectorAll(".qwen-chat-message-assistant").length;
     }
 
+    function detectBlockingMessage() {
+      const path = location.pathname.toLowerCase();
+      const pageText = (document.body?.innerText || "").trim();
+      const normalizedText = pageText.toLowerCase();
+      const signInIndicators = [
+        "Sign in",
+        "Log in",
+        "Continue with Google",
+        "Continue with Apple",
+        "Scan to log in",
+      ];
+      const authPath =
+        path.includes("login") ||
+        path.includes("signin") ||
+        path.includes("sign-in") ||
+        path.includes("auth");
+      const signInPrompt = signInIndicators.some((indicator) =>
+        normalizedText.includes(indicator.toLowerCase()),
+      );
+
+      if (authPath || signInPrompt) {
+        return "Please sign in to Qwen in the browser tab.";
+      }
+
+      return null;
+    }
+
     function getPageState() {
       const composer = findComposer();
       const latestAssistantPreview = findLatestAssistantAnswer();
       const completionState = ensureState();
+      const blockingMessage = detectBlockingMessage();
 
       return {
-        inputReady: Boolean(composer && !composer.disabled),
+        inputReady: Boolean(!blockingMessage && composer && !composer.disabled),
         busy: completionState.status === "streaming",
         latestAssistantPreview: latestAssistantPreview || null,
         assistantCount: countAssistantMessages(),
+        blockingMessage,
       };
     }
 

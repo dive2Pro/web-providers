@@ -1,7 +1,7 @@
 export type OpenAiAdapterConfig = {
-  token: string;
+  token?: string;
   helperBaseUrl: string;
-  helperToken: string;
+  helperToken?: string;
   port: number;
 };
 
@@ -12,16 +12,8 @@ export function loadOpenAiAdapterConfig(
   const helperBaseUrl = env.HELPER_BASE_URL;
   const helperToken = env.HELPER_TOKEN;
 
-  if (!token) {
-    throw new Error("OPENAI_ADAPTER_TOKEN is required");
-  }
-
   if (!helperBaseUrl) {
     throw new Error("HELPER_BASE_URL is required");
-  }
-
-  if (!helperToken) {
-    throw new Error("HELPER_TOKEN is required");
   }
 
   return {

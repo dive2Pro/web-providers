@@ -9,6 +9,10 @@ export class AdapterError extends Error {
   }
 }
 
+export function unsupportedFeatureError(message: string) {
+  return new AdapterError(400, "unsupported_feature", message);
+}
+
 export function mapHelperError(payload: { error?: string; message?: string }) {
   switch (payload.error) {
     case "NOT_BOUND":

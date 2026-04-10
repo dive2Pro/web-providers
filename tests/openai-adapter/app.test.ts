@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { buildOpenAiAdapterApp } from "../../src/openai-adapter/app";
+import { loadOpenAiAdapterConfig } from "../../src/openai-adapter/config";
 import { createHelperClient } from "../../src/openai-adapter/helper-client";
 
 describe("openai adapter helper client", () => {
@@ -46,6 +47,40 @@ describe("openai adapter helper client", () => {
       mode: "text",
       outputText: "helper says hi",
     });
+  });
+
+  it("does not send helper authorization when helper token is not configured", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        mode: "text",
+        outputText: "helper says hi",
+        finishReason: "stop",
+      }),
+    });
+
+    const client = createHelperClient({
+      helperBaseUrl: "http://127.0.0.1:4318",
+      fetchImpl: fetchMock,
+    });
+
+    await client.run({
+      publicModel: "qwen-web-chat",
+      provider: "qwen-web",
+      responseFormat: "chat_completions",
+      messages: [{ role: "user", content: "hello" }],
+      tools: [],
+      toolChoice: "none",
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://127.0.0.1:4318/v1/provider/chat",
+      expect.objectContaining({
+        headers: {
+          "content-type": "application/json",
+        },
+      }),
+    );
   });
 
   it("injects session init instructions when tools or system prompts are present", async () => {
@@ -104,6 +139,22 @@ describe("openai adapter helper client", () => {
   });
 });
 
+describe("openai adapter config", () => {
+  it("allows missing HELPER_TOKEN in local mode", () => {
+    expect(
+      loadOpenAiAdapterConfig({
+        HELPER_BASE_URL: "http://127.0.0.1:4318",
+        PORT: "4319",
+      }),
+    ).toEqual({
+      token: undefined,
+      helperBaseUrl: "http://127.0.0.1:4318",
+      helperToken: undefined,
+      port: 4319,
+    });
+  });
+});
+
 describe("openai adapter app", () => {
   afterEach(() => {
     vi.restoreAllMocks();
@@ -129,6 +180,26 @@ describe("openai adapter app", () => {
         message: "Unauthorized",
       },
     });
+  });
+
+  it("allows unauthenticated access when adapter token is not configured", async () => {
+    const app = buildOpenAiAdapterApp({
+      helperBaseUrl: "http://127.0.0.1:4318",
+      helperToken: "helper-token",
+      fetchImpl: vi.fn(),
+    });
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/v1/models",
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json().data).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: "deepseek-web-chat", object: "model" }),
+      ]),
+    );
   });
 
   it("returns the public model list", async () => {

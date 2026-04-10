@@ -3,10 +3,6 @@ import { BbBrowserClient, createBbBrowserTransport } from "./browser/bb-browser-
 
 const token = process.env.HELPER_TOKEN;
 
-if (!token) {
-  throw new Error("HELPER_TOKEN is required");
-}
-
 const app = buildApp({
   token,
   browserClient: new BbBrowserClient(createBbBrowserTransport()),

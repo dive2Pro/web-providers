@@ -9,7 +9,7 @@ import { registerResetRoute } from "./routes/reset";
 import { HelperState } from "./state";
 
 export interface AppDeps {
-  token: string;
+  token?: string;
   browserClient: BrowserAutomationClient;
 }
 
@@ -32,7 +32,7 @@ export function buildApp(deps: AppDeps) {
       return;
     }
 
-    if (request.headers.authorization !== `Bearer ${deps.token}`) {
+    if (deps.token && request.headers.authorization !== `Bearer ${deps.token}`) {
       return reply.code(401).send({ error: "UNAUTHORIZED" });
     }
   });

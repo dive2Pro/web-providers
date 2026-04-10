@@ -7,9 +7,9 @@ import { registerResponsesRoute } from "./routes/responses";
 export type HelperClient = ReturnType<typeof createHelperClient>;
 
 export function buildOpenAiAdapterApp(input: {
-  token: string;
+  token?: string;
   helperBaseUrl: string;
-  helperToken: string;
+  helperToken?: string;
   fetchImpl?: typeof fetch;
 }) {
   const app = Fastify();
@@ -20,7 +20,7 @@ export function buildOpenAiAdapterApp(input: {
   });
 
   app.addHook("onRequest", async (request, reply) => {
-    if (request.headers.authorization !== `Bearer ${input.token}`) {
+    if (input.token && request.headers.authorization !== `Bearer ${input.token}`) {
       return reply.code(401).send({
         error: {
           code: "unauthorized",

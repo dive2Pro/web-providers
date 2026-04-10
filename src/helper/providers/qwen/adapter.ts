@@ -53,7 +53,7 @@ export function createQwenAdapter(
       return {
         tabId: tab.id,
         url: normalizedUrl,
-        loginState: "logged_in",
+        loginState: pageState.inputReady ? "logged_in" : "logged_out",
         bridgeInjected: true,
         pageState,
       };

@@ -88,4 +88,9 @@ describe("qwen adapter", () => {
     expect(INJECTED_QWEN_BRIDGE_SOURCE).toContain("function parseQwenDeltaText");
     expect(INJECTED_QWEN_BRIDGE_SOURCE).toContain("function normalizeQwenToolCall");
   });
+
+  it("embeds logged-out detection for sign-in screens in the injected bridge", () => {
+    expect(INJECTED_QWEN_BRIDGE_SOURCE).toContain("Please sign in to Qwen in the browser tab.");
+    expect(INJECTED_QWEN_BRIDGE_SOURCE).toContain("Sign in");
+  });
 });

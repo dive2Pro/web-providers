@@ -125,6 +125,28 @@ describe("helper app", () => {
     });
   });
 
+  it("allows unauthenticated access when helper token is not configured", async () => {
+    const app = buildApp({
+      browserClient: {
+        getConnectionStatus: async () => "disconnected",
+      } as never,
+    });
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/v1/health",
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({
+      ok: true,
+      browser: "disconnected",
+      bindState: "unbound",
+      degraded: false,
+      lastBridgeHeartbeatAt: null,
+    });
+  });
+
   it("returns health state for an unbound helper", async () => {
     const app = buildApp({
       token: "test-token",

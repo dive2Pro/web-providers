@@ -784,11 +784,22 @@ export class BbBrowserClient implements BrowserAutomationClient {
           closed?: boolean;
           bodyPreview?: string | null;
           parserSummary?: string | null;
-          turn?: {
-            mode: "text";
-            outputText: string;
-            thinkingText?: string;
-          } | null;
+          turn?:
+            | {
+                mode: "text";
+                outputText: string;
+                thinkingText?: string;
+              }
+            | {
+                mode: "native_tool_call";
+                toolCall: {
+                  name: string;
+                  argumentsJson: string;
+                };
+                outputText?: string;
+                thinkingText?: string;
+              }
+            | null;
         };
       }>(input.tabId, QWEN_PROGRESS_SCRIPT);
 

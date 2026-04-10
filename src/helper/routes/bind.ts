@@ -13,6 +13,17 @@ export function registerBindRoute(app: FastifyInstance, ctx: AppContext) {
         ctx.browserClient.bindProviderTab
           ? await ctx.browserClient.bindProviderTab({ provider })
           : await ctx.browserClient.bindDeepSeekTab();
+
+      if (result.loginState === "logged_out") {
+        return reply.code(409).send({
+          error: "NOT_BOUND",
+          message:
+            provider === "qwen-web"
+              ? "Open Qwen in the browser tab, sign in on that page, then retry."
+              : result.pageState.blockingMessage ?? `Log in to ${provider} in the browser tab and retry.`,
+        });
+      }
+
       const previousSession = ctx.state.getBoundSession(provider);
       const sameTab = previousSession?.tabId === result.tabId;
       const nextConversationId =

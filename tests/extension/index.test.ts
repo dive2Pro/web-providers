@@ -723,6 +723,93 @@ describe("pi provider extension", () => {
     });
   });
 
+  it("converts a text-mode protocol tool_call envelope even when the provider reports finishReason length", async () => {
+    let config: ProviderConfig | undefined;
+
+    registerDeepSeekExtension(
+      {
+        registerProvider(_name, providerConfig) {
+          config = providerConfig as ProviderConfig;
+        },
+        on() {},
+      },
+      {
+        spawnHelper: async () => ({
+          baseUrl: "http://127.0.0.1:4318",
+          token: "token-123",
+          stop: async () => undefined,
+        }),
+        helperClient: {
+          post: async <T>(_baseUrl: string, path: string) => {
+            if (path === "/v1/bind") {
+              return { ok: true } as T;
+            }
+
+            return {
+              mode: "text",
+              outputText:
+                "{\"type\":\"tool_call\",\"name\":\"bash\",\"arguments\":{\"cmd\":\"pwd\"}}",
+              finishReason: "length",
+              modelLabel: "Qwen Web",
+            } as T;
+          },
+        },
+        randomToken: () => "token-123",
+      },
+    );
+
+    const stream = config?.streamSimple?.(
+      {
+        id: "qwen-web-chat",
+        api: "qwen-web-api",
+        provider: "qwen-web",
+      },
+      {
+        messages: [
+          {
+            role: "user",
+            content: "show cwd",
+            timestamp: Date.now(),
+          },
+        ],
+        tools: [
+          {
+            name: "bash",
+            inputSchema: {
+              type: "object",
+              properties: {
+                cmd: { type: "string" },
+              },
+              required: ["cmd"],
+            },
+          },
+        ],
+      },
+    );
+
+    const events: StreamEvent[] = [];
+    for await (const event of stream as AssistantMessageEventStreamLike) {
+      events.push(event);
+    }
+
+    expect(events.map((event) => event.type)).toEqual([
+      "start",
+      "toolcall_start",
+      "toolcall_delta",
+      "toolcall_end",
+      "done",
+    ]);
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        type: "toolcall_end",
+        toolCall: expect.objectContaining({
+          name: "bash",
+          arguments: { cmd: "pwd" },
+        }),
+      }),
+    );
+  });
+
   it("repairs malformed tool-call arguments against the active tool schema before emitting pi tool events", async () => {
     const calls: Array<{
       path: string;
