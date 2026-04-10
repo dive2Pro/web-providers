@@ -127,6 +127,7 @@ function assertNonStreaming(stream: unknown) {
 
 export function normalizeChatCompletionsRequest(
   body: {
+    model?: string;
     stream?: boolean;
     messages?: ChatCompletionsMessage[];
     tools?: ChatCompletionsTool[];
@@ -156,6 +157,7 @@ export function normalizeChatCompletionsRequest(
 
 export function normalizeResponsesRequest(
   body: {
+    model?: string;
     stream?: boolean;
     input?: ResponsesInputMessage[];
     tools?: ResponsesTool[];
