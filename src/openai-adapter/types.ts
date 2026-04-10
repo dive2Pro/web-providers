@@ -1,4 +1,5 @@
 import type { PublicModel } from "./models";
+import type { ProviderChatResponse } from "../shared/contracts";
 
 export type NormalizedMessage = {
   role: "system" | "user" | "assistant";
@@ -28,3 +29,5 @@ export type NormalizedRequest = {
   temperature?: number;
   maxOutputTokens?: number;
 };
+
+export type ExecutionResult = ProviderChatResponse;
