@@ -4,6 +4,7 @@
   "type": "module",
   "scripts": {
     "dev:helper": "tsx src/helper/main.ts",
+    "dev:openai-adapter": "tsx src/openai-adapter/main.ts",
     "test": "vitest run",
     "build": "rm -rf dist && tsc -p tsconfig.json",
     "slides:dev": "slidev slides/web-providers.md",
