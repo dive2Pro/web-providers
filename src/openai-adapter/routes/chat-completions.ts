@@ -1,9 +1,9 @@
 import type { FastifyInstance } from "fastify";
-import { AdapterError } from "../errors";
-import { getPublicModel } from "../models";
 import { normalizeChatCompletionsRequest } from "../normalize";
 import { serializeChatCompletions } from "../serialize-chat";
+import { serializeChatCompletionsStream } from "../streaming/chat-completions";
 import type { HelperClient } from "../app";
+import { handlePseudoStreamRoute, sendAdapterRouteError } from "./streaming";
 
 export function registerChatCompletionsRoute(
   app: FastifyInstance,
@@ -27,30 +27,17 @@ export function registerChatCompletionsRoute(
         temperature?: number;
         max_tokens?: number;
       };
-      const model = getPublicModel(body.model);
-      if (!model) {
-        throw new AdapterError(404, "model_not_found", `Unknown model: ${body.model}`);
-      }
-
-      const normalized = normalizeChatCompletionsRequest(body, model);
-      const result = await helperClient.run(normalized);
-      return serializeChatCompletions({
-        id: `chatcmpl-${Date.now()}`,
-        created: Math.floor(Date.now() / 1000),
-        model: normalized.publicModel,
-        result,
+      return await handlePseudoStreamRoute({
+        body,
+        reply,
+        helperClient,
+        idPrefix: "chatcmpl",
+        normalize: normalizeChatCompletionsRequest,
+        serialize: serializeChatCompletions,
+        serializeStream: serializeChatCompletionsStream,
       });
     } catch (error) {
-      if (error instanceof AdapterError) {
-        return reply.code(error.statusCode).send({
-          error: {
-            code: error.code,
-            message: error.message,
-          },
-        });
-      }
-
-      throw error;
+      return sendAdapterRouteError(error, reply);
     }
   });
 }

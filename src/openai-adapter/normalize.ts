@@ -43,6 +43,12 @@ type NamedToolChoice = {
   name?: string;
 };
 
+export type NormalizeMode = "json" | "buffered_streaming";
+
+type NormalizeOptions = {
+  mode?: NormalizeMode;
+};
+
 function normalizeChatToolChoice(input: unknown): NormalizedToolChoice {
   if (input === undefined) {
     return "none";
@@ -119,8 +125,8 @@ function normalizeResponsesToolChoice(input: unknown): NormalizedToolChoice {
   return "none";
 }
 
-function assertNonStreaming(stream: unknown) {
-  if (stream === true) {
+function assertStreamingSupport(stream: unknown, mode: NormalizeMode) {
+  if (stream === true && mode !== "buffered_streaming") {
     throw new Error("Streaming is not supported");
   }
 }
@@ -136,8 +142,10 @@ export function normalizeChatCompletionsRequest(
     max_tokens?: number;
   },
   model: PublicModel,
+  options: NormalizeOptions = {},
 ): NormalizedRequest {
-  assertNonStreaming(body.stream);
+  const mode = options.mode ?? "json";
+  assertStreamingSupport(body.stream, mode);
 
   return {
     publicModel: model.id,
@@ -166,8 +174,10 @@ export function normalizeResponsesRequest(
     max_output_tokens?: number;
   },
   model: PublicModel,
+  options: NormalizeOptions = {},
 ): NormalizedRequest {
-  assertNonStreaming(body.stream);
+  const mode = options.mode ?? "json";
+  assertStreamingSupport(body.stream, mode);
 
   return {
     publicModel: model.id,

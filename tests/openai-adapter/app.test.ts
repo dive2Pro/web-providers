@@ -47,6 +47,61 @@ describe("openai adapter helper client", () => {
       outputText: "helper says hi",
     });
   });
+
+  it("injects session init instructions when tools or system prompts are present", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        mode: "text",
+        outputText: "tool-ready",
+        finishReason: "stop",
+      }),
+    });
+
+    const client = createHelperClient({
+      helperBaseUrl: "http://127.0.0.1:4318",
+      helperToken: "helper-token",
+      fetchImpl: fetchMock,
+    });
+
+    await client.run({
+      publicModel: "deepseek-web-tools",
+      provider: "deepseek-web",
+      responseFormat: "chat_completions",
+      messages: [
+        { role: "system", content: "Always answer with JSON." },
+        { role: "user", content: "Call ping with hi." },
+      ],
+      tools: [
+        {
+          name: "ping",
+          description: "Echo input text",
+          parametersJson:
+            "{\"type\":\"object\",\"properties\":{\"text\":{\"type\":\"string\"}},\"required\":[\"text\"]}",
+        },
+      ],
+      toolChoice: "auto",
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://127.0.0.1:4318/v1/provider/chat",
+      expect.objectContaining({
+        body: expect.stringContaining("\"sessionInit\""),
+      }),
+    );
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://127.0.0.1:4318/v1/provider/chat",
+      expect.objectContaining({
+        body: expect.stringContaining("Tool name: ping"),
+      }),
+    );
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://127.0.0.1:4318/v1/provider/chat",
+      expect.objectContaining({
+        body: expect.stringContaining("Always answer with JSON."),
+      }),
+    );
+  });
 });
 
 describe("openai adapter app", () => {
@@ -228,6 +283,300 @@ describe("openai adapter app", () => {
       error: {
         code: "provider_not_bound",
         message: "Bind a deepseek-web tab before provider chat",
+      },
+    });
+  });
+
+  it("streams chat text responses as SSE chunks and terminates with [DONE]", async () => {
+    const app = buildOpenAiAdapterApp({
+      token: "adapter-token",
+      helperBaseUrl: "http://127.0.0.1:4318",
+      helperToken: "helper-token",
+      fetchImpl: vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          mode: "text",
+          outputText: "hello from helper",
+          finishReason: "stop",
+        }),
+      }),
+    });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/chat/completions",
+      headers: {
+        authorization: "Bearer adapter-token",
+      },
+      payload: {
+        model: "deepseek-web-chat",
+        stream: true,
+        messages: [{ role: "user", content: "hello" }],
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.headers["content-type"]).toContain("text/event-stream");
+    expect(response.body).toContain("\"object\":\"chat.completion.chunk\"");
+    expect(response.body).toContain("\"delta\":{\"role\":\"assistant\"}");
+    expect(response.body).toContain("\"delta\":{\"content\":\"hello from helper\"}");
+    expect(response.body).toContain("\"finish_reason\":\"stop\"");
+    expect(response.body).toContain("data: [DONE]\n\n");
+  });
+
+  it("streams tool calls as SSE chunks and terminates with [DONE]", async () => {
+    const app = buildOpenAiAdapterApp({
+      token: "adapter-token",
+      helperBaseUrl: "http://127.0.0.1:4318",
+      helperToken: "helper-token",
+      fetchImpl: vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          mode: "json_fallback",
+          toolCall: {
+            name: "read_file",
+            argumentsJson: "{\"path\":\"src/helper/main.ts\"}",
+          },
+          finishReason: "stop",
+        }),
+      }),
+    });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/chat/completions",
+      headers: {
+        authorization: "Bearer adapter-token",
+      },
+      payload: {
+        model: "deepseek-web-tools",
+        stream: true,
+        messages: [{ role: "user", content: "read helper main" }],
+        tools: [
+          {
+            type: "function",
+            function: {
+              name: "read_file",
+              description: "Read a file",
+              parameters: { type: "object", properties: { path: { type: "string" } } },
+            },
+          },
+        ],
+        tool_choice: "auto",
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.headers["content-type"]).toContain("text/event-stream");
+    expect(response.body).toContain("\"object\":\"chat.completion.chunk\"");
+    expect(response.body).toContain("\"tool_calls\"");
+    expect(response.body).toContain("\"name\":\"read_file\"");
+    expect(response.body).toContain("src/helper/main.ts");
+    expect(response.body).toContain("\"finish_reason\":\"tool_calls\"");
+    expect(response.body).toContain("data: [DONE]\n\n");
+  });
+
+  it("returns JSON errors (not SSE) when helper rejects a streaming chat request", async () => {
+    const app = buildOpenAiAdapterApp({
+      token: "adapter-token",
+      helperBaseUrl: "http://127.0.0.1:4318",
+      helperToken: "helper-token",
+      fetchImpl: vi.fn().mockResolvedValue({
+        ok: false,
+        json: async () => ({
+          error: "MODEL_BUSY",
+          message: "Model is busy, retry later",
+        }),
+      }),
+    });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/chat/completions",
+      headers: {
+        authorization: "Bearer adapter-token",
+      },
+      payload: {
+        model: "deepseek-web-chat",
+        stream: true,
+        messages: [{ role: "user", content: "hello" }],
+      },
+    });
+
+    expect(response.statusCode).toBe(429);
+    expect(response.headers["content-type"]).not.toContain("text/event-stream");
+    expect(response.json()).toEqual({
+      error: {
+        code: "model_busy",
+        message: "Model is busy, retry later",
+      },
+    });
+  });
+
+  it("returns a JSON model_not_found error before starting SSE for streaming chat requests", async () => {
+    const app = buildOpenAiAdapterApp({
+      token: "adapter-token",
+      helperBaseUrl: "http://127.0.0.1:4318",
+      helperToken: "helper-token",
+      fetchImpl: vi.fn(),
+    });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/chat/completions",
+      headers: {
+        authorization: "Bearer adapter-token",
+      },
+      payload: {
+        model: "missing-model",
+        stream: true,
+        messages: [{ role: "user", content: "hello" }],
+      },
+    });
+
+    expect(response.statusCode).toBe(404);
+    expect(response.headers["content-type"]).not.toContain("text/event-stream");
+    expect(response.json()).toEqual({
+      error: {
+        code: "model_not_found",
+        message: "Unknown model: missing-model",
+      },
+    });
+  });
+
+  it("streams responses text output as SSE events", async () => {
+    const app = buildOpenAiAdapterApp({
+      token: "adapter-token",
+      helperBaseUrl: "http://127.0.0.1:4318",
+      helperToken: "helper-token",
+      fetchImpl: vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          mode: "text",
+          outputText: "hello from helper",
+          finishReason: "stop",
+        }),
+      }),
+    });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/responses",
+      headers: {
+        authorization: "Bearer adapter-token",
+      },
+      payload: {
+        model: "deepseek-web-chat",
+        stream: true,
+        input: [
+          {
+            role: "user",
+            content: [{ type: "input_text", text: "hello" }],
+          },
+        ],
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.headers["content-type"]).toContain("text/event-stream");
+    expect(response.body).toContain("\"type\":\"response.created\"");
+    expect(response.body).toContain("\"type\":\"response.output_text.delta\"");
+    expect(response.body).toContain("\"delta\":\"hello from helper\"");
+    expect(response.body).toContain("\"type\":\"response.completed\"");
+  });
+
+  it("streams responses tool calls as SSE events", async () => {
+    const app = buildOpenAiAdapterApp({
+      token: "adapter-token",
+      helperBaseUrl: "http://127.0.0.1:4318",
+      helperToken: "helper-token",
+      fetchImpl: vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          mode: "json_fallback",
+          toolCall: {
+            name: "read_file",
+            argumentsJson: "{\"path\":\"src/helper/main.ts\"}",
+          },
+          finishReason: "stop",
+        }),
+      }),
+    });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/responses",
+      headers: {
+        authorization: "Bearer adapter-token",
+      },
+      payload: {
+        model: "deepseek-web-tools",
+        stream: true,
+        input: [
+          {
+            role: "user",
+            content: [{ type: "input_text", text: "read helper main" }],
+          },
+        ],
+        tools: [
+          {
+            type: "function",
+            name: "read_file",
+            description: "Read a file",
+            parameters: { type: "object", properties: { path: { type: "string" } } },
+          },
+        ],
+        tool_choice: "auto",
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.headers["content-type"]).toContain("text/event-stream");
+    expect(response.body).toContain("\"type\":\"response.created\"");
+    expect(response.body).toContain("\"type\":\"response.function_call_arguments.delta\"");
+    expect(response.body).toContain("\"name\":\"read_file\"");
+    expect(response.body).toContain("src/helper/main.ts");
+    expect(response.body).toContain("\"type\":\"response.completed\"");
+  });
+
+  it("returns JSON errors (not SSE) when helper rejects a streaming responses request", async () => {
+    const app = buildOpenAiAdapterApp({
+      token: "adapter-token",
+      helperBaseUrl: "http://127.0.0.1:4318",
+      helperToken: "helper-token",
+      fetchImpl: vi.fn().mockResolvedValue({
+        ok: false,
+        json: async () => ({
+          error: "MODEL_BUSY",
+          message: "Model is busy, retry later",
+        }),
+      }),
+    });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/responses",
+      headers: {
+        authorization: "Bearer adapter-token",
+      },
+      payload: {
+        model: "deepseek-web-chat",
+        stream: true,
+        input: [
+          {
+            role: "user",
+            content: [{ type: "input_text", text: "hello" }],
+          },
+        ],
+      },
+    });
+
+    expect(response.statusCode).toBe(429);
+    expect(response.headers["content-type"]).not.toContain("text/event-stream");
+    expect(response.json()).toEqual({
+      error: {
+        code: "model_busy",
+        message: "Model is busy, retry later",
       },
     });
   });
