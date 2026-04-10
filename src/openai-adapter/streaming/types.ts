@@ -1,5 +1,12 @@
 import type { ExecutionResult } from "../types";
 
+export type StreamInput = {
+  id: string;
+  created: number;
+  model: string;
+  result: ExecutionResult;
+};
+
 export type ChatCompletionsChunkObject = "chat.completion.chunk";
 
 export type ChatCompletionsFinishReason = "stop" | "length" | "error" | "tool_calls";
@@ -31,9 +38,42 @@ export type ChatCompletionsChunk = {
   choices: ChatCompletionsChunkChoice[];
 };
 
-export type SerializeChatCompletionsStreamInput = {
+export type SerializeChatCompletionsStreamInput = StreamInput;
+
+export type ResponsesResponseObject = "response";
+
+export type ResponsesResponseStub = {
   id: string;
-  created: number;
-  model: string;
-  result: ExecutionResult;
+  object: ResponsesResponseObject;
 };
+
+export type ResponsesCreatedEvent = {
+  type: "response.created";
+  response: ResponsesResponseStub & {
+    created_at: number;
+    model: string;
+  };
+};
+
+export type ResponsesOutputTextDeltaEvent = {
+  type: "response.output_text.delta";
+  delta: string;
+};
+
+export type ResponsesFunctionCallArgumentsDeltaEvent = {
+  type: "response.function_call_arguments.delta";
+  item_id: string;
+  name: string;
+  delta: string;
+};
+
+export type ResponsesCompletedEvent = {
+  type: "response.completed";
+  response: ResponsesResponseStub;
+};
+
+export type ResponsesEvent =
+  | ResponsesCreatedEvent
+  | ResponsesOutputTextDeltaEvent
+  | ResponsesFunctionCallArgumentsDeltaEvent
+  | ResponsesCompletedEvent;
