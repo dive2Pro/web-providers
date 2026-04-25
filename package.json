@@ -2,17 +2,14 @@
   "name": "web-providers",
   "private": true,
   "type": "module",
+  "workspaces": ["packages/*"],
   "scripts": {
-    "dev:helper": "tsx src/helper/main.ts",
+    "dev:helper": "npm run dev -w @web-providers/server",
     "test": "vitest run",
-    "build": "rm -rf dist && tsc -p tsconfig.json",
+    "build": "tsc -b",
     "slides:dev": "slidev slides/web-providers.md",
     "slides:build": "slidev build slides/web-providers.md --out ../slides-dist",
     "slides:export": "slidev export slides/web-providers.md"
-  },
-  "dependencies": {
-    "@sinclair/typebox": "^0.34.41",
-    "fastify": "^5.2.1"
   },
   "devDependencies": {
     "@slidev/cli": "^52.14.2",

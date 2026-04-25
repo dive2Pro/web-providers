@@ -1,1 +1,1 @@
-export { default } from "../../../src/extension/provider-runtime";
+export { default } from "../../../packages/extension/src/index";
