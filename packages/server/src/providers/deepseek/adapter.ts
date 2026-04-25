@@ -7,8 +7,52 @@ import {
 } from "./page-bridge";
 import type { ProviderAdapter } from "../types";
 
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+export interface BindRetryOptions {
+  maxWaitMs?: number;
+  retryIntervalMs?: number;
+}
+
+async function openAndWaitForTab(
+  transport: BbBrowserTransport,
+  opts: BindRetryOptions = {},
+): Promise<{ id: string; url: string }> {
+  await transport.openDeepSeek("https://chat.deepseek.com");
+
+  const maxWaitMs = opts.maxWaitMs ?? 12_000;
+  const retryIntervalMs = opts.retryIntervalMs ?? 800;
+  const startedAt = Date.now();
+
+  while (Date.now() - startedAt < maxWaitMs) {
+    await sleep(retryIntervalMs);
+    try {
+      const tab = await transport.findDeepSeekTab();
+      if (tab && typeof tab.id === "string") {
+        return tab;
+      }
+    } catch (error) {
+      if (error instanceof HelperError && error.code === "NOT_BOUND") {
+        continue;
+      }
+      if (
+        error instanceof Error &&
+        error.message.toLowerCase().includes("no page target found")
+      ) {
+        continue;
+      }
+    }
+  }
+
+  throw new HelperError(
+    "NOT_BOUND",
+    "Opened DeepSeek in bb-browser. Finish login in that page and retry.",
+  );
+}
+
 export function createDeepSeekAdapter(
   transport: BbBrowserTransport,
+  retryOptions?: BindRetryOptions,
 ): ProviderAdapter {
   return {
     providerId: "deepseek-web",
@@ -19,25 +63,15 @@ export function createDeepSeekAdapter(
         tab = await transport.findDeepSeekTab();
       } catch (error) {
         if (error instanceof HelperError && error.code === "NOT_BOUND") {
-          await transport.openDeepSeek("https://chat.deepseek.com");
-          throw new HelperError(
-            "NOT_BOUND",
-            "Opened DeepSeek in bb-browser. Finish login in that page and retry.",
-          );
-        }
-
-        if (
+          tab = await openAndWaitForTab(transport, retryOptions);
+        } else if (
           error instanceof Error &&
           error.message.toLowerCase().includes("no page target found")
         ) {
-          await transport.openDeepSeek("https://chat.deepseek.com");
-          throw new HelperError(
-            "NOT_BOUND",
-            "Opened DeepSeek in bb-browser. Finish login in that page and retry.",
-          );
+          tab = await openAndWaitForTab(transport, retryOptions);
+        } else {
+          throw error;
         }
-
-        throw error;
       }
 
       const normalizedUrl = assertDeepSeekUrl(tab.url);

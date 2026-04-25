@@ -773,6 +773,95 @@ export const INJECTED_BRIDGE_SOURCE = `
     }) || null;
   }
 
+  function matchToggleText(el, texts) {
+    const sources = [];
+    const rawText = (el.textContent || "").trim().toLowerCase();
+    if (rawText) sources.push(rawText);
+
+    const ariaLabel = (el.getAttribute("aria-label") || "").trim().toLowerCase();
+    if (ariaLabel) sources.push(ariaLabel);
+
+    const title = (el.getAttribute("title") || "").trim().toLowerCase();
+    if (title) sources.push(title);
+
+    return texts.some((candidate) =>
+      sources.some((src) => src === candidate || src.includes(candidate)),
+    );
+  }
+
+  function findToggleByText(texts) {
+    const all = Array.from(
+      document.querySelectorAll(".ds-toggle-button, div[role='button'], button, [role='switch']"),
+    );
+    return all.find((el) => matchToggleText(el, texts)) || null;
+  }
+
+  function findThinkToggle() {
+    return findToggleByText(["deep think", "deepthink", "深度思考"]);
+  }
+
+  function findSearchToggle() {
+    return (
+      findToggleByText(["search", "智能搜索"]) ||
+      findToggleByText(["联网", "联网搜索"])
+    );
+  }
+
+  function findExpertModeButton() {
+    // Find by data-model-type attribute (current DeepSeek UI)
+    const el = document.querySelector('[data-model-type="expert"]');
+    if (el) return el;
+    // Fallback: search radio elements for "Expert" / "专家" text
+    const radios = document.querySelectorAll('[role="radio"]');
+    for (let i = 0; i < radios.length; i++) {
+      const text = (radios[i].textContent || "").toLowerCase();
+      if (text.includes("expert") || text.includes("专家")) {
+        return radios[i];
+      }
+    }
+    return null;
+  }
+
+  function isToggleActive(button) {
+    if (!button) return false;
+    const className = (button.className || "").toString();
+    // .ds-toggle-button--selected for think/search toggles
+    if (className.includes("--selected")) return true;
+    if (className.includes("active")) return true;
+    if (className.includes("_active")) return true;
+    // aria-checked for mode selector (expert/fast)
+    if (button.getAttribute("aria-checked") === "true") return true;
+    if (button.getAttribute("aria-pressed") === "true") return true;
+    if (button.getAttribute("aria-selected") === "true") return true;
+    if (button.getAttribute("data-active") === "true") return true;
+    if (button.getAttribute("data-state") === "active") return true;
+    return false;
+  }
+
+  async function enableDeepThink() {
+    const button = findThinkToggle();
+    if (!button) return;
+    if (isToggleActive(button)) return;
+    button.click();
+    await sleep(300);
+  }
+
+  async function enableSearch() {
+    const button = findSearchToggle();
+    if (!button) return;
+    if (isToggleActive(button)) return;
+    button.click();
+    await sleep(300);
+  }
+
+  async function enableExpertMode() {
+    const button = findExpertModeButton();
+    if (!button) return;
+    if (isToggleActive(button)) return;
+    button.click();
+    await sleep(300);
+  }
+
   function setComposerValue(composer, nextValue) {
     const prototype = Object.getPrototypeOf(composer);
     const valueDescriptor =
@@ -1057,7 +1146,18 @@ export const INJECTED_BRIDGE_SOURCE = `
         await sleep(1_500);
       }
 
+      await sleep(500);
+      await enableExpertMode();
+      await enableDeepThink();
+      await enableSearch();
+
       resetCompletionState();
+      return { ok: true };
+    },
+    async initModes() {
+      await enableExpertMode();
+      await enableDeepThink();
+      await enableSearch();
       return { ok: true };
     },
     async sendPrompt({ prompt, timeoutMs }) {

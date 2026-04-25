@@ -89,7 +89,7 @@ export interface BrowserAutomationClient {
           provider: ProviderId;
           tabId: string;
         },
-  ): Promise<void>;
+  ): Promise<{ tabId: string } | void>;
   sendChatPrompt(input: {
     provider?: ProviderId;
     tabId: string;

@@ -175,57 +175,101 @@ describe("BbBrowserClient", () => {
     });
   });
 
-  it("translates missing page-target errors into NOT_BOUND", async () => {
+  it("polls findDeepSeekTab after opening page until tab appears", async () => {
     const opened: string[] = [];
+    let findAttempts = 0;
 
-    const client = new BbBrowserClient({
-      getConnectionStatus: async () => "connected",
-      findDeepSeekTab: async () => {
-        throw new Error("No page target found");
+    const client = new BbBrowserClient(
+      {
+        getConnectionStatus: async () => "connected",
+        findDeepSeekTab: async () => {
+          findAttempts++;
+          if (findAttempts <= 3) {
+            throw new Error("No page target found");
+          }
+          return { id: "tab-ds", url: "https://chat.deepseek.com/" };
+        },
+        openDeepSeek: async (url: string) => {
+          opened.push(url);
+        },
+        submitPrompt: async () => undefined,
+        evaluate: async <T>() => undefined as T,
       },
-      openDeepSeek: async (url: string) => {
-        opened.push(url);
-      },
-      submitPrompt: async () => undefined,
-      evaluate: async <T>() => undefined as T,
-    });
-
-    await expect(client.bindDeepSeekTab()).rejects.toEqual(
-      new HelperError(
-        "NOT_BOUND",
-        "Opened DeepSeek in bb-browser. Finish login in that page and retry.",
-      ),
+      { maxWaitMs: 500, retryIntervalMs: 50 },
     );
+
+    const result = await client.bindDeepSeekTab();
+    expect(result.tabId).toBe("tab-ds");
     expect(opened).toEqual(["https://chat.deepseek.com"]);
   });
 
-  it("opens DeepSeek when no DeepSeek tab is currently available", async () => {
+  it("succeeds when tab appears after NOT_BOUND retries", async () => {
     const opened: string[] = [];
+    let findAttempts = 0;
 
-    const client = new BbBrowserClient({
-      getConnectionStatus: async () => "connected",
-      findDeepSeekTab: async () => {
-        throw new HelperError("NOT_BOUND", "No logged-in DeepSeek tab is available");
+    const client = new BbBrowserClient(
+      {
+        getConnectionStatus: async () => "connected",
+        findDeepSeekTab: async () => {
+          findAttempts++;
+          if (findAttempts <= 3) {
+            throw new HelperError("NOT_BOUND", "No logged-in DeepSeek tab is available");
+          }
+          return { id: "tab-ds", url: "https://chat.deepseek.com/" };
+        },
+        openDeepSeek: async (url: string) => {
+          opened.push(url);
+        },
+        submitPrompt: async () => undefined,
+        evaluate: async <T>() => undefined as T,
       },
-      openDeepSeek: async (url: string) => {
-        opened.push(url);
-      },
-      submitPrompt: async () => undefined,
-      evaluate: async <T>() => undefined as T,
-    });
-
-    await expect(client.bindDeepSeekTab()).rejects.toEqual(
-      new HelperError(
-        "NOT_BOUND",
-        "Opened DeepSeek in bb-browser. Finish login in that page and retry.",
-      ),
+      { maxWaitMs: 500, retryIntervalMs: 50 },
     );
+
+    const result = await client.bindDeepSeekTab();
+    expect(result.tabId).toBe("tab-ds");
     expect(opened).toEqual(["https://chat.deepseek.com"]);
   });
 
-  it("treats expected target navigation during startNewChat as success and reinjects the bridge", async () => {
+  it("throws NOT_BOUND when tab never appears within timeout", async () => {
+    const client = new BbBrowserClient(
+      {
+        getConnectionStatus: async () => "connected",
+        findDeepSeekTab: async () => {
+          throw new Error("No page target found");
+        },
+        openDeepSeek: async () => undefined,
+        submitPrompt: async () => undefined,
+        evaluate: async <T>() => undefined as T,
+      },
+      { maxWaitMs: 200, retryIntervalMs: 50 },
+    );
+
+    await expect(client.bindDeepSeekTab()).rejects.toMatchObject({
+      code: "NOT_BOUND",
+    });
+  });
+
+  it("throws immediately for unknown errors", async () => {
+    const client = new BbBrowserClient(
+      {
+        getConnectionStatus: async () => "connected",
+        findDeepSeekTab: async () => {
+          throw new Error("Something unexpected happened");
+        },
+        openDeepSeek: async () => undefined,
+        submitPrompt: async () => undefined,
+        evaluate: async <T>() => undefined as T,
+      },
+      { maxWaitMs: 200, retryIntervalMs: 50 },
+    );
+
+    await expect(client.bindDeepSeekTab()).rejects.toThrow("Something unexpected happened");
+  });
+
+  it("opens a new tab and injects bridge with initModes for startNewChat", async () => {
     const evaluations: Array<{ tabId: string; script: string }> = [];
-    let callCount = 0;
+    const newTabId = "tab-fresh-1";
 
     const client = new BbBrowserClient({
       getConnectionStatus: async () => "connected",
@@ -233,24 +277,22 @@ describe("BbBrowserClient", () => {
         id: "tab-1",
         url: "https://chat.deepseek.com/",
       }),
-      openDeepSeek: async () => undefined,
+      openDeepSeek: async (url: string) => ({
+        tabId: newTabId,
+        url,
+      }),
       submitPrompt: async () => undefined,
       evaluate: async <T>(tabId: string, script: string) => {
         evaluations.push({ tabId, script });
-        callCount += 1;
-
-        if (callCount === 1) {
-          throw new Error("Runtime.evaluate: Inspected target navigated or closed");
-        }
-
         return undefined as T;
       },
     });
 
-    await expect(client.startNewChat("tab-1")).resolves.toBeUndefined();
-    expect(evaluations).toHaveLength(2);
-    expect(evaluations[0]?.script).toContain("startNewChat()");
-    expect(evaluations[1]?.script).toContain("__piDeepSeekBridge");
+    const result = await client.startNewChat("tab-1");
+    expect(result).toEqual({ tabId: newTabId });
+    expect(evaluations).toHaveLength(1);
+    expect(evaluations[0]?.tabId).toBe(newTabId);
+    expect(evaluations[0]?.script).toContain("initModes()");
   });
 
   it("starts a Qwen new chat through provider-specific DOM actions", async () => {

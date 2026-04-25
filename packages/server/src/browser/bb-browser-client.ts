@@ -10,6 +10,7 @@ import type {
 } from "./types";
 import { assertDeepSeekUrl, INJECTED_BRIDGE_SOURCE } from "./deepseek-page-bridge";
 import { createProviderRegistry } from "../providers/registry";
+import type { BindRetryOptions } from "../providers/deepseek/adapter";
 import {
   INJECTED_QWEN_BRIDGE_SOURCE,
   QWEN_PAGE_STATE_SCRIPT,
@@ -42,8 +43,8 @@ export interface BbBrowserTransport {
   getConnectionStatus(): Promise<"connected" | "disconnected">;
   findDeepSeekTab(): Promise<{ id: string; url: string }>;
   findQwenTab?(): Promise<{ id: string; url: string }>;
-  openDeepSeek(url: string): Promise<void>;
-  openQwen?(url: string): Promise<void>;
+  openDeepSeek(url: string): Promise<{ tabId: string; url: string }>;
+  openQwen?(url: string): Promise<{ tabId: string; url: string }>;
   evaluate<T>(tabId: string, script: string): Promise<T>;
   submitPrompt(tabId: string, prompt: string): Promise<void>;
 }
@@ -213,11 +214,27 @@ export function createBbBrowserTransport(): BbBrowserTransport {
     },
 
     async openDeepSeek(url: string) {
-      await runBbBrowserJson(["open", url]);
+      const result = (await runBbBrowserJson(["open", url])) as {
+        data?: { tabId?: string; url?: string };
+      };
+      const data = result && typeof result === "object" ? (result as Record<string, unknown>).data : null;
+      const tabData = data && typeof data === "object" ? (data as Record<string, unknown>) : null;
+      return {
+        tabId: (tabData?.tabId as string) ?? "",
+        url: (tabData?.url as string) ?? url,
+      };
     },
 
     async openQwen(url: string) {
-      await runBbBrowserJson(["open", url]);
+      const result = (await runBbBrowserJson(["open", url])) as {
+        data?: { tabId?: string; url?: string };
+      };
+      const data = result && typeof result === "object" ? (result as Record<string, unknown>).data : null;
+      const tabData = data && typeof data === "object" ? (data as Record<string, unknown>) : null;
+      return {
+        tabId: (tabData?.tabId as string) ?? "",
+        url: (tabData?.url as string) ?? url,
+      };
     },
   };
 }
@@ -302,8 +319,11 @@ function looksLikeIncompleteStructuredText(text: string | null | undefined) {
 export class BbBrowserClient implements BrowserAutomationClient {
   private readonly providerRegistry: ReturnType<typeof createProviderRegistry>;
 
-  constructor(private readonly transport: BbBrowserTransport) {
-    this.providerRegistry = createProviderRegistry(transport);
+  constructor(
+    private readonly transport: BbBrowserTransport,
+    retryOptions?: BindRetryOptions,
+  ) {
+    this.providerRegistry = createProviderRegistry(transport, retryOptions);
   }
 
   async getConnectionStatus() {
@@ -332,7 +352,7 @@ export class BbBrowserClient implements BrowserAutomationClient {
           provider: "deepseek-web" | "qwen-web";
           tabId: string;
         },
-  ): Promise<void> {
+  ): Promise<{ tabId: string } | void> {
     if (typeof input !== "string" && input.provider === "qwen-web") {
       await this.transport.evaluate(input.tabId, QWEN_START_NEW_CHAT_SCRIPT);
       await new Promise((resolve) => setTimeout(resolve, 1_000));
@@ -340,26 +360,16 @@ export class BbBrowserClient implements BrowserAutomationClient {
       return;
     }
 
-    const tabId = typeof input === "string" ? input : input.tabId;
-    try {
-      await this.transport.evaluate(
-        tabId,
-        `${INJECTED_BRIDGE_SOURCE}; window.__piDeepSeekBridge.startNewChat()`,
-      );
-      return;
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      const isExpectedNavigation =
-        message.includes("Inspected target navigated or closed") ||
-        message.includes("Execution context was destroyed");
-
-      if (!isExpectedNavigation) {
-        throw error;
-      }
-    }
-
-    await new Promise((resolve) => setTimeout(resolve, 1_000));
-    await this.transport.evaluate(tabId, INJECTED_BRIDGE_SOURCE);
+    // For DeepSeek: open a fresh tab instead of reusing the old one
+    const { tabId } = await this.transport.openDeepSeek("https://chat.deepseek.com/");
+    // Wait for page to fully load
+    await new Promise((resolve) => setTimeout(resolve, 3_000));
+    // Inject bridge and init modes
+    await this.transport.evaluate(
+      tabId,
+      `${INJECTED_BRIDGE_SOURCE}; window.__piDeepSeekBridge.initModes()`,
+    );
+    return { tabId };
   }
 
   async sendChatPrompt(input: {

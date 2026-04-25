@@ -184,17 +184,22 @@ export function registerProviderChatRoute(app: FastifyInstance, ctx: AppContext)
     });
 
     try {
+      let activeTabId = session.tabId;
+
       if (promptInput.shouldStartFresh) {
-        await ctx.browserClient.startNewChat(
+        const newChatResult = await ctx.browserClient.startNewChat(
           ctx.browserClient.bindProviderTab
             ? { provider, tabId: session.tabId }
             : session.tabId,
         );
+        if (newChatResult?.tabId) {
+          activeTabId = newChatResult.tabId;
+        }
       }
 
       const result = await ctx.browserClient.sendChatPrompt({
         provider,
-        tabId: session.tabId,
+        tabId: activeTabId,
         prompt,
         timeoutMs: 30_000,
         freshSession: promptInput.shouldStartFresh,
@@ -213,10 +218,11 @@ export function registerProviderChatRoute(app: FastifyInstance, ctx: AppContext)
       if (promptInput.shouldStartFresh || body.sessionInit?.fingerprint) {
         const nextConversationId =
           provider === "deepseek-web"
-            ? `conv-${session.tabId}`
-            : `conv-${provider}-${session.tabId}-${Date.now()}`;
+            ? `conv-${activeTabId}`
+            : `conv-${provider}-${activeTabId}-${Date.now()}`;
         ctx.state.setBoundSession(provider, {
           ...session,
+          tabId: activeTabId,
           conversationId: promptInput.shouldStartFresh
             ? nextConversationId
             : session.conversationId,
