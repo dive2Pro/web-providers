@@ -315,7 +315,108 @@ describe("pi provider extension", () => {
         ],
       },
     });
-    expect(events).toEqual(["session_start", "session_shutdown"]);
+    expect(events).toEqual([
+      "session_start",
+      "session_switch",
+      "session_fork",
+      "session_shutdown",
+    ]);
+  });
+
+  it("includes the active pi session id in helper bind and provider chat requests", async () => {
+    const calls: Array<{
+      path: string;
+      body: Record<string, unknown>;
+    }> = [];
+    let config: ProviderConfig | undefined;
+    let sessionStartHandler:
+      | ((event: unknown, ctx: { sessionManager: { getSessionId(): string } }) => Promise<void> | void)
+      | undefined;
+
+    registerDeepSeekExtension(
+      {
+        registerProvider(_name, providerConfig) {
+          config = providerConfig as ProviderConfig;
+        },
+        on(event, handler) {
+          if (event === "session_start") {
+            sessionStartHandler = handler as typeof sessionStartHandler;
+          }
+        },
+      },
+      {
+        spawnHelper: async () => ({
+          baseUrl: "http://127.0.0.1:4318",
+          token: "token-123",
+          stop: async () => undefined,
+        }),
+        helperClient: {
+          post: async <T>(
+            _baseUrl: string,
+            path: string,
+            body: Record<string, unknown>,
+          ) => {
+            calls.push({ path, body });
+
+            if (path === "/v1/bind") {
+              return { ok: true } as T;
+            }
+
+            return {
+              mode: "text",
+              outputText: "ok",
+              finishReason: "stop",
+              modelLabel: "DeepSeek Web",
+            } as T;
+          },
+        },
+        randomToken: () => "token-123",
+      },
+    );
+
+    await sessionStartHandler?.(
+      { type: "session_start" },
+      {
+        sessionManager: {
+          getSessionId: () => "pi-session-123",
+        },
+      },
+    );
+
+    const stream = config?.streamSimple?.(
+      {
+        id: "deepseek-web-chat",
+        api: "deepseek-web-api",
+        provider: "deepseek-web",
+      },
+      {
+        messages: [
+          {
+            role: "user",
+            content: "hello",
+            timestamp: Date.now(),
+          },
+        ],
+      },
+      {
+        signal: new AbortController().signal,
+      },
+    );
+
+    await stream?.result();
+
+    const bindCall = calls.find((call) => call.path === "/v1/bind");
+    const providerChatCall = calls.find((call) => call.path === "/v1/provider/chat");
+
+    expect(bindCall?.body).toMatchObject({
+      provider: "deepseek-web",
+      piSessionId: "pi-session-123",
+    });
+    expect(providerChatCall?.body).toMatchObject({
+      provider: "deepseek-web",
+      piSessionId: "pi-session-123",
+      model: "deepseek-web-chat",
+    });
   });
 
   it("starts the helper once, binds, and forwards provider chat as an assistant event stream", async () => {

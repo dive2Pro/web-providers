@@ -7,7 +7,8 @@ export function registerBindRoute(app: FastifyInstance, ctx: AppContext) {
   app.post("/v1/bind", async (request, reply) => {
     const body = ((request.body ?? {}) as Partial<BindRequest>);
     const provider = body.provider ?? "deepseek-web";
-    const previousSession = ctx.state.getBoundSession(provider);
+    const piSessionId = body.piSessionId ?? null;
+    const previousSession = ctx.state.getBoundSession(provider, piSessionId);
 
     try {
       const result =
@@ -25,8 +26,9 @@ export function registerBindRoute(app: FastifyInstance, ctx: AppContext) {
           ? `conv-${result.tabId}`
           : `conv-${provider}-${result.tabId}`;
 
-      ctx.state.setBoundSession(provider as ProviderId, {
+      ctx.state.setBoundSession({
         provider: provider as ProviderId,
+        piSessionId,
         ...result,
         conversationId: sameTab
           ? previousSession?.conversationId ?? nextConversationId

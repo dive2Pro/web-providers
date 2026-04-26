@@ -8,6 +8,7 @@ import type {
 
 export interface BoundSession {
   provider: ProviderId;
+  piSessionId: string | null;
   tabId: string;
   url: string;
   loginState: "logged_in" | "logged_out";
@@ -36,6 +37,7 @@ export interface ProviderRequestDebugRecord {
   normalizedMessages: ProviderChatRequest["messages"];
   prompt: string;
   session: {
+    piSessionId: string | null;
     tabId: string;
     url: string;
   };

@@ -32,14 +32,17 @@ export type ProviderId = "deepseek-web" | "qwen-web";
 
 export interface BindRequest {
   provider: ProviderId;
+  piSessionId?: string;
 }
 
 export interface ResetRequest {
   provider: ProviderId;
+  piSessionId?: string;
 }
 
 export interface ProviderChatRequest {
   provider: ProviderId;
+  piSessionId?: string;
   model: string;
   messages: Array<{
     role: "system" | "user" | "assistant";

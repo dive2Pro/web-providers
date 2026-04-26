@@ -1310,6 +1310,14 @@ export default function registerDeepSeekExtension(
 ) {
   let helperPromise: Promise<ManagedHelper> | null = null;
   let helper: ManagedHelper | null = null;
+  let currentPiSessionId: string | null = null;
+
+  function setCurrentPiSessionId(nextSessionId: string | null) {
+    currentPiSessionId = nextSessionId;
+    logProviderDebug("pi session binding updated", {
+      piSessionId: currentPiSessionId,
+    });
+  }
 
   async function ensureHelper() {
     if (helper) {
@@ -1342,8 +1350,17 @@ export default function registerDeepSeekExtension(
     }
   }
 
-  pi.on("session_start", async () => undefined);
+  pi.on("session_start", async (_event, ctx) => {
+    setCurrentPiSessionId(ctx.sessionManager.getSessionId());
+  });
+  pi.on("session_switch", async (_event, ctx) => {
+    setCurrentPiSessionId(ctx.sessionManager.getSessionId());
+  });
+  pi.on("session_fork", async (_event, ctx) => {
+    setCurrentPiSessionId(ctx.sessionManager.getSessionId());
+  });
   pi.on("session_shutdown", async () => {
+    setCurrentPiSessionId(null);
     await stopHelper();
   });
 
@@ -1383,6 +1400,7 @@ export default function registerDeepSeekExtension(
             "/v1/bind",
             {
               provider: model.provider,
+              ...(currentPiSessionId ? { piSessionId: currentPiSessionId } : {}),
             },
             current.token,
             options?.signal,
@@ -1492,6 +1510,7 @@ export default function registerDeepSeekExtension(
 
           const buildRequestPayload = (messages: ProviderChatRequest["messages"]) => ({
             provider: model.provider,
+            ...(currentPiSessionId ? { piSessionId: currentPiSessionId } : {}),
             model: model.id,
             messages,
             ...(sessionInit ? { sessionInit } : {}),

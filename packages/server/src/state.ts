@@ -6,41 +6,66 @@ import type {
 import type { ProviderId } from "@web-providers/shared";
 
 export class HelperState {
-  private boundSessions = new Map<ProviderId, BoundSession>();
+  private boundSessions = new Map<ProviderId, Map<string, BoundSession>>();
   private activeRequest: ActiveRequest | null = null;
   private lastProviderRequests = new Map<ProviderId, ProviderRequestDebugRecord>();
   private degraded = false;
   private lastBridgeHeartbeatAt: string | null = null;
 
-  getBoundSession(provider?: ProviderId) {
-    if (provider) {
-      return this.boundSessions.get(provider) ?? null;
-    }
-
-    return this.boundSessions.values().next().value ?? null;
+  private getSessionKey(piSessionId?: string | null) {
+    return piSessionId ?? "__default__";
   }
 
-  setBoundSession(providerOrSession: ProviderId | BoundSession | null, session?: BoundSession | null) {
-    if (
-      providerOrSession &&
-      typeof providerOrSession === "object" &&
-      "provider" in providerOrSession
-    ) {
-      this.boundSessions.set(providerOrSession.provider, providerOrSession);
-      return;
-    }
-
-    if (typeof providerOrSession === "string") {
-      if (session) {
-        this.boundSessions.set(providerOrSession, session);
-        return;
+  getBoundSession(provider?: ProviderId, piSessionId?: string | null) {
+    if (provider) {
+      const sessions = this.boundSessions.get(provider);
+      if (!sessions) {
+        return null;
       }
 
-      this.boundSessions.delete(providerOrSession);
+      if (piSessionId !== undefined && piSessionId !== null) {
+        return sessions.get(this.getSessionKey(piSessionId)) ?? null;
+      }
+
+      return sessions.values().next().value ?? null;
+    }
+
+    for (const sessions of this.boundSessions.values()) {
+      const session = sessions.values().next().value;
+      if (session) {
+        return session;
+      }
+    }
+
+    return null;
+  }
+
+  setBoundSession(session: BoundSession) {
+    const providerSessions = this.boundSessions.get(session.provider) ?? new Map();
+    providerSessions.set(this.getSessionKey(session.piSessionId), session);
+    this.boundSessions.set(session.provider, providerSessions);
+  }
+
+  clearBoundSession(provider?: ProviderId, piSessionId?: string | null) {
+    if (!provider) {
+      this.boundSessions.clear();
       return;
     }
 
-    this.boundSessions.clear();
+    if (piSessionId === undefined || piSessionId === null) {
+      this.boundSessions.delete(provider);
+      return;
+    }
+
+    const providerSessions = this.boundSessions.get(provider);
+    if (!providerSessions) {
+      return;
+    }
+
+    providerSessions.delete(this.getSessionKey(piSessionId));
+    if (providerSessions.size === 0) {
+      this.boundSessions.delete(provider);
+    }
   }
 
   getActiveRequest() {
@@ -110,6 +135,7 @@ export class HelperState {
   }
 
   resetRuntime() {
+    this.boundSessions.clear();
     this.activeRequest = null;
     this.lastProviderRequests.clear();
     this.degraded = false;

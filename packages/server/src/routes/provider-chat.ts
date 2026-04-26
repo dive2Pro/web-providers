@@ -96,6 +96,7 @@ function createBaseDebugRecord(
   }));
   const rawRequest: ProviderChatRequest = {
     provider: body.provider,
+    ...(body.piSessionId ? { piSessionId: body.piSessionId } : {}),
     model: body.model,
     messages: normalizedMessages,
     ...(body.sessionInit
@@ -126,6 +127,7 @@ function createBaseDebugRecord(
       normalizedMessages,
       prompt,
       session: {
+        piSessionId: session.piSessionId,
         tabId: session.tabId,
         url: session.url,
       },
@@ -181,7 +183,8 @@ export function registerProviderChatRoute(app: FastifyInstance, ctx: AppContext)
   app.post("/v1/provider/chat", async (request, reply) => {
     const body = request.body as ProviderChatRequest;
     const provider = (body.provider ?? "deepseek-web") as ProviderId;
-    const session = ctx.state.getBoundSession(provider);
+    const piSessionId = body.piSessionId ?? null;
+    const session = ctx.state.getBoundSession(provider, piSessionId);
 
     if (!session) {
       return reply.code(409).send({
@@ -206,6 +209,7 @@ export function registerProviderChatRoute(app: FastifyInstance, ctx: AppContext)
     });
     logProviderDebug("fresh session decision", {
       provider,
+      piSessionId,
       tabId: session.tabId,
       sessionInitialized: session.providerInitialized,
       storedFingerprint: session.providerInitFingerprint,
@@ -275,8 +279,9 @@ export function registerProviderChatRoute(app: FastifyInstance, ctx: AppContext)
           provider === "deepseek-web"
             ? `conv-${activeTabId}`
             : `conv-${provider}-${activeTabId}-${Date.now()}`;
-        ctx.state.setBoundSession(provider, {
+        ctx.state.setBoundSession({
           ...session,
+          piSessionId,
           tabId: activeTabId,
           conversationId: promptInput.shouldStartFresh
             ? nextConversationId
