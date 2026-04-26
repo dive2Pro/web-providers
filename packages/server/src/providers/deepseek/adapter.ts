@@ -50,29 +50,46 @@ async function openAndWaitForTab(
   );
 }
 
+async function resolveDeepSeekTab(
+  transport: BbBrowserTransport,
+  opts: BindRetryOptions = {},
+  preferredTabId?: string,
+): Promise<{ id: string; url: string }> {
+  if (preferredTabId && transport.getTab) {
+    const preferredTab = await transport.getTab(preferredTabId);
+    if (preferredTab && preferredTab.url.includes("deepseek.com")) {
+      return preferredTab;
+    }
+  }
+
+  try {
+    return await transport.findDeepSeekTab();
+  } catch (error) {
+    if (error instanceof HelperError && error.code === "NOT_BOUND") {
+      return openAndWaitForTab(transport, opts);
+    }
+    if (
+      error instanceof Error &&
+      error.message.toLowerCase().includes("no page target found")
+    ) {
+      return openAndWaitForTab(transport, opts);
+    }
+    throw error;
+  }
+}
+
 export function createDeepSeekAdapter(
   transport: BbBrowserTransport,
   retryOptions?: BindRetryOptions,
 ): ProviderAdapter {
   return {
     providerId: "deepseek-web",
-    async bindTab(): Promise<BindResult> {
-      let tab: { id: string; url: string };
-
-      try {
-        tab = await transport.findDeepSeekTab();
-      } catch (error) {
-        if (error instanceof HelperError && error.code === "NOT_BOUND") {
-          tab = await openAndWaitForTab(transport, retryOptions);
-        } else if (
-          error instanceof Error &&
-          error.message.toLowerCase().includes("no page target found")
-        ) {
-          tab = await openAndWaitForTab(transport, retryOptions);
-        } else {
-          throw error;
-        }
-      }
+    async bindTab(input = {}): Promise<BindResult> {
+      const tab = await resolveDeepSeekTab(
+        transport,
+        retryOptions,
+        input.preferredTabId,
+      );
 
       const normalizedUrl = assertDeepSeekUrl(tab.url);
       await transport.evaluate(tab.id, INJECTED_BRIDGE_SOURCE);

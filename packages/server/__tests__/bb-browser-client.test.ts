@@ -120,6 +120,41 @@ describe("BbBrowserClient", () => {
     expect(evaluations[0]?.tabId).toBe("tab-deepseek");
   });
 
+  it("prefers the currently bound DeepSeek tab when rebinding", async () => {
+    const evaluations: Array<{ tabId: string; script: string }> = [];
+    let findCalls = 0;
+
+    const client = new BbBrowserClient({
+      getConnectionStatus: async () => "connected",
+      getTab: async (tabId: string) =>
+        tabId === "tab-current"
+          ? { id: "tab-current", url: "https://chat.deepseek.com/a/chat/current" }
+          : null,
+      findDeepSeekTab: async () => {
+        findCalls += 1;
+        return {
+          id: "tab-stale",
+          url: "https://chat.deepseek.com/a/chat/stale",
+        };
+      },
+      openDeepSeek: async () => undefined,
+      submitPrompt: async () => undefined,
+      evaluate: async <T>(tabId: string, script: string) => {
+        evaluations.push({ tabId, script });
+        return undefined as T;
+      },
+    });
+
+    const result = await client.bindProviderTab({
+      provider: "deepseek-web",
+      preferredTabId: "tab-current",
+    });
+
+    expect(result.tabId).toBe("tab-current");
+    expect(findCalls).toBe(0);
+    expect(evaluations[0]?.tabId).toBe("tab-current");
+  });
+
   it("binds a Qwen tab through provider dispatch", async () => {
     const evaluations: Array<{ tabId: string; script: string }> = [];
 
@@ -267,32 +302,32 @@ describe("BbBrowserClient", () => {
     await expect(client.bindDeepSeekTab()).rejects.toThrow("Something unexpected happened");
   });
 
-  it("opens a new tab and injects bridge with initModes for startNewChat", async () => {
+  it("prioritizes reusing bound tab, reinjects bridge on navigation", async () => {
     const evaluations: Array<{ tabId: string; script: string }> = [];
-    const newTabId = "tab-fresh-1";
+    let callCount = 0;
 
     const client = new BbBrowserClient({
       getConnectionStatus: async () => "connected",
-      findDeepSeekTab: async () => ({
-        id: "tab-1",
-        url: "https://chat.deepseek.com/",
-      }),
-      openDeepSeek: async (url: string) => ({
-        tabId: newTabId,
-        url,
-      }),
+      findDeepSeekTab: async () => ({ id: "tab-1", url: "https://chat.deepseek.com/" }),
+      openDeepSeek: async (url: string) => ({ tabId: "tab-fallback", url }),
       submitPrompt: async () => undefined,
       evaluate: async <T>(tabId: string, script: string) => {
         evaluations.push({ tabId, script });
+        callCount += 1;
+        if (callCount === 1) {
+          throw new Error("Runtime.evaluate: Inspected target navigated or closed");
+        }
         return undefined as T;
       },
     });
 
-    const result = await client.startNewChat("tab-1");
-    expect(result).toEqual({ tabId: newTabId });
-    expect(evaluations).toHaveLength(1);
-    expect(evaluations[0]?.tabId).toBe(newTabId);
-    expect(evaluations[0]?.script).toContain("initModes()");
+    // Should reuse tab-1, not open a new tab
+    await expect(client.startNewChat("tab-1")).resolves.toBeUndefined();
+    expect(evaluations).toHaveLength(2);
+    expect(evaluations[0]?.tabId).toBe("tab-1");
+    expect(evaluations[1]?.tabId).toBe("tab-1");
+    expect(evaluations[0]?.script).toContain("startNewChat()");
+    expect(evaluations[1]?.script).toContain("__piDeepSeekBridge");
   });
 
   it("starts a Qwen new chat through provider-specific DOM actions", async () => {

@@ -8,6 +8,25 @@ import type { AppContext } from "../app";
 import { HelperError } from "../errors";
 import type { BoundSession, ProviderRequestDebugRecord } from "../types";
 
+const DEBUG_PROVIDER_REQUESTS = process.env.PI_DEEPSEEK_DEBUG === "1";
+
+function logProviderDebug(message: string, payload: Record<string, unknown>) {
+  if (!DEBUG_PROVIDER_REQUESTS) {
+    return;
+  }
+
+  console.error(
+    `[web-providers/helper] ${message} ${JSON.stringify(
+      {
+        at: new Date().toISOString(),
+        ...payload,
+      },
+      null,
+      2,
+    )}`,
+  );
+}
+
 function buildProviderPrompt(input: {
   messages: ProviderChatRequest["messages"];
   sessionInit?: ProviderChatRequest["sessionInit"];
@@ -22,17 +41,32 @@ function buildProviderPrompt(input: {
   const userPrompt = currentUser?.content ?? "";
   const nextFingerprint = input.sessionInit?.fingerprint ?? null;
   const nextSessionKey = input.sessionInit?.sessionKey ?? null;
+  const freshReasons: string[] = [];
+
+  if (nextFingerprint !== null && nextSessionKey !== null) {
+    if (!input.providerInitialized) {
+      freshReasons.push("provider_not_initialized");
+    }
+
+    if (input.providerInitFingerprint !== nextFingerprint) {
+      freshReasons.push("fingerprint_changed");
+    }
+
+    if (input.providerSessionKey !== nextSessionKey) {
+      freshReasons.push("session_key_changed");
+    }
+  }
+
   const shouldStartFresh =
     nextFingerprint !== null &&
     nextSessionKey !== null &&
-    (!input.providerInitialized ||
-      input.providerInitFingerprint !== nextFingerprint ||
-      input.providerSessionKey !== nextSessionKey);
+    freshReasons.length > 0;
 
   if (!shouldStartFresh) {
     return {
       prompt: userPrompt,
       shouldStartFresh: false,
+      freshReasons,
       nextFingerprint: input.providerInitFingerprint,
       nextSessionKey: input.providerSessionKey,
     };
@@ -43,6 +77,7 @@ function buildProviderPrompt(input: {
   return {
     prompt: [initPrompt, userPrompt].filter((part) => part.length > 0).join("\n\n"),
     shouldStartFresh: true,
+    freshReasons,
     nextFingerprint,
     nextSessionKey,
   };
@@ -169,9 +204,31 @@ export function registerProviderChatRoute(app: FastifyInstance, ctx: AppContext)
       providerInitFingerprint: session.providerInitFingerprint,
       providerSessionKey: session.providerSessionKey,
     });
+    logProviderDebug("fresh session decision", {
+      provider,
+      tabId: session.tabId,
+      sessionInitialized: session.providerInitialized,
+      storedFingerprint: session.providerInitFingerprint,
+      incomingFingerprint: body.sessionInit?.fingerprint ?? null,
+      storedSessionKey: session.providerSessionKey,
+      incomingSessionKey: body.sessionInit?.sessionKey ?? null,
+      freshReasons: promptInput.freshReasons,
+      shouldStartFresh: promptInput.shouldStartFresh,
+      hasSessionInit: Boolean(body.sessionInit),
+      messageCount: body.messages.length,
+    });
     const prompt = promptInput.prompt;
     const debugSeed = createBaseDebugRecord(session, { ...body, provider }, prompt);
-    const baseDebugRecord = debugSeed.record;
+    const baseDebugRecord = debugSeed.record as ProviderRequestDebugRecord;
+    baseDebugRecord.freshDecision = {
+      shouldStartFresh: promptInput.shouldStartFresh,
+      sessionInitialized: session.providerInitialized,
+      storedFingerprint: session.providerInitFingerprint,
+      incomingFingerprint: body.sessionInit?.fingerprint ?? null,
+      storedSessionKey: session.providerSessionKey,
+      incomingSessionKey: body.sessionInit?.sessionKey ?? null,
+      freshReasons: promptInput.freshReasons,
+    };
     ctx.state.setLastProviderRequest(provider, baseDebugRecord);
     ctx.state.setActiveRequest({
       requestId: debugSeed.requestId,
@@ -187,14 +244,12 @@ export function registerProviderChatRoute(app: FastifyInstance, ctx: AppContext)
       let activeTabId = session.tabId;
 
       if (promptInput.shouldStartFresh) {
-        const newChatResult = await ctx.browserClient.startNewChat(
+        const res = await ctx.browserClient.startNewChat(
           ctx.browserClient.bindProviderTab
             ? { provider, tabId: session.tabId }
             : session.tabId,
         );
-        if (newChatResult?.tabId) {
-          activeTabId = newChatResult.tabId;
-        }
+        if (res?.tabId) activeTabId = res.tabId;
       }
 
       const result = await ctx.browserClient.sendChatPrompt({

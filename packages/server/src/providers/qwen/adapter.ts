@@ -44,36 +44,54 @@ async function openAndWaitForQwenTab(
   );
 }
 
+async function resolveQwenTab(
+  transport: BbBrowserTransport,
+  opts: BindRetryOptions = {},
+  preferredTabId?: string,
+): Promise<{ id: string; url: string }> {
+  if (preferredTabId && transport.getTab) {
+    const preferredTab = await transport.getTab(preferredTabId);
+    if (preferredTab && preferredTab.url.includes("chat.qwen.ai")) {
+      return preferredTab;
+    }
+  }
+
+  try {
+    if (!transport.findQwenTab) {
+      throw new HelperError(
+        "NOT_BOUND",
+        "Opened Qwen in bb-browser. Finish login in that page and retry.",
+      );
+    }
+    return await transport.findQwenTab();
+  } catch (error) {
+    if (error instanceof HelperError && error.code === "NOT_BOUND") {
+      return openAndWaitForQwenTab(transport, opts);
+    }
+    if (
+      error instanceof Error &&
+      error.message.toLowerCase().includes("no page target found")
+    ) {
+      return openAndWaitForQwenTab(transport, opts);
+    }
+    throw error;
+  }
+}
+
 export function createQwenAdapter(
   transport?: BbBrowserTransport,
   retryOptions?: BindRetryOptions,
 ): ProviderAdapter {
   return {
     providerId: "qwen-web",
-    async bindTab(): Promise<BindResult> {
+    async bindTab(input = {}): Promise<BindResult> {
       if (!transport?.findQwenTab) {
         throw new HelperError(
           "NOT_BOUND",
           "Opened Qwen in bb-browser. Finish login in that page and retry.",
         );
       }
-
-      let tab: { id: string; url: string };
-
-      try {
-        tab = await transport.findQwenTab();
-      } catch (error) {
-        if (error instanceof HelperError && error.code === "NOT_BOUND") {
-          tab = await openAndWaitForQwenTab(transport, retryOptions);
-        } else if (
-          error instanceof Error &&
-          error.message.toLowerCase().includes("no page target found")
-        ) {
-          tab = await openAndWaitForQwenTab(transport, retryOptions);
-        } else {
-          throw error;
-        }
-      }
+      const tab = await resolveQwenTab(transport, retryOptions, input.preferredTabId);
 
       const normalizedUrl = assertQwenUrl(tab.url);
       const pageState = await transport.evaluate<BindResult["pageState"]>(

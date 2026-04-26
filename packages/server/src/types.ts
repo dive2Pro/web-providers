@@ -48,4 +48,13 @@ export interface ProviderRequestDebugRecord {
     code: string;
     message: string;
   } | null;
+  freshDecision?: {
+    shouldStartFresh: boolean;
+    sessionInitialized: boolean;
+    storedFingerprint: string | null;
+    incomingFingerprint: string | null;
+    storedSessionKey: string | null;
+    incomingSessionKey: string | null;
+    freshReasons: string[];
+  } | null;
 }

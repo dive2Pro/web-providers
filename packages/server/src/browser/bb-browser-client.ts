@@ -41,6 +41,7 @@ interface BbBrowserTabListEnvelope {
 
 export interface BbBrowserTransport {
   getConnectionStatus(): Promise<"connected" | "disconnected">;
+  getTab?(tabId: string): Promise<null | { id: string; url: string }>;
   findDeepSeekTab(): Promise<{ id: string; url: string }>;
   findQwenTab?(): Promise<{ id: string; url: string }>;
   openDeepSeek(url: string): Promise<{ tabId: string; url: string }>;
@@ -155,6 +156,11 @@ export function createBbBrowserTransport(): BbBrowserTransport {
       }
     },
 
+    async getTab(tabId: string) {
+      const list = await listTabs();
+      return list.find((entry) => entry.id === tabId) ?? null;
+    },
+
     async findDeepSeekTab() {
       const list = await listTabs();
       const tab = list.find((entry) => entry.url.includes("deepseek.com"));
@@ -214,27 +220,15 @@ export function createBbBrowserTransport(): BbBrowserTransport {
     },
 
     async openDeepSeek(url: string) {
-      const result = (await runBbBrowserJson(["open", url])) as {
-        data?: { tabId?: string; url?: string };
-      };
-      const data = result && typeof result === "object" ? (result as Record<string, unknown>).data : null;
-      const tabData = data && typeof data === "object" ? (data as Record<string, unknown>) : null;
-      return {
-        tabId: (tabData?.tabId as string) ?? "",
-        url: (tabData?.url as string) ?? url,
-      };
+      const raw = await runBbBrowserJson(["open", url]);
+      const data = (raw as { data?: { tabId?: string; url?: string } })?.data;
+      return { tabId: data?.tabId ?? "", url: data?.url ?? url };
     },
 
     async openQwen(url: string) {
-      const result = (await runBbBrowserJson(["open", url])) as {
-        data?: { tabId?: string; url?: string };
-      };
-      const data = result && typeof result === "object" ? (result as Record<string, unknown>).data : null;
-      const tabData = data && typeof data === "object" ? (data as Record<string, unknown>) : null;
-      return {
-        tabId: (tabData?.tabId as string) ?? "",
-        url: (tabData?.url as string) ?? url,
-      };
+      const raw = await runBbBrowserJson(["open", url]);
+      const data = (raw as { data?: { tabId?: string; url?: string } })?.data;
+      return { tabId: data?.tabId ?? "", url: data?.url ?? url };
     },
   };
 }
@@ -330,12 +324,17 @@ export class BbBrowserClient implements BrowserAutomationClient {
     return this.transport.getConnectionStatus();
   }
 
-  async bindDeepSeekTab(): Promise<BindResult> {
-    return this.providerRegistry["deepseek-web"].bindTab();
+  async bindDeepSeekTab(input?: { preferredTabId?: string }): Promise<BindResult> {
+    return this.providerRegistry["deepseek-web"].bindTab(input);
   }
 
-  async bindProviderTab(input: { provider: "deepseek-web" | "qwen-web" }): Promise<BindResult> {
-    return this.providerRegistry[input.provider].bindTab();
+  async bindProviderTab(input: {
+    provider: "deepseek-web" | "qwen-web";
+    preferredTabId?: string;
+  }): Promise<BindResult> {
+    return this.providerRegistry[input.provider].bindTab({
+      preferredTabId: input.preferredTabId,
+    });
   }
 
   async resetPageBridge(tabId: string): Promise<void> {
@@ -360,16 +359,29 @@ export class BbBrowserClient implements BrowserAutomationClient {
       return;
     }
 
-    // For DeepSeek: open a fresh tab instead of reusing the old one
-    const { tabId } = await this.transport.openDeepSeek("https://chat.deepseek.com/");
-    // Wait for page to fully load
-    await new Promise((resolve) => setTimeout(resolve, 3_000));
-    // Inject bridge and init modes
-    await this.transport.evaluate(
-      tabId,
-      `${INJECTED_BRIDGE_SOURCE}; window.__piDeepSeekBridge.initModes()`,
-    );
-    return { tabId };
+    const tabId = typeof input === "string" ? input : input.tabId;
+
+    // 优先复用已绑定的 tab
+    try {
+      await this.transport.evaluate(
+        tabId,
+        `${INJECTED_BRIDGE_SOURCE}; window.__piDeepSeekBridge.startNewChat()`,
+      );
+      return;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const isExpectedNavigation =
+        message.includes("Inspected target navigated or closed") ||
+        message.includes("Execution context was destroyed");
+
+      if (isExpectedNavigation) {
+        await new Promise((resolve) => setTimeout(resolve, 1_000));
+        await this.transport.evaluate(tabId, INJECTED_BRIDGE_SOURCE);
+        return;
+      }
+
+      throw error;
+    }
   }
 
   async sendChatPrompt(input: {

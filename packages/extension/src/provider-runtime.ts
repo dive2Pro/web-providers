@@ -987,16 +987,32 @@ function buildSessionInitPrompt(context: ProviderContext) {
     .map((message) => message.timestamp)
     .filter((timestamp) => Number.isFinite(timestamp))
     .sort((left, right) => left - right)[0];
+  const fingerprint =
+    typeof firstTimestamp === "number"
+      ? `conv-${firstTimestamp}`
+      : `conv-${createHash("sha256").update(prompt).digest("hex")}`;
   const sessionKey =
     typeof firstTimestamp === "number"
       ? `session-${firstTimestamp}`
       : `session-${createHash("sha256").update(prompt).digest("hex")}`;
 
-  return {
+  const sessionInit = {
     prompt,
-    fingerprint: createHash("sha256").update(prompt).digest("hex"),
+    fingerprint,
     sessionKey,
   };
+
+  logProviderDebug("session init computed", {
+    fingerprint: sessionInit.fingerprint,
+    sessionKey: sessionInit.sessionKey,
+    firstTimestamp: typeof firstTimestamp === "number" ? firstTimestamp : null,
+    messageCount: context.messages.length,
+    messageTimestamps: context.messages.map((message) => message.timestamp),
+    hasSystemPrompt: Boolean(context.systemPrompt?.trim()),
+    toolCount: context.tools?.length ?? 0,
+  });
+
+  return sessionInit;
 }
 
 function toProviderMessages(context: ProviderContext): ProviderChatRequest["messages"] {

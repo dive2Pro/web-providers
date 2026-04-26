@@ -681,6 +681,107 @@ describe("provider chat route", () => {
     expect(prompts).toEqual(["You are terse.\n\nhello", "continue"]);
   });
 
+  it("rebinds to the current fresh DeepSeek tab instead of rediscovering a stale one", async () => {
+    const prompts: string[] = [];
+    const bindPreferredTabIds: Array<string | undefined> = [];
+    let freshChatCount = 0;
+
+    const app = buildApp({
+      token: "test-token",
+      browserClient: {
+        getConnectionStatus: async () => "connected",
+        bindProviderTab: async ({
+          provider,
+          preferredTabId,
+        }: {
+          provider: string;
+          preferredTabId?: string;
+        }) => {
+          bindPreferredTabIds.push(preferredTabId);
+          const tabId = preferredTabId === "tab-fresh" ? "tab-fresh" : "tab-stale";
+          return {
+            tabId,
+            url:
+              provider === "deepseek-web"
+                ? `https://chat.deepseek.com/a/chat/${tabId}`
+                : "https://chat.qwen.ai/",
+            loginState: "logged_in",
+            bridgeInjected: true,
+            pageState: {
+              inputReady: true,
+              busy: false,
+              latestAssistantPreview: null,
+              assistantCount: 0,
+            },
+          };
+        },
+        resetPageBridge: async () => undefined,
+        startNewChat: async () => {
+          freshChatCount += 1;
+          return { tabId: "tab-fresh" };
+        },
+        sendChatPrompt: async ({ prompt }: { prompt: string }) => {
+          prompts.push(prompt);
+          return {
+            mode: "text",
+            outputText: "ok",
+            modelLabel: "DeepSeek Web",
+          };
+        },
+      } as never,
+    });
+
+    await app.inject({
+      method: "POST",
+      url: "/v1/bind",
+      headers: { authorization: "Bearer test-token" },
+      payload: { provider: "deepseek-web" },
+    });
+
+    await app.inject({
+      method: "POST",
+      url: "/v1/provider/chat",
+      headers: { authorization: "Bearer test-token" },
+      payload: {
+        provider: "deepseek-web",
+        model: "deepseek-web-chat",
+        messages: [{ role: "user", content: "hello" }],
+        sessionInit: {
+          fingerprint: "fp-1",
+          sessionKey: "session-1",
+          prompt: "You are terse.",
+        },
+      },
+    });
+
+    await app.inject({
+      method: "POST",
+      url: "/v1/bind",
+      headers: { authorization: "Bearer test-token" },
+      payload: { provider: "deepseek-web" },
+    });
+
+    await app.inject({
+      method: "POST",
+      url: "/v1/provider/chat",
+      headers: { authorization: "Bearer test-token" },
+      payload: {
+        provider: "deepseek-web",
+        model: "deepseek-web-chat",
+        messages: [{ role: "user", content: "continue" }],
+        sessionInit: {
+          fingerprint: "fp-1",
+          sessionKey: "session-1",
+          prompt: "You are terse.",
+        },
+      },
+    });
+
+    expect(bindPreferredTabIds).toEqual([undefined, "tab-fresh"]);
+    expect(freshChatCount).toBe(1);
+    expect(prompts).toEqual(["You are terse.\n\nhello", "continue"]);
+  });
+
   it("records the latest provider request for debugging", async () => {
     const app = buildApp({
       token: "test-token",
