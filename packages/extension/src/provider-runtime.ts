@@ -318,6 +318,8 @@ const RESPONSE_ENVELOPE_INSTRUCTION = [
   "Do not add any prose before or after it.",
   "Do not wrap it in markdown or code fences.",
 ].join(" ");
+const FIRST_TURN_REASONING_EFFORT_INSTRUCTION =
+  "Reasoning Effort: Absolute maximum with no shortcuts permitted. You MUST be very thorough in your thinking, rigorously stress-testing your logic against all potential paths, edge cases, and adversarial scenarios.";
 
 function buildToolCatalogPrompt(tools: ToolDefinition[] | undefined) {
   if (!tools || tools.length === 0) {
@@ -498,7 +500,7 @@ function parseStrictProtocolEnvelope(text: string): {
     return objects;
   }
 
-  function findEmbeddedEnvelope(source: string) {
+  function findEmbeddedEnvelopes(source: string) {
     return extractEmbeddedObjects(source)
       .map((entry) => {
         const prefix = source
@@ -525,8 +527,7 @@ function parseStrictProtocolEnvelope(text: string): {
           return null;
         }
       })
-      .filter((entry): entry is ProtocolEnvelope => entry !== null)
-      .at(-1);
+      .filter((entry): entry is ProtocolEnvelope => entry !== null);
   }
 
   const trimmed = text.trim();
@@ -545,7 +546,15 @@ function parseStrictProtocolEnvelope(text: string): {
   try {
     parsed = JSON.parse(trimmed);
   } catch {
-    const embeddedEnvelope = findEmbeddedEnvelope(text);
+    const embeddedEnvelopes = findEmbeddedEnvelopes(text);
+    if (embeddedEnvelopes.length > 1) {
+      return {
+        envelope: null,
+        protocolLike: true,
+        error: "Return exactly one JSON object.",
+      };
+    }
+    const embeddedEnvelope = embeddedEnvelopes[0] ?? null;
     if (embeddedEnvelope) {
       return {
         envelope: embeddedEnvelope,
@@ -578,7 +587,15 @@ function parseStrictProtocolEnvelope(text: string): {
     };
   }
 
-  const embeddedEnvelope = findEmbeddedEnvelope(text);
+  const embeddedEnvelopes = findEmbeddedEnvelopes(text);
+  if (embeddedEnvelopes.length > 1) {
+    return {
+      envelope: null,
+      protocolLike: true,
+      error: "Return exactly one JSON object.",
+    };
+  }
+  const embeddedEnvelope = embeddedEnvelopes[0] ?? null;
   if (embeddedEnvelope) {
     return {
       envelope: embeddedEnvelope,
@@ -1074,6 +1091,7 @@ function buildSessionInitPrompt(context: ProviderContext) {
     parts.push(context.systemPrompt.trim());
   }
 
+  parts.push(FIRST_TURN_REASONING_EFFORT_INSTRUCTION);
   parts.push(RESPONSE_ENVELOPE_INSTRUCTION);
 
   if ((context.tools?.length ?? 0) > 0) {

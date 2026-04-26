@@ -697,6 +697,9 @@ describe("pi provider extension", () => {
     });
     const providerSessionInit =
       (providerChatCall?.body as { sessionInit?: { prompt?: string } } | undefined)?.sessionInit;
+    expect(String(providerSessionInit?.prompt ?? "")).toContain(
+      "Reasoning Effort: Absolute maximum with no shortcuts permitted.",
+    );
     expect(String(providerSessionInit?.prompt ?? "")).toContain('"type":"tool_call"');
     expect(String(providerSessionInit?.prompt ?? "")).toContain("Tool name: bash");
     expect(String(providerSessionInit?.prompt ?? "")).toContain("\"cmd\"");
@@ -1113,7 +1116,7 @@ describe("pi provider extension", () => {
     });
   });
 
-  it("repairs malformed multi-object protocol text into a single message envelope", async () => {
+  it("repairs multi-object protocol text instead of salvaging a trailing envelope", async () => {
     const calls: Array<{
       path: string;
       body: Record<string, unknown>;
@@ -1151,7 +1154,11 @@ describe("pi provider extension", () => {
               return {
                 mode: "text",
                 outputText:
-                  '{"type":"tool_call","name":"read","arguments":{"path":"/tmp/a"}}~~\n{"type":"message","content":"hello"}',
+                  [
+                    '{"type":"tool_call","name":"read","arguments":{"path":"/tmp/a"}}',
+                    '{"type":"tool_call","name":"read","arguments":{"path":"/tmp/b"}}',
+                    '{"type":"message","content":"hello"}',
+                  ].join("\n\n"),
                 finishReason: "stop",
                 modelLabel: "DeepSeek Web",
               } as T;
@@ -1195,7 +1202,15 @@ describe("pi provider extension", () => {
     ]);
 
     const providerCalls = calls.filter((call) => call.path === "/v1/provider/chat");
-    expect(providerCalls).toHaveLength(1);
+    expect(providerCalls).toHaveLength(2);
+    const repairMessages =
+      (providerCalls[1]?.body as { messages?: Array<{ content?: string }> } | undefined)?.messages;
+    expect(String(repairMessages?.[0]?.content ?? "")).toContain(
+      "The previous reply violated the required JSON response protocol.",
+    );
+    expect(String(repairMessages?.[0]?.content ?? "")).toContain(
+      "Return exactly one JSON object.",
+    );
     expect(eventTypes).toEqual(["start", "text_start", "text_delta", "text_end", "done"]);
     expect(result).toMatchObject({
       stopReason: "stop",
