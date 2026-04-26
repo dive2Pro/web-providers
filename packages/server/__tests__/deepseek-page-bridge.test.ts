@@ -116,6 +116,7 @@ Object.defineProperty(FakeTextarea.prototype, "value", {
 function createBridgeTestContext(options?: {
   latestAssistantText?: string;
   assistantVisible?: boolean;
+  continueVisible?: boolean;
 }) {
   const unrelatedPageIcon = new FakeElement({
     className: "_7d1f5e2 ds-icon-button ds-icon-button--l ds-icon-button--sizing-icon",
@@ -148,6 +149,17 @@ function createBridgeTestContext(options?: {
   const composerRoot = new FakeElement();
   const composerInputWrapper = new FakeElement();
   const textarea = new FakeTextarea(composerSend);
+  const continueButton = options?.continueVisible
+    ? new FakeElement({
+        attributes: {
+          role: "button",
+          "aria-disabled": "false",
+        },
+      })
+    : null;
+  if (continueButton) {
+    continueButton.textContent = "Continue";
+  }
   const shouldCreateAssistant = options?.assistantVisible === true ||
     typeof options?.latestAssistantText === "string";
   const latestAssistantMarkdown = shouldCreateAssistant
@@ -199,9 +211,24 @@ function createBridgeTestContext(options?: {
         return textarea;
       }
 
+      if (
+        continueButton &&
+        (selector === "button[aria-label='Continue']" ||
+          selector === "button[aria-label='继续']" ||
+          selector === "button[data-testid='continue']")
+      ) {
+        return continueButton;
+      }
+
       return null;
     },
     querySelectorAll(selector: string) {
+      if (selector === "button, div[role='button']") {
+        return continueButton
+          ? [continueButton, composerToggle, composerAttach, composerSend]
+          : [composerToggle, composerAttach, composerSend];
+      }
+
       if (selector === "div[role='button']") {
         return [unrelatedPageIcon, composerToggle, composerAttach, composerSend];
       }
@@ -546,6 +573,29 @@ describe("deepseek page bridge", () => {
       ok: false,
       error: "TIMEOUT",
       message: "The page did not finish streaming in time",
+    });
+  });
+
+  it("detects a continuation-required state and clicks Continue", async () => {
+    const { context } = createBridgeTestContext({
+      latestAssistantText: "partial reply",
+      continueVisible: true,
+    });
+
+    vm.runInNewContext(INJECTED_BRIDGE_SOURCE, context);
+
+    const bridge = (context.window as Record<string, any>).__piDeepSeekBridge;
+    expect(bridge).toBeTruthy();
+
+    expect(bridge.getPageState()).toMatchObject({
+      inputReady: true,
+      continuationRequired: true,
+      latestAssistantPreview: "partial reply",
+    });
+
+    expect(await bridge.continueReply()).toEqual({
+      ok: true,
+      continued: true,
     });
   });
 

@@ -743,6 +743,25 @@ export const INJECTED_BRIDGE_SOURCE = `
     );
   }
 
+  function findContinueButton() {
+    const directMatch =
+      document.querySelector("button[aria-label='Continue']") ||
+      document.querySelector("button[aria-label='继续']") ||
+      document.querySelector("button[data-testid='continue']");
+
+    if (directMatch) {
+      return directMatch;
+    }
+
+    const clickableNodes = Array.from(
+      document.querySelectorAll("button, div[role='button']")
+    );
+    return clickableNodes.find((node) => {
+      const text = (node.textContent || "").trim().toLowerCase();
+      return text === "continue" || text === "继续" || text === "继续生成";
+    }) || null;
+  }
+
   function findNewChatButton() {
     const directMatch =
       document.querySelector("button[aria-label='New Chat']") ||
@@ -988,6 +1007,13 @@ export const INJECTED_BRIDGE_SOURCE = `
 
     while (Date.now() - startedAt < timeoutMs) {
       const pageState = window[KEY].getPageState();
+      if (pageState.continuationRequired) {
+        const resumed = await window[KEY].continueReply();
+        if (resumed.ok && resumed.continued) {
+          continue;
+        }
+      }
+
       const streamedReply = completionState.streamReply.trim();
       const streamedTurn =
         streamedReply.length > 0
@@ -1065,6 +1091,7 @@ export const INJECTED_BRIDGE_SOURCE = `
             ? Math.max(assistantMessageCount(), 1)
             : assistantMessageCount(),
         blockingMessage,
+        continuationRequired: Boolean(findContinueButton()),
       };
     },
     getCompletionState() {
@@ -1091,6 +1118,16 @@ export const INJECTED_BRIDGE_SOURCE = `
       }
 
       return { ok: true };
+    },
+    async continueReply() {
+      const continueButton = findContinueButton();
+      if (!(continueButton instanceof HTMLElement)) {
+        return { ok: true, continued: false };
+      }
+
+      continueButton.click();
+      await sleep(500);
+      return { ok: true, continued: true };
     },
     async startPrompt({ prompt }) {
       const SUBMISSION_START_TIMEOUT_MS = 1200;

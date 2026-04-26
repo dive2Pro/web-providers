@@ -402,6 +402,8 @@ export class BbBrowserClient implements BrowserAutomationClient {
     const startPromptScript =
       `${INJECTED_BRIDGE_SOURCE}; window.__piDeepSeekBridge.startPrompt({ prompt: ${promptLiteral} })`;
     const pageStateScript = `${INJECTED_BRIDGE_SOURCE}; window.__piDeepSeekBridge.getPageState()`;
+    const continueReplyScript =
+      `${INJECTED_BRIDGE_SOURCE}; window.__piDeepSeekBridge.continueReply()`;
     const progressScript =
       `${INJECTED_BRIDGE_SOURCE}; ({ pageState: window.__piDeepSeekBridge.getPageState(), completionState: window.__piDeepSeekBridge.getCompletionState() })`;
     const trace: NonNullable<SendChatAutomationDebug["trace"]> = [];
@@ -439,6 +441,7 @@ export class BbBrowserClient implements BrowserAutomationClient {
           latestAssistantPreview?: string | null;
           assistantCount?: number;
           blockingMessage?: string | null;
+          continuationRequired?: boolean;
         };
         error?: string;
         message?: string;
@@ -478,6 +481,7 @@ export class BbBrowserClient implements BrowserAutomationClient {
             latestAssistantPreview: startResult.baselineState.latestAssistantPreview ?? null,
             assistantCount: startResult.baselineState.assistantCount ?? 0,
             blockingMessage: startResult.baselineState.blockingMessage ?? null,
+            continuationRequired: startResult.baselineState.continuationRequired ?? false,
           }
         : await this.transport.evaluate<{
             inputReady: boolean;
@@ -485,6 +489,7 @@ export class BbBrowserClient implements BrowserAutomationClient {
             latestAssistantPreview: string | null;
             assistantCount: number;
             blockingMessage?: string | null;
+            continuationRequired?: boolean;
           }>(input.tabId, pageStateScript);
 
       if (baselineState.blockingMessage) {
@@ -531,6 +536,7 @@ export class BbBrowserClient implements BrowserAutomationClient {
             latestAssistantPreview: string | null;
             assistantCount: number;
             blockingMessage?: string | null;
+            continuationRequired?: boolean;
           };
           completionState: {
             observed?: boolean;
@@ -568,6 +574,11 @@ export class BbBrowserClient implements BrowserAutomationClient {
                       progress.blockingMessage === null)
                       ? progress.blockingMessage
                       : null,
+                  continuationRequired:
+                    "continuationRequired" in progress &&
+                    typeof progress.continuationRequired === "boolean"
+                      ? progress.continuationRequired
+                      : false,
                 }
               : await this.transport.evaluate<{
                   inputReady: boolean;
@@ -575,6 +586,7 @@ export class BbBrowserClient implements BrowserAutomationClient {
                   latestAssistantPreview: string | null;
                   assistantCount: number;
                   blockingMessage?: string | null;
+                  continuationRequired?: boolean;
                 }>(input.tabId, pageStateScript);
         const completionState =
           progress &&
@@ -618,6 +630,32 @@ export class BbBrowserClient implements BrowserAutomationClient {
             "PAGE_UNAVAILABLE",
             "DeepSeek requires manual verification in the browser tab before chatting",
           );
+        }
+
+        if (state.continuationRequired) {
+          const continueResult = await this.transport.evaluate<{
+            ok?: boolean;
+            continued?: boolean;
+          }>(input.tabId, continueReplyScript);
+
+          pushAutomationTrace(trace, {
+            phase: "continue_reply",
+            pageBusy: state.busy,
+            pageReplyPreview: previewDebugText(state.latestAssistantPreview),
+            assistantCount: state.assistantCount,
+            note:
+              continueResult && typeof continueResult === "object" && continueResult.continued
+                ? "continued"
+                : "continue_unavailable",
+          });
+
+          if (continueResult && typeof continueResult === "object" && continueResult.continued) {
+            lastProgressAt = Date.now();
+            previousAssistantCount = state.assistantCount;
+            previousReply = (state.latestAssistantPreview ?? "").trim();
+            await new Promise((resolve) => setTimeout(resolve, 300));
+            continue;
+          }
         }
 
         const streamedTurn = completionState?.turn;

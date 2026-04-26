@@ -1026,6 +1026,111 @@ describe("BbBrowserClient", () => {
     expect(submittedPrompt).toBeNull();
   });
 
+  it("clicks Continue and keeps polling when DeepSeek pauses for continuation", async () => {
+    let pollCount = 0;
+    const evaluations: string[] = [];
+
+    const client = new BbBrowserClient({
+      getConnectionStatus: async () => "connected",
+      findDeepSeekTab: async () => ({
+        id: "tab-1",
+        url: "https://chat.deepseek.com/",
+      }),
+      openDeepSeek: async () => undefined,
+      submitPrompt: async () => undefined,
+      evaluate: async <T>(_tabId: string, script: string) => {
+        evaluations.push(script);
+
+        if (script.includes("window.__piDeepSeekBridge.startPrompt(")) {
+          return {
+            ok: true,
+            baselineState: {
+              inputReady: true,
+              busy: false,
+              latestAssistantPreview: null,
+              assistantCount: 0,
+              continuationRequired: false,
+            },
+          } as T;
+        }
+
+        if (script.includes("window.__piDeepSeekBridge.continueReply()")) {
+          return {
+            ok: true,
+            continued: true,
+          } as T;
+        }
+
+        if (script.includes("getCompletionState()") && script.includes("getPageState()")) {
+          pollCount += 1;
+          if (pollCount === 1) {
+            return {
+              pageState: {
+                inputReady: true,
+                busy: false,
+                latestAssistantPreview: "partial reply",
+                assistantCount: 1,
+                continuationRequired: true,
+              },
+              completionState: {
+                observed: true,
+                status: "finished",
+                closed: true,
+                terminalAt: Date.now() - 500,
+                turn: {
+                  mode: "text",
+                  outputText: "partial reply",
+                },
+              },
+            } as T;
+          }
+
+          return {
+            pageState: {
+              inputReady: true,
+              busy: false,
+              latestAssistantPreview: "partial reply completed",
+              assistantCount: 1,
+              continuationRequired: false,
+            },
+            completionState: {
+              observed: true,
+              status: "finished",
+              closed: true,
+              terminalAt: Date.now(),
+              turn: {
+                mode: "text",
+                outputText: "partial reply completed",
+              },
+            },
+          } as T;
+        }
+
+        return undefined as T;
+      },
+    });
+
+    await expect(
+      client.sendChatPrompt({
+        tabId: "tab-1",
+        prompt: "hello",
+        timeoutMs: 3000,
+      }),
+    ).resolves.toMatchObject({
+      mode: "text",
+      outputText: "partial reply completed",
+      debug: {
+        source: "bridge_stream",
+        freshSession: false,
+      },
+      modelLabel: "DeepSeek Web",
+    });
+
+    expect(
+      evaluations.some((script) => script.includes("window.__piDeepSeekBridge.continueReply()")),
+    ).toBe(true);
+  });
+
   it("preserves thinking text from the injected bridge stream result", async () => {
     const client = new BbBrowserClient({
       getConnectionStatus: async () => "connected",

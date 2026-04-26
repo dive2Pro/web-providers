@@ -9,6 +9,7 @@ export interface PageStateSummary {
   latestAssistantPreview: string | null;
   assistantCount: number;
   blockingMessage?: string | null;
+  continuationRequired?: boolean;
 }
 
 export interface BindResult {
