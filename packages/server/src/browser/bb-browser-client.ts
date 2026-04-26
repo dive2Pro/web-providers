@@ -310,6 +310,11 @@ function looksLikeIncompleteStructuredText(text: string | null | undefined) {
   }
 }
 
+const DEEPSEEK_START_NEW_CHAT_SCRIPT =
+  `${INJECTED_BRIDGE_SOURCE}; window.__piDeepSeekBridge.startNewChat()`;
+const DEEPSEEK_INIT_MODES_SCRIPT =
+  `${INJECTED_BRIDGE_SOURCE}; window.__piDeepSeekBridge.initModes()`;
+
 export class BbBrowserClient implements BrowserAutomationClient {
   private readonly providerRegistry: ReturnType<typeof createProviderRegistry>;
 
@@ -363,10 +368,7 @@ export class BbBrowserClient implements BrowserAutomationClient {
 
     // 优先复用已绑定的 tab
     try {
-      await this.transport.evaluate(
-        tabId,
-        `${INJECTED_BRIDGE_SOURCE}; window.__piDeepSeekBridge.startNewChat()`,
-      );
+      await this.transport.evaluate(tabId, DEEPSEEK_START_NEW_CHAT_SCRIPT);
       return;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -376,7 +378,7 @@ export class BbBrowserClient implements BrowserAutomationClient {
 
       if (isExpectedNavigation) {
         await new Promise((resolve) => setTimeout(resolve, 1_000));
-        await this.transport.evaluate(tabId, INJECTED_BRIDGE_SOURCE);
+        await this.transport.evaluate(tabId, DEEPSEEK_INIT_MODES_SCRIPT);
         return;
       }
 

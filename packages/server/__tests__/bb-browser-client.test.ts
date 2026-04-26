@@ -89,6 +89,7 @@ describe("BbBrowserClient", () => {
     });
     expect(evaluations).toHaveLength(1);
     expect(evaluations[0]?.tabId).toBe("tab-1");
+    expect(evaluations[0]?.script).toContain("initModes()");
   });
 
   it("binds a DeepSeek tab through provider dispatch", async () => {
@@ -118,6 +119,7 @@ describe("BbBrowserClient", () => {
     });
     expect(evaluations).toHaveLength(1);
     expect(evaluations[0]?.tabId).toBe("tab-deepseek");
+    expect(evaluations[0]?.script).toContain("initModes()");
   });
 
   it("prefers the currently bound DeepSeek tab when rebinding", async () => {
@@ -302,7 +304,7 @@ describe("BbBrowserClient", () => {
     await expect(client.bindDeepSeekTab()).rejects.toThrow("Something unexpected happened");
   });
 
-  it("prioritizes reusing bound tab, reinjects bridge on navigation", async () => {
+  it("prioritizes reusing bound tab, then re-initializes modes after navigation", async () => {
     const evaluations: Array<{ tabId: string; script: string }> = [];
     let callCount = 0;
 
@@ -327,7 +329,7 @@ describe("BbBrowserClient", () => {
     expect(evaluations[0]?.tabId).toBe("tab-1");
     expect(evaluations[1]?.tabId).toBe("tab-1");
     expect(evaluations[0]?.script).toContain("startNewChat()");
-    expect(evaluations[1]?.script).toContain("__piDeepSeekBridge");
+    expect(evaluations[1]?.script).toContain("initModes()");
   });
 
   it("starts a Qwen new chat through provider-specific DOM actions", async () => {

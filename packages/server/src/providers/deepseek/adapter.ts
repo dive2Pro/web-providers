@@ -92,7 +92,10 @@ export function createDeepSeekAdapter(
       );
 
       const normalizedUrl = assertDeepSeekUrl(tab.url);
-      await transport.evaluate(tab.id, INJECTED_BRIDGE_SOURCE);
+      await transport.evaluate(
+        tab.id,
+        `${INJECTED_BRIDGE_SOURCE}; window.__piDeepSeekBridge.initModes()`,
+      );
 
       return {
         tabId: tab.id,
