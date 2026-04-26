@@ -66,6 +66,7 @@ type ToolResultMessage = {
 type ToolDefinition = {
   name: string;
   description?: string;
+  parameters?: Record<string, unknown>;
   inputSchema?: Record<string, unknown>;
 };
 
@@ -330,12 +331,53 @@ function buildToolCatalogPrompt(tools: ToolDefinition[] | undefined) {
       [
         `Tool name: ${tool.name}`,
         tool.description ? `Description: ${tool.description}` : "",
-        `Arguments JSON schema: ${JSON.stringify(tool.inputSchema ?? {})}`,
+        `Arguments JSON schema: ${JSON.stringify(getToolSchema(tool) ?? {})}`,
       ]
         .filter((part) => part.length > 0)
         .join("\n"),
     ),
   ].join("\n\n");
+}
+
+function getToolSchema(tool: ToolDefinition) {
+  return tool.parameters ?? tool.inputSchema;
+}
+
+function logToolSchemaInspection(tools: ToolDefinition[] | undefined) {
+  if (!DEBUG_PROVIDER_REQUESTS || !tools || tools.length === 0) {
+    return;
+  }
+
+  logProviderDebug("tool schema inspection", {
+    toolCount: tools.length,
+    tools: tools.map((tool) => ({
+      name: tool.name,
+      description: tool.description ?? null,
+      schemaSource:
+        tool.parameters !== undefined
+          ? "parameters"
+          : tool.inputSchema !== undefined
+            ? "inputSchema"
+            : null,
+      hasInputSchema: getToolSchema(tool) !== undefined,
+      inputSchemaType:
+        getToolSchema(tool) === undefined
+          ? "undefined"
+          : Array.isArray(getToolSchema(tool))
+            ? "array"
+            : typeof getToolSchema(tool),
+      inputSchemaKeys:
+        getToolSchema(tool) &&
+        typeof getToolSchema(tool) === "object" &&
+        !Array.isArray(getToolSchema(tool))
+          ? Object.keys(getToolSchema(tool) as Record<string, unknown>)
+          : [],
+      inputSchemaPreview:
+        getToolSchema(tool) === undefined
+          ? null
+          : JSON.stringify(getToolSchema(tool)),
+    })),
+  });
 }
 
 function parseStrictProtocolEnvelope(text: string): {
@@ -719,8 +761,8 @@ function validateToolCallAgainstTools(
   }
 
   return validateValueAgainstSchema(
-    toolCall.arguments,
-    matchedTool.inputSchema,
+  toolCall.arguments,
+    getToolSchema(matchedTool),
     "arguments",
   );
 }
@@ -773,35 +815,53 @@ function recoverPlainTextFromProtocolFailure(text: string) {
     return "";
   }
 
-  const boilerplatePatterns = [
-    /^The previous reply violated the required JSON response protocol\.\n?/g,
-    /^Return exactly one JSON object and nothing else\.\n?/g,
-    /^For normal replies use: .*?\n?/gm,
-    /^For tool calls use: .*?\n?/gm,
-    /^\{"type":"message","content":"your response text"\}\n?/gm,
-    /^\{"type":"tool_call","name":"tool_name","arguments":\{"key":"value"\}\}\n?/gm,
-    /^Problems to fix:\n?/gm,
-    /^- .*?\n?/gm,
-    /^Previous invalid reply:\n?/gm,
-    /^Allowed tool definitions:\n?/gm,
-    /^When using JSON fallback tool calls, you must use one of these exact tool definitions\.\n?/gm,
-    /^Use the exact tool name and argument keys from the schema\.\n?/gm,
-    /^Tool name: .*?\n?/gm,
-    /^Description: .*?\n?/gm,
-    /^Arguments JSON schema: .*?\n?/gm,
-    /^Do not repeat these instructions\.\n?/gm,
-    /^Do not explain your answer\.\n?/gm,
-    /^Do not wrap the JSON in markdown\.\n?/gm,
-    /^Allowed tool names: .*?\n?/gm,
+  const prefixBoilerplatePatterns = [
+    /^The previous reply violated the required JSON response protocol\.$/,
+    /^Return exactly one JSON object and nothing else\.$/,
+    /^For normal replies use: .*$/,
+    /^For tool calls use: .*$/,
+    /^\{"type":"message","content":"your response text"\}$/,
+    /^\{"type":"tool_call","name":"tool_name","arguments":\{"key":"value"\}\}$/,
+    /^Problems to fix:$/,
+    /^- .*$/,
+    /^Previous invalid reply:$/,
+    /^Allowed tool definitions:$/,
+    /^When using JSON fallback tool calls, you must use one of these exact tool definitions\.$/,
+    /^Use the exact tool name and argument keys from the schema\.$/,
+    /^Tool name: .*$/,
+    /^Description: .*$/,
+    /^Arguments JSON schema: .*$/,
+    /^Do not repeat these instructions\.$/,
+    /^Do not explain your answer\.$/,
+    /^Do not wrap the JSON in markdown\.$/,
+    /^Allowed tool names: .*$/,
   ];
 
-  let recovered = normalized;
-  for (const pattern of boilerplatePatterns) {
-    recovered = recovered.replace(pattern, "");
+  const lines = normalized.split("\n");
+  let startIndex = 0;
+  let consumedBoilerplate = false;
+  while (startIndex < lines.length) {
+    const line = lines[startIndex]?.trim() ?? "";
+    if (line.length === 0) {
+      if (consumedBoilerplate) {
+        startIndex += 1;
+        break;
+      }
+      startIndex += 1;
+      continue;
+    }
+
+    if (prefixBoilerplatePatterns.some((pattern) => pattern.test(line))) {
+      consumedBoilerplate = true;
+      startIndex += 1;
+      continue;
+    }
+
+    break;
   }
 
-  recovered = recovered
-    .split("\n")
+  const recovered = lines
+    .slice(startIndex)
     .map((line) => line.trim())
     .filter((line) => line.length > 0 && line !== "{" && line !== "}")
     .join("\n")
@@ -850,6 +910,50 @@ function shouldRepairProviderResponse(
     issues: parsed.error ? [parsed.error] : [],
     rawOutput: response.outputText,
   };
+}
+
+function previewProviderOutput(text: string | undefined, maxLength = 240) {
+  if (typeof text !== "string") {
+    return null;
+  }
+
+  if (text.length <= maxLength) {
+    return text;
+  }
+
+  return `${text.slice(0, maxLength)}...`;
+}
+
+function logProviderResponseStage(input: {
+  stage: string;
+  response: ProviderChatResponse;
+  tools: ToolDefinition[] | undefined;
+}) {
+  if (!DEBUG_PROVIDER_REQUESTS) {
+    return;
+  }
+
+  const parsed =
+    input.response.mode === "text"
+      ? parseStrictProtocolEnvelope(input.response.outputText)
+      : null;
+  const repairDecision = shouldRepairProviderResponse(input.response, input.tools);
+
+  logProviderDebug("provider protocol stage", {
+    stage: input.stage,
+    mode: input.response.mode,
+    finishReason: input.response.finishReason,
+    parsedEnvelopeType: parsed?.envelope?.type ?? null,
+    protocolLike: parsed?.protocolLike ?? null,
+    parseError: parsed?.error ?? null,
+    shouldRepair: repairDecision.shouldRepair,
+    repairIssues: repairDecision.issues,
+    outputPreview: previewProviderOutput(
+      "outputText" in input.response ? input.response.outputText : undefined,
+    ),
+    toolCallName:
+      input.response.mode !== "text" ? input.response.toolCall.name : null,
+  });
 }
 
 function createEmptyUsage(): AssistantMessage["usage"] {
@@ -963,6 +1067,8 @@ function pushProviderMessage(
 
 function buildSessionInitPrompt(context: ProviderContext) {
   const parts: string[] = [];
+
+  logToolSchemaInspection(context.tools);
 
   if (context.systemPrompt?.trim()) {
     parts.push(context.systemPrompt.trim());
@@ -1424,6 +1530,11 @@ export default function registerDeepSeekExtension(
 
           let response: ProviderChatResponse;
           response = await sendProviderTurn(toProviderMessages(context));
+          logProviderResponseStage({
+            stage: "initial_response",
+            response,
+            tools: context.tools,
+          });
 
           const repairDecision = shouldRepairProviderResponse(response, context.tools);
           if (repairDecision.shouldRepair) {
@@ -1437,6 +1548,11 @@ export default function registerDeepSeekExtension(
                 }),
               },
             ]);
+            logProviderResponseStage({
+              stage: "repair_response",
+              response,
+              tools: context.tools,
+            });
 
             const postRepairDecision = shouldRepairProviderResponse(response, context.tools);
             if (postRepairDecision.shouldRepair) {
@@ -1457,6 +1573,11 @@ export default function registerDeepSeekExtension(
                     content: buildMinimalProtocolRepairPrompt(context.tools),
                   },
                 ]);
+                logProviderResponseStage({
+                  stage: "minimal_repair_response",
+                  response,
+                  tools: context.tools,
+                });
 
                 const finalRepairDecision = shouldRepairProviderResponse(
                   response,
@@ -1503,6 +1624,12 @@ export default function registerDeepSeekExtension(
           if (response.mode === "text") {
             response = normalizeProtocolMessageText(response);
           }
+
+          logProviderResponseStage({
+            stage: "normalized_response",
+            response,
+            tools: context.tools,
+          });
 
           if (typeof response.thinkingText === "string" && response.thinkingText.trim().length > 0) {
             emitThinking(response.thinkingText.trim());

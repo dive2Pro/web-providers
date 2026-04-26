@@ -57,6 +57,7 @@ type Context = {
   tools?: Array<{
     name: string;
     description?: string;
+    parameters?: Record<string, unknown>;
     inputSchema?: Record<string, unknown>;
   }>;
 };
@@ -723,6 +724,157 @@ describe("pi provider extension", () => {
     });
   });
 
+  it("unwraps a text-mode protocol message envelope into plain assistant text", async () => {
+    let config: ProviderConfig | undefined;
+
+    registerDeepSeekExtension(
+      {
+        registerProvider(_name, providerConfig) {
+          config = providerConfig as ProviderConfig;
+        },
+        on() {},
+      },
+      {
+        spawnHelper: async () => ({
+          baseUrl: "http://127.0.0.1:4318",
+          token: "token-123",
+          stop: async () => undefined,
+        }),
+        helperClient: {
+          post: async <T>(_baseUrl: string, path: string) => {
+            if (path === "/v1/bind") {
+              return { ok: true } as T;
+            }
+
+            return {
+              mode: "text",
+              outputText:
+                "{\"type\":\"message\",\"content\":\"根据系统指令，我只能返回 JSON 对象。\"}",
+              finishReason: "stop",
+              modelLabel: "DeepSeek Web",
+            } as T;
+          },
+        },
+        randomToken: () => "token-123",
+      },
+    );
+
+    const stream = config?.streamSimple?.(
+      {
+        id: "deepseek-web-chat",
+        api: "deepseek-web-api",
+        provider: "deepseek-web",
+      },
+      {
+        messages: [
+          {
+            role: "user",
+            content: "test",
+            timestamp: Date.now(),
+          },
+        ],
+      },
+      {
+        signal: new AbortController().signal,
+      },
+    );
+
+    const result = await stream?.result();
+
+    expect(result).toMatchObject({
+      stopReason: "stop",
+      content: [{ type: "text", text: "根据系统指令，我只能返回 JSON 对象。" }],
+    });
+  });
+
+  it("uses tool parameters as the JSON schema source for provider prompts", async () => {
+    const calls: Array<{
+      path: string;
+      body: Record<string, unknown>;
+    }> = [];
+    let config: ProviderConfig | undefined;
+
+    registerDeepSeekExtension(
+      {
+        registerProvider(_name, providerConfig) {
+          config = providerConfig as ProviderConfig;
+        },
+        on() {},
+      },
+      {
+        spawnHelper: async () => ({
+          baseUrl: "http://127.0.0.1:4318",
+          token: "token-123",
+          stop: async () => undefined,
+        }),
+        helperClient: {
+          post: async <T>(
+            _baseUrl: string,
+            path: string,
+            body: Record<string, unknown>,
+          ) => {
+            calls.push({ path, body });
+
+            if (path === "/v1/bind") {
+              return { ok: true } as T;
+            }
+
+            return {
+              mode: "text",
+              outputText: "ok",
+              finishReason: "stop",
+              modelLabel: "DeepSeek Web",
+            } as T;
+          },
+        },
+        randomToken: () => "token-123",
+      },
+    );
+
+    const stream = config?.streamSimple?.(
+      {
+        id: "deepseek-web-chat",
+        api: "deepseek-web-api",
+        provider: "deepseek-web",
+      },
+      {
+        messages: [
+          {
+            role: "user",
+            content: "inspect the project",
+            timestamp: Date.now(),
+          },
+        ],
+        tools: [
+          {
+            name: "bash",
+            description: "Execute bash commands",
+            parameters: {
+              type: "object",
+              properties: {
+                cmd: { type: "string" },
+              },
+              required: ["cmd"],
+            },
+          },
+        ],
+      },
+      {
+        signal: new AbortController().signal,
+      },
+    );
+
+    await stream?.result();
+
+    const providerChatCall = calls.find((call) => call.path === "/v1/provider/chat");
+    const providerSessionInit =
+      (providerChatCall?.body as { sessionInit?: { prompt?: string } } | undefined)?.sessionInit;
+
+    expect(String(providerSessionInit?.prompt ?? "")).toContain("Tool name: bash");
+    expect(String(providerSessionInit?.prompt ?? "")).toContain("\"cmd\"");
+    expect(String(providerSessionInit?.prompt ?? "")).not.toContain("Arguments JSON schema: {}");
+  });
+
   it("repairs malformed tool-call arguments against the active tool schema before emitting pi tool events", async () => {
     const calls: Array<{
       path: string;
@@ -1209,6 +1361,97 @@ describe("pi provider extension", () => {
     expect(result).toMatchObject({
       stopReason: "stop",
       content: [{ type: "text", text: "你好，我在。" }],
+    });
+  });
+
+  it("preserves content lines that look like tool schema text after stripping repair boilerplate", async () => {
+    let config: ProviderConfig | undefined;
+    let providerChatCount = 0;
+
+    registerDeepSeekExtension(
+      {
+        registerProvider(_name, providerConfig) {
+          config = providerConfig as ProviderConfig;
+        },
+        on() {},
+      },
+      {
+        spawnHelper: async () => ({
+          baseUrl: "http://127.0.0.1:4318",
+          token: "token-123",
+          stop: async () => undefined,
+        }),
+        helperClient: {
+          post: async <T>(_baseUrl: string, path: string) => {
+            if (path === "/v1/bind") {
+              return { ok: true } as T;
+            }
+
+            providerChatCount += 1;
+            if (providerChatCount === 1) {
+              return {
+                mode: "text",
+                outputText: "{",
+                finishReason: "stop",
+                modelLabel: "DeepSeek Web",
+              } as T;
+            }
+
+            return {
+              mode: "text",
+              outputText: [
+                "The previous reply violated the required JSON response protocol.",
+                "Return exactly one JSON object and nothing else.",
+                'For normal replies use: {"type":"message","content":"your response text"}',
+                "",
+                "Use the exact tool name and argument keys from the schema.",
+                "Tool name: read",
+                "Arguments JSON schema: {}",
+              ].join("\n"),
+              finishReason: "stop",
+              modelLabel: "DeepSeek Web",
+            } as T;
+          },
+        },
+        randomToken: () => "token-123",
+      },
+    );
+
+    const stream = config?.streamSimple?.(
+      {
+        id: "deepseek-web-chat",
+        api: "deepseek-web-api",
+        provider: "deepseek-web",
+      },
+      {
+        messages: [
+          {
+            role: "user",
+            content: "show schema",
+            timestamp: Date.now(),
+          },
+        ],
+      },
+      {
+        signal: new AbortController().signal,
+      },
+    );
+
+    const result = await stream?.result();
+
+    expect(providerChatCount).toBe(2);
+    expect(result).toMatchObject({
+      stopReason: "stop",
+      content: [
+        {
+          type: "text",
+          text: [
+            "Use the exact tool name and argument keys from the schema.",
+            "Tool name: read",
+            "Arguments JSON schema: {}",
+          ].join("\n"),
+        },
+      ],
     });
   });
 
