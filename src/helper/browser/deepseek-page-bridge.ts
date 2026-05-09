@@ -224,11 +224,99 @@ function detectJsonEnvelope(text: string): JsonEnvelopeDetection | null {
     return directMatch;
   }
 
+  const fencedMatches: JsonEnvelopeDetection[] = [];
   for (const match of text.matchAll(/```(?:json)?\s*([\s\S]*?)```/gi)) {
-    const fencedMatch = parseCandidate(match[1] ?? "");
-    if (fencedMatch) {
-      return fencedMatch;
+    const parsed = parseCandidate(match[1] ?? "");
+    if (parsed) {
+      fencedMatches.push(parsed);
     }
+  }
+  if (fencedMatches.length > 1) {
+    return null;
+  }
+  if (fencedMatches.length === 1) {
+    return fencedMatches[0] ?? null;
+  }
+
+  function extractEmbeddedObjects(source: string) {
+    const objects: Array<{ json: string; startIndex: number }> = [];
+    let depth = 0;
+    let startIndex = -1;
+    let inString = false;
+    let escaped = false;
+
+    for (let index = 0; index < source.length; index += 1) {
+      const char = source[index];
+
+      if (inString) {
+        if (escaped) {
+          escaped = false;
+          continue;
+        }
+        if (char === "\\") {
+          escaped = true;
+          continue;
+        }
+        if (char === "\"") {
+          inString = false;
+        }
+        continue;
+      }
+
+      if (char === "\"") {
+        inString = true;
+        continue;
+      }
+
+      if (char === "{") {
+        if (depth === 0) {
+          startIndex = index;
+        }
+        depth += 1;
+        continue;
+      }
+
+      if (char === "}") {
+        if (depth === 0) {
+          continue;
+        }
+        depth -= 1;
+        if (depth === 0 && startIndex >= 0) {
+          objects.push({
+            json: source.slice(startIndex, index + 1),
+            startIndex,
+          });
+          startIndex = -1;
+        }
+      }
+    }
+
+    return objects;
+  }
+
+  const embeddedMatches: JsonEnvelopeDetection[] = [];
+  for (const entry of extractEmbeddedObjects(text)) {
+    const prefix = text
+      .slice(Math.max(0, entry.startIndex - 80), entry.startIndex)
+      .toLowerCase();
+    if (
+      prefix.includes("for normal replies use:") ||
+      prefix.includes("for tool calls use:")
+    ) {
+      continue;
+    }
+
+    const parsed = parseCandidate(entry.json);
+    if (parsed) {
+      embeddedMatches.push(parsed);
+    }
+  }
+
+  if (embeddedMatches.length > 1) {
+    return null;
+  }
+  if (embeddedMatches.length === 1) {
+    return embeddedMatches[0] ?? null;
   }
 
   return null;

@@ -17,6 +17,7 @@ type ChatCompletionsTool = {
     name: string;
     description?: string;
     parameters?: unknown;
+    input_schema?: unknown;
   };
 };
 
@@ -33,6 +34,13 @@ type ResponsesTool = {
   name: string;
   description?: string;
   parameters?: unknown;
+  input_schema?: unknown;
+  function?: {
+    name?: string;
+    description?: string;
+    parameters?: unknown;
+    input_schema?: unknown;
+  };
 };
 
 type NamedToolChoice = {
@@ -80,10 +88,13 @@ function normalizeMessages(messages: ChatCompletionsMessage[] = []) {
 }
 
 function normalizeChatTools(tools: ChatCompletionsTool[] = []): NormalizedTool[] {
+  const resolveSchema = (input: { parameters?: unknown; input_schema?: unknown }) =>
+    input.parameters ?? input.input_schema ?? {};
+
   return tools.map((tool) => ({
     name: tool.function.name,
     description: tool.function.description,
-    parametersJson: JSON.stringify(tool.function.parameters ?? {}),
+    parametersJson: JSON.stringify(resolveSchema(tool.function)),
   }));
 }
 
@@ -95,10 +106,20 @@ function textFromResponseInput(content: ResponsesInputMessage["content"] = []) {
 }
 
 function normalizeResponsesTools(tools: ResponsesTool[] = []): NormalizedTool[] {
+  const resolveSchema = (input: {
+    parameters?: unknown;
+    input_schema?: unknown;
+  }) => input.parameters ?? input.input_schema ?? {};
+
   return tools.map((tool) => ({
-    name: tool.name,
-    description: tool.description,
-    parametersJson: JSON.stringify(tool.parameters ?? {}),
+    name: tool.name ?? tool.function?.name ?? "",
+    description: tool.description ?? tool.function?.description,
+    parametersJson: JSON.stringify(
+      resolveSchema({
+        parameters: tool.parameters ?? tool.function?.parameters,
+        input_schema: tool.input_schema ?? tool.function?.input_schema,
+      }),
+    ),
   }));
 }
 

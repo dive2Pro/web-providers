@@ -269,8 +269,6 @@ function createQwenBridge() {
         thinking: "",
         streamReply: "",
         toolCall: null,
-        bodyPreview: "",
-        bodyTailPreview: "",
         parserSummary: "",
         lastError: "",
         lastEventAt: 0,
@@ -367,8 +365,6 @@ function createQwenBridge() {
         status: state.status,
         closed: state.closed,
         terminalAt: state.terminalAt || null,
-        bodyPreview: state.bodyPreview || null,
-        bodyTailPreview: state.bodyTailPreview || null,
         parserSummary: state.parserSummary || null,
         lastError: state.lastError || null,
         turn: toolCall
@@ -411,8 +407,6 @@ function createQwenBridge() {
         const clone = response.clone();
         clone.text().then((body) => {
           const parsed = parseQwenCompletionSseState(body);
-          state.bodyPreview = body.trim().slice(0, 1200);
-          state.bodyTailPreview = body.trim().slice(-1200);
           state.parserSummary = JSON.stringify({
             mode: parsed.mode,
             finished: parsed.finished,

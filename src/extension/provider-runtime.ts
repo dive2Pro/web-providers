@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
+import { createServer } from "node:net";
 import { fileURLToPath } from "node:url";
 import type {
   ProviderChatRequest,
@@ -66,8 +67,22 @@ type ToolResultMessage = {
 type ToolDefinition = {
   name: string;
   description?: string;
+  parameters?: Record<string, unknown>;
   inputSchema?: Record<string, unknown>;
 };
+
+function sanitizeTools(tools: ToolDefinition[] | undefined) {
+  return (tools ?? []).filter(
+    (tool): tool is ToolDefinition =>
+      Boolean(tool) &&
+      typeof tool.name === "string" &&
+      tool.name.trim().length > 0,
+  );
+}
+
+function getToolSchema(tool: ToolDefinition) {
+  return tool.parameters ?? tool.inputSchema ?? {};
+}
 
 type ProtocolEnvelope =
   | {
@@ -278,6 +293,7 @@ interface PiExtensionApi {
 
 export interface ExtensionDeps {
   spawnHelper(input: { token: string; port: number }): Promise<ManagedHelper>;
+  pickPort?(): Promise<number>;
   helperClient: {
     post<T>(
       baseUrl: string,
@@ -292,7 +308,6 @@ export interface ExtensionDeps {
 
 const projectRoot = fileURLToPath(new URL("../../", import.meta.url));
 const PROVIDER_BASE_URL = "http://127.0.0.1";
-const FIXED_HELPER_PORT = Number(process.env.PI_DEEPSEEK_HELPER_PORT ?? 4318);
 const DEBUG_PROVIDER_REQUESTS = process.env.PI_DEEPSEEK_DEBUG === "1";
 const PROVIDER_DESCRIPTORS = [
   {
@@ -312,6 +327,8 @@ const PROVIDER_DESCRIPTORS = [
 ] as const;
 const RESPONSE_ENVELOPE_INSTRUCTION = [
   "Your entire assistant reply must be exactly one JSON object.",
+  "Return exactly one final action object per reply: either a message or a tool_call, never both.",
+  "If you need multiple tool calls, return only the first tool_call and wait for the next turn.",
   'For normal replies use: {"type":"message","content":"your response text"}',
   'For tool calls use: {"type":"tool_call","name":"tool_name","arguments":{"key":"value"}}',
   "Do not add any prose before or after it.",
@@ -319,18 +336,20 @@ const RESPONSE_ENVELOPE_INSTRUCTION = [
 ].join(" ");
 
 function buildToolCatalogPrompt(tools: ToolDefinition[] | undefined) {
-  if (!tools || tools.length === 0) {
+  const safeTools = sanitizeTools(tools);
+
+  if (safeTools.length === 0) {
     return "";
   }
 
   return [
     "When using JSON fallback tool calls, you must use one of these exact tool definitions.",
     "Use the exact tool name and argument keys from the schema.",
-    ...tools.map((tool) =>
+    ...safeTools.map((tool) =>
       [
         `Tool name: ${tool.name}`,
         tool.description ? `Description: ${tool.description}` : "",
-        `Arguments JSON schema: ${JSON.stringify(tool.inputSchema ?? {})}`,
+        `Arguments JSON schema: ${JSON.stringify(getToolSchema(tool))}`,
       ]
         .filter((part) => part.length > 0)
         .join("\n"),
@@ -456,7 +475,7 @@ function parseStrictProtocolEnvelope(text: string): {
     return objects;
   }
 
-  function findEmbeddedEnvelope(source: string) {
+  function findEmbeddedEnvelopes(source: string) {
     return extractEmbeddedObjects(source)
       .map((entry) => {
         const prefix = source
@@ -484,7 +503,25 @@ function parseStrictProtocolEnvelope(text: string): {
         }
       })
       .filter((entry): entry is ProtocolEnvelope => entry !== null)
-      .at(-1);
+  }
+
+  function selectEmbeddedEnvelope(source: string): {
+    envelope: ProtocolEnvelope | null;
+    error: string | null;
+  } {
+    const embedded = findEmbeddedEnvelopes(source);
+
+    if (embedded.length > 1) {
+      return {
+        envelope: null,
+        error: "Multiple protocol envelopes were found. Return exactly one JSON object.",
+      };
+    }
+
+    return {
+      envelope: embedded[0] ?? null,
+      error: null,
+    };
   }
 
   const trimmed = text.trim();
@@ -503,10 +540,17 @@ function parseStrictProtocolEnvelope(text: string): {
   try {
     parsed = JSON.parse(trimmed);
   } catch {
-    const embeddedEnvelope = findEmbeddedEnvelope(text);
-    if (embeddedEnvelope) {
+    const embeddedResult = selectEmbeddedEnvelope(text);
+    if (embeddedResult.error) {
       return {
-        envelope: embeddedEnvelope,
+        envelope: null,
+        protocolLike: true,
+        error: embeddedResult.error,
+      };
+    }
+    if (embeddedResult.envelope) {
+      return {
+        envelope: embeddedResult.envelope,
         protocolLike: true,
         error: null,
       };
@@ -536,10 +580,17 @@ function parseStrictProtocolEnvelope(text: string): {
     };
   }
 
-  const embeddedEnvelope = findEmbeddedEnvelope(text);
-  if (embeddedEnvelope) {
+  const embeddedResult = selectEmbeddedEnvelope(text);
+  if (embeddedResult.error) {
     return {
-      envelope: embeddedEnvelope,
+      envelope: null,
+      protocolLike: true,
+      error: embeddedResult.error,
+    };
+  }
+  if (embeddedResult.envelope) {
+    return {
+      envelope: embeddedResult.envelope,
       protocolLike: true,
       error: null,
     };
@@ -709,18 +760,20 @@ function validateToolCallAgainstTools(
   },
   tools: ToolDefinition[] | undefined,
 ): string[] {
-  if (!tools || tools.length === 0) {
+  const safeTools = sanitizeTools(tools);
+
+  if (safeTools.length === 0) {
     return [];
   }
 
-  const matchedTool = tools.find((tool) => tool.name === toolCall.name);
+  const matchedTool = safeTools.find((tool) => tool.name === toolCall.name);
   if (!matchedTool) {
     return [`Tool "${toolCall.name}" is not in the allowed tool list.`];
   }
 
   return validateValueAgainstSchema(
     toolCall.arguments,
-    matchedTool.inputSchema,
+    getToolSchema(matchedTool),
     "arguments",
   );
 }
@@ -733,13 +786,15 @@ function buildProtocolRepairPrompt(input: {
   return [
     "The previous reply violated the required JSON response protocol.",
     "Return exactly one JSON object and nothing else.",
+    "Return exactly one final action object per reply: either a message or a tool_call, never both.",
+    "If you need multiple tool calls, return only the first tool_call and wait for the next turn.",
     'For normal replies use: {"type":"message","content":"your response text"}',
     'For tool calls use: {"type":"tool_call","name":"tool_name","arguments":{"key":"value"}}',
     "Problems to fix:",
     ...input.issues.map((issue) => `- ${issue}`),
     "Previous invalid reply:",
     input.rawOutput,
-    ...(input.tools && input.tools.length > 0
+    ...(sanitizeTools(input.tools).length > 0
       ? ["Allowed tool definitions:", buildToolCatalogPrompt(input.tools)]
       : []),
   ].join("\n");
@@ -748,14 +803,16 @@ function buildProtocolRepairPrompt(input: {
 function buildMinimalProtocolRepairPrompt(tools: ToolDefinition[] | undefined) {
   return [
     "Return exactly one JSON object and nothing else.",
+    "Return exactly one final action object per reply: either a message or a tool_call, never both.",
+    "If you need multiple tool calls, return only the first tool_call and wait for the next turn.",
     'For normal replies use: {"type":"message","content":"your response text"}',
     'For tool calls use: {"type":"tool_call","name":"tool_name","arguments":{"key":"value"}}',
     "Do not repeat these instructions.",
     "Do not explain your answer.",
     "Do not wrap the JSON in markdown.",
-    ...(tools && tools.length > 0
+    ...(sanitizeTools(tools).length > 0
       ? [
-          `Allowed tool names: ${tools.map((tool) => tool.name).join(", ")}`,
+          `Allowed tool names: ${sanitizeTools(tools).map((tool) => tool.name).join(", ")}`,
         ]
       : []),
   ].join("\n");
@@ -776,6 +833,8 @@ function recoverPlainTextFromProtocolFailure(text: string) {
   const boilerplatePatterns = [
     /^The previous reply violated the required JSON response protocol\.\n?/g,
     /^Return exactly one JSON object and nothing else\.\n?/g,
+    /^Return exactly one final action object per reply: either a message or a tool_call, never both\.\n?/g,
+    /^If you need multiple tool calls, return only the first tool_call and wait for the next turn\.\n?/g,
     /^For normal replies use: .*?\n?/gm,
     /^For tool calls use: .*?\n?/gm,
     /^\{"type":"message","content":"your response text"\}\n?/gm,
@@ -970,7 +1029,7 @@ function buildSessionInitPrompt(context: ProviderContext) {
 
   parts.push(RESPONSE_ENVELOPE_INSTRUCTION);
 
-  if ((context.tools?.length ?? 0) > 0) {
+  if (sanitizeTools(context.tools).length > 0) {
     parts.push(buildToolCatalogPrompt(context.tools));
   }
 
@@ -1172,9 +1231,50 @@ async function spawnDefaultHelper(input: {
   };
 }
 
+function getConfiguredHelperPort() {
+  const value = process.env.PI_DEEPSEEK_HELPER_PORT;
+  if (!value) {
+    return null;
+  }
+
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+}
+
+async function pickDefaultHelperPort() {
+  const configuredPort = getConfiguredHelperPort();
+  if (configuredPort !== null) {
+    return configuredPort;
+  }
+
+  const server = createServer();
+
+  try {
+    const port = await new Promise<number>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(0, "127.0.0.1", () => {
+        const address = server.address();
+        if (!address || typeof address === "string") {
+          reject(new Error("Failed to determine helper port"));
+          return;
+        }
+
+        resolve(address.port);
+      });
+    });
+
+    return port;
+  } finally {
+    await new Promise((resolve) => {
+      server.close(() => resolve(undefined));
+    });
+  }
+}
+
 function defaultDeps(): ExtensionDeps {
   return {
     spawnHelper: spawnDefaultHelper,
+    pickPort: pickDefaultHelperPort,
     helperClient: {
       post: postJson,
     },
@@ -1197,7 +1297,8 @@ export default function registerDeepSeekExtension(
     if (!helperPromise) {
       helperPromise = (async () => {
         const token = deps.randomToken();
-        const started = await deps.spawnHelper({ token, port: FIXED_HELPER_PORT });
+        const port = deps.pickPort ? await deps.pickPort() : 4318;
+        const started = await deps.spawnHelper({ token, port });
         helper = started;
         return started;
       })().catch((error) => {

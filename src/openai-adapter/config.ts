@@ -9,12 +9,8 @@ export function loadOpenAiAdapterConfig(
   env: NodeJS.ProcessEnv = process.env,
 ): OpenAiAdapterConfig {
   const token = env.OPENAI_ADAPTER_TOKEN;
-  const helperBaseUrl = env.HELPER_BASE_URL;
+  const helperBaseUrl = env.HELPER_BASE_URL ?? "http://127.0.0.1:4318";
   const helperToken = env.HELPER_TOKEN;
-
-  if (!helperBaseUrl) {
-    throw new Error("HELPER_BASE_URL is required");
-  }
 
   return {
     token,

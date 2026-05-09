@@ -918,4 +918,111 @@ describe("provider chat route", () => {
       },
     });
   });
+
+  it("aborts the current provider request when the client aborts the HTTP request", async () => {
+    let observedAbort = false;
+    let requestCount = 0;
+
+    const app = buildApp({
+      token: "test-token",
+      browserClient: {
+        getConnectionStatus: async () => "connected",
+        bindDeepSeekTab: async () => ({
+          tabId: "tab-1",
+          url: "https://chat.deepseek.com/",
+          loginState: "logged_in",
+          bridgeInjected: true,
+          pageState: {
+            inputReady: true,
+            busy: false,
+            latestAssistantPreview: null,
+            assistantCount: 0,
+          },
+        }),
+        resetPageBridge: async () => undefined,
+        sendChatPrompt: async ({ signal }: { signal?: AbortSignal }) => {
+          requestCount += 1;
+          if (requestCount > 1) {
+            return {
+              mode: "text",
+              outputText: "second request ok",
+              modelLabel: "DeepSeek Web",
+            };
+          }
+
+          if (signal?.aborted) {
+            observedAbort = true;
+            throw new Error("Operation aborted");
+          }
+
+          return await new Promise((resolve, reject) => {
+            const onAbort = () => {
+              observedAbort = true;
+              reject(new Error("Operation aborted"));
+            };
+
+            signal?.addEventListener("abort", onAbort, { once: true });
+          });
+        },
+      } as never,
+    });
+
+    await app.inject({
+      method: "POST",
+      url: "/v1/bind",
+      headers: { authorization: "Bearer test-token" },
+    });
+
+    await app.listen({ host: "127.0.0.1", port: 0 });
+    const address = app.server.address();
+    if (!address || typeof address === "string") {
+      throw new Error("Failed to determine test server address");
+    }
+
+    const controller = new AbortController();
+    const abortedRequest = fetch(
+      `http://127.0.0.1:${address.port}/v1/provider/chat`,
+      {
+        method: "POST",
+        headers: {
+          authorization: "Bearer test-token",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          model: "deepseek-web-chat",
+          messages: [{ role: "user", content: "abort me" }],
+        }),
+        signal: controller.signal,
+      },
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    controller.abort();
+    await abortedRequest.catch(() => undefined);
+
+    for (let attempt = 0; attempt < 20 && !observedAbort; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+
+    expect(observedAbort).toBe(true);
+
+    const secondRequest = app.inject({
+      method: "POST",
+      url: "/v1/provider/chat",
+      headers: { authorization: "Bearer test-token" },
+      payload: {
+        model: "deepseek-web-chat",
+        messages: [{ role: "user", content: "run next" }],
+      },
+    });
+
+    const secondResponse = await secondRequest;
+    expect(secondResponse.statusCode).toBe(200);
+    expect(secondResponse.json()).toMatchObject({
+      mode: "text",
+      outputText: "second request ok",
+    });
+
+    await app.close();
+  });
 });

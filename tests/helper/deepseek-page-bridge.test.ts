@@ -369,6 +369,45 @@ describe("deepseek page bridge", () => {
     });
   });
 
+  it("classifies embedded JSON fallback tool calls from mixed prose", () => {
+    const reply = [
+      "我先检查一下目录。",
+      '{"type":"tool_call","name":"bash","arguments":{"cmd":"ls -la"}}',
+    ].join("\n");
+
+    expect(
+      classifyCompletionTurn({
+        reply,
+        rawEvents: [],
+      }),
+    ).toEqual({
+      mode: "json_fallback",
+      toolCall: {
+        name: "bash",
+        argumentsJson: "{\"cmd\":\"ls -la\"}",
+      },
+      outputText: reply,
+    });
+  });
+
+  it("keeps multi-object protocol output as plain text for upper-layer repair", () => {
+    const reply = [
+      '{"type":"message","content":"先看下项目结构"}',
+      '{"type":"tool_call","name":"bash","arguments":{"command":"ls -la"}}',
+      '{"type":"tool_call","name":"read","arguments":{"file":"package.json"}}',
+    ].join("\n");
+
+    expect(
+      classifyCompletionTurn({
+        reply,
+        rawEvents: [],
+      }),
+    ).toEqual({
+      mode: "text",
+      outputText: reply,
+    });
+  });
+
   it("clicks the composer send button instead of the first page icon button", async () => {
     const { context, textarea, unrelatedPageIcon, composerSend } =
       createBridgeTestContext();

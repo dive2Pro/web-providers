@@ -96,5 +96,6 @@ export interface BrowserAutomationClient {
     prompt: string;
     timeoutMs: number;
     freshSession?: boolean;
+    signal?: AbortSignal;
   }): Promise<SendChatResult>;
 }

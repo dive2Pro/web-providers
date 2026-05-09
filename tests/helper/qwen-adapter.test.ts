@@ -93,4 +93,9 @@ describe("qwen adapter", () => {
     expect(INJECTED_QWEN_BRIDGE_SOURCE).toContain("Please sign in to Qwen in the browser tab.");
     expect(INJECTED_QWEN_BRIDGE_SOURCE).toContain("Sign in");
   });
+
+  it("does not expose raw SSE body previews in the injected bridge progress state", () => {
+    expect(INJECTED_QWEN_BRIDGE_SOURCE).not.toContain("bodyPreview");
+    expect(INJECTED_QWEN_BRIDGE_SOURCE).not.toContain("bodyTailPreview");
+  });
 });

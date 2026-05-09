@@ -48,6 +48,49 @@ describe("openai adapter normalization", () => {
     });
   });
 
+  it("normalizes tool schemas from input_schema when parameters is absent", () => {
+    const normalized = normalizeChatCompletionsRequest(
+      {
+        model: "deepseek-web-tools",
+        messages: [{ role: "user", content: "list files" }],
+        tools: [
+          {
+            type: "function",
+            function: {
+              name: "read",
+              description: "Read a file",
+              input_schema: {
+                type: "object",
+                properties: {
+                  path: { type: "string" },
+                },
+                required: ["path"],
+              },
+            },
+          } as unknown as {
+            type: "function";
+            function: {
+              name: string;
+              description?: string;
+              parameters?: unknown;
+            };
+          },
+        ],
+      },
+      toolModel!,
+    );
+
+    expect(normalized.tools[0]?.parametersJson).toBe(
+      JSON.stringify({
+        type: "object",
+        properties: {
+          path: { type: "string" },
+        },
+        required: ["path"],
+      }),
+    );
+  });
+
   it("normalizes a responses request without tools", () => {
     const normalized = normalizeResponsesRequest(
       {
@@ -77,6 +120,45 @@ describe("openai adapter normalization", () => {
       tools: [],
       toolChoice: "none",
     });
+  });
+
+  it("normalizes responses tool schema from input_schema", () => {
+    const normalized = normalizeResponsesRequest(
+      {
+        model: "qwen-web-chat",
+        input: [{ role: "user", content: [{ type: "input_text", text: "hello" }] }],
+        tools: [
+          {
+            type: "function",
+            name: "read",
+            description: "Read a file",
+            input_schema: {
+              type: "object",
+              properties: {
+                path: { type: "string" },
+              },
+              required: ["path"],
+            },
+          } as unknown as {
+            type?: "function";
+            name: string;
+            description?: string;
+            parameters?: unknown;
+          },
+        ],
+      },
+      chatModel!,
+    );
+
+    expect(normalized.tools[0]?.parametersJson).toBe(
+      JSON.stringify({
+        type: "object",
+        properties: {
+          path: { type: "string" },
+        },
+        required: ["path"],
+      }),
+    );
   });
 
   it("rejects streaming chat completions requests", () => {

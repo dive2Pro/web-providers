@@ -172,6 +172,22 @@ export function registerProviderChatRoute(app: FastifyInstance, ctx: AppContext)
     const prompt = promptInput.prompt;
     const debugSeed = createBaseDebugRecord(session, { ...body, provider }, prompt);
     const baseDebugRecord = debugSeed.record;
+    const abortController = new AbortController();
+    const abortRequest = () => {
+      if (!abortController.signal.aborted) {
+        abortController.abort();
+      }
+    };
+    const handleRequestAborted = () => {
+      abortRequest();
+    };
+    const handleRequestClose = () => {
+      if (request.raw.aborted || !reply.raw.writableEnded) {
+        abortRequest();
+      }
+    };
+    request.raw.once("aborted", handleRequestAborted);
+    request.raw.once("close", handleRequestClose);
     ctx.state.setLastProviderRequest(provider, baseDebugRecord);
     ctx.state.setActiveRequest({
       requestId: debugSeed.requestId,
@@ -198,6 +214,7 @@ export function registerProviderChatRoute(app: FastifyInstance, ctx: AppContext)
         prompt,
         timeoutMs: 30_000,
         freshSession: promptInput.shouldStartFresh,
+        signal: abortController.signal,
       });
 
       ctx.state.setActiveRequest(null);
@@ -230,6 +247,11 @@ export function registerProviderChatRoute(app: FastifyInstance, ctx: AppContext)
 
       return response;
     } catch (error) {
+      if (abortController.signal.aborted) {
+        ctx.state.setActiveRequest(null);
+        return;
+      }
+
       const rootCauseMessage =
         error instanceof Error
           ? error.message
@@ -258,6 +280,9 @@ export function registerProviderChatRoute(app: FastifyInstance, ctx: AppContext)
         error: helperError.code,
         message: helperError.message,
       });
+    } finally {
+      request.raw.off("aborted", handleRequestAborted);
+      request.raw.off("close", handleRequestClose);
     }
   });
 }

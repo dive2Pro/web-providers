@@ -299,6 +299,33 @@ function looksLikeIncompleteStructuredText(text: string | null | undefined) {
   }
 }
 
+function throwIfAborted(signal?: AbortSignal) {
+  if (signal?.aborted) {
+    throw new Error("Operation aborted");
+  }
+}
+
+async function abortableDelay(ms: number, signal?: AbortSignal) {
+  if (signal?.aborted) {
+    throw new Error("Operation aborted");
+  }
+
+  await new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+
+    const onAbort = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+      reject(new Error("Operation aborted"));
+    };
+
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
 export class BbBrowserClient implements BrowserAutomationClient {
   private readonly providerRegistry: ReturnType<typeof createProviderRegistry>;
 
@@ -368,6 +395,7 @@ export class BbBrowserClient implements BrowserAutomationClient {
     prompt: string;
     timeoutMs: number;
     freshSession?: boolean;
+    signal?: AbortSignal;
   }): Promise<SendChatResult> {
     if (input.provider === "qwen-web") {
       return this.sendQwenChatPrompt(input);
@@ -407,6 +435,7 @@ export class BbBrowserClient implements BrowserAutomationClient {
       );
 
     try {
+      throwIfAborted(input.signal);
       const startResult = await this.transport.evaluate<{
         ok?: boolean;
         baselineState?: {
@@ -487,6 +516,7 @@ export class BbBrowserClient implements BrowserAutomationClient {
       });
 
       if (startMode === "transport_submit") {
+        throwIfAborted(input.signal);
         await this.transport.submitPrompt(input.tabId, input.prompt);
       }
 
@@ -500,6 +530,7 @@ export class BbBrowserClient implements BrowserAutomationClient {
       let previousAssistantCount = baselineAssistantCount;
 
       while (Date.now() - startedAt < hardTimeoutMs) {
+        throwIfAborted(input.signal);
         const progress = await this.transport.evaluate<{
           pageState: {
             inputReady: boolean;
@@ -685,9 +716,10 @@ export class BbBrowserClient implements BrowserAutomationClient {
           break;
         }
 
-        await new Promise((resolve) => setTimeout(resolve, 300));
+        await abortableDelay(300, input.signal);
       }
 
+      throwIfAborted(input.signal);
       await this.resetPageBridge(input.tabId);
       const finalState = await this.transport.evaluate<{
         inputReady: boolean;
@@ -724,6 +756,7 @@ export class BbBrowserClient implements BrowserAutomationClient {
     prompt: string;
     timeoutMs: number;
     freshSession?: boolean;
+    signal?: AbortSignal;
   }): Promise<SendChatResult> {
     let baselineReply = "";
     let latestReply = "";
@@ -750,6 +783,7 @@ export class BbBrowserClient implements BrowserAutomationClient {
         }),
       );
 
+    throwIfAborted(input.signal);
     await this.transport.evaluate(input.tabId, INJECTED_QWEN_BRIDGE_SOURCE);
     const baselineState = await this.transport.evaluate<PageStateSummary>(
       input.tabId,
@@ -764,6 +798,7 @@ export class BbBrowserClient implements BrowserAutomationClient {
     }
 
     baselineReply = (baselineState.latestAssistantPreview ?? "").trim();
+    throwIfAborted(input.signal);
     await this.transport.evaluate(input.tabId, QWEN_RESET_COMPLETION_SCRIPT);
     await this.transport.submitPrompt(input.tabId, input.prompt);
 
@@ -776,13 +811,13 @@ export class BbBrowserClient implements BrowserAutomationClient {
     let previousTurnPreview = "";
 
     while (Date.now() - startedAt < hardTimeoutMs) {
+      throwIfAborted(input.signal);
       const progress = await this.transport.evaluate<{
         pageState: PageStateSummary;
         completionState: {
           observed?: boolean;
           status?: string;
           closed?: boolean;
-          bodyPreview?: string | null;
           parserSummary?: string | null;
           turn?:
             | {
@@ -834,10 +869,6 @@ export class BbBrowserClient implements BrowserAutomationClient {
         note: [
           typeof progress.completionState?.parserSummary === "string"
             ? `parser=${progress.completionState.parserSummary}`
-            : null,
-          typeof progress.completionState?.bodyPreview === "string" &&
-          progress.completionState.bodyPreview.length > 0
-            ? `body=${previewDebugText(progress.completionState.bodyPreview)}`
             : null,
         ]
           .filter((entry) => entry)
@@ -931,7 +962,7 @@ export class BbBrowserClient implements BrowserAutomationClient {
         break;
       }
 
-      await new Promise((resolve) => setTimeout(resolve, 300));
+      await abortableDelay(300, input.signal);
     }
 
     throw buildFailure("TIMEOUT", "The page did not finish streaming in time");

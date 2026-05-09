@@ -136,10 +136,70 @@ describe("openai adapter helper client", () => {
         body: expect.stringContaining("Always answer with JSON."),
       }),
     );
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://127.0.0.1:4318/v1/provider/chat",
+      expect.objectContaining({
+        body: expect.stringContaining(
+          "Return exactly one final action object per reply: either a message or a tool_call, never both.",
+        ),
+      }),
+    );
+  });
+
+  it("includes an explicit empty tool schema in first-turn session init", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        mode: "text",
+        outputText: "tool-ready",
+        finishReason: "stop",
+      }),
+    });
+
+    const client = createHelperClient({
+      helperBaseUrl: "http://127.0.0.1:4318",
+      helperToken: "helper-token",
+      fetchImpl: fetchMock,
+    });
+
+    await client.run({
+      publicModel: "deepseek-web-tools",
+      provider: "deepseek-web",
+      responseFormat: "chat_completions",
+      messages: [{ role: "user", content: "Call read." }],
+      tools: [
+        {
+          name: "read",
+          description: "Read a file",
+          parametersJson: "{}",
+        },
+      ],
+      toolChoice: "auto",
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://127.0.0.1:4318/v1/provider/chat",
+      expect.objectContaining({
+        body: expect.stringContaining("Arguments JSON schema: {}"),
+      }),
+    );
   });
 });
 
 describe("openai adapter config", () => {
+  it("falls back to local helper url when HELPER_BASE_URL is missing", () => {
+    expect(
+      loadOpenAiAdapterConfig({
+        PORT: "4319",
+      }),
+    ).toEqual({
+      token: undefined,
+      helperBaseUrl: "http://127.0.0.1:4318",
+      helperToken: undefined,
+      port: 4319,
+    });
+  });
+
   it("allows missing HELPER_TOKEN in local mode", () => {
     expect(
       loadOpenAiAdapterConfig({
