@@ -11,10 +11,15 @@ const DEFAULT_SESSION_ID = "__default__";
 export class HelperState {
   private boundSessionsBySession = new Map<string, Map<ProviderId, BoundSession>>();
   private sessionMeta = new Map<string, SessionStateMeta>();
-  private activeRequest: ActiveRequest | null = null;
+  private activeRequestsByTabId = new Map<string, ActiveRequest>();
+  private runningBindings = new Set<string>();
   private lastProviderRequests = new Map<ProviderId, ProviderRequestDebugRecord>();
   private degraded = false;
   private lastBridgeHeartbeatAt: string | null = null;
+
+  private getBindingKey(sessionId: string, provider: ProviderId) {
+    return `${sessionId}::${provider}`;
+  }
 
   private getOrCreateSessionBindings(sessionId: string) {
     const existing = this.boundSessionsBySession.get(sessionId);
@@ -130,12 +135,21 @@ export class HelperState {
     return false;
   }
 
-  getActiveRequest() {
-    return this.activeRequest;
+  getActiveRequest(tabId?: string) {
+    if (tabId) {
+      return this.activeRequestsByTabId.get(tabId) ?? null;
+    }
+
+    return this.activeRequestsByTabId.values().next().value ?? null;
   }
 
-  setActiveRequest(request: ActiveRequest | null) {
-    this.activeRequest = request;
+  setActiveRequest(tabId: string, request: ActiveRequest | null) {
+    if (request) {
+      this.activeRequestsByTabId.set(tabId, request);
+      return;
+    }
+
+    this.activeRequestsByTabId.delete(tabId);
   }
 
   getLastProviderRequest(provider?: ProviderId) {
@@ -176,8 +190,32 @@ export class HelperState {
     return Object.fromEntries(this.lastProviderRequests.entries());
   }
 
-  hasRunningRequest() {
-    return this.activeRequest?.status === "running";
+  hasRunningRequest(tabId?: string) {
+    if (tabId) {
+      return this.activeRequestsByTabId.get(tabId)?.status === "running";
+    }
+
+    for (const request of this.activeRequestsByTabId.values()) {
+      if (request.status === "running") {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  tryAcquireBinding(sessionId: string, provider: ProviderId) {
+    const key = this.getBindingKey(sessionId, provider);
+    if (this.runningBindings.has(key)) {
+      return false;
+    }
+
+    this.runningBindings.add(key);
+    return true;
+  }
+
+  releaseBinding(sessionId: string, provider: ProviderId) {
+    this.runningBindings.delete(this.getBindingKey(sessionId, provider));
   }
 
   getDegraded() {
@@ -199,7 +237,8 @@ export class HelperState {
   resetRuntime() {
     this.boundSessionsBySession.clear();
     this.sessionMeta.clear();
-    this.activeRequest = null;
+    this.activeRequestsByTabId.clear();
+    this.runningBindings.clear();
     this.lastProviderRequests.clear();
     this.degraded = false;
     this.lastBridgeHeartbeatAt = null;

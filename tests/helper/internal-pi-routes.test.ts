@@ -2,6 +2,97 @@ import { describe, expect, it } from "vitest";
 import { buildApp } from "../../src/helper/app";
 
 describe("internal pi routes", () => {
+  it("returns MODEL_BUSY for concurrent turns on the same pi session/provider without opening a second tab", async () => {
+    const bindCalls: Array<Record<string, unknown>> = [];
+    let started: (() => void) | undefined;
+    let resolvePrompt: (() => void) | undefined;
+    const startedPromise = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+
+    const app = buildApp({
+      token: "test-token",
+      browserClient: {
+        getConnectionStatus: async () => "connected",
+        bindProviderTab: async (input: {
+          provider: string;
+          tabId?: string;
+          openNew?: boolean;
+        }) => {
+          bindCalls.push(input);
+          return {
+            tabId: input.tabId ?? "tab-1",
+            url: "https://chat.deepseek.com/",
+            loginState: "logged_in",
+            bridgeInjected: true,
+            pageState: {
+              inputReady: true,
+              busy: false,
+              latestAssistantPreview: null,
+              assistantCount: 0,
+            },
+          };
+        },
+        startNewChat: async () => undefined,
+        resetProvider: async () => undefined,
+        sendChatPrompt: async ({ prompt }: { prompt: string }) => {
+          started?.();
+          await new Promise<void>((resolve) => {
+            resolvePrompt = resolve;
+          });
+
+          return {
+            mode: "text",
+            outputText: `reply:${prompt}`,
+            modelLabel: "DeepSeek Web",
+          };
+        },
+      } as never,
+    });
+
+    const firstRequest = app.inject({
+      method: "POST",
+      url: "/internal/pi/provider/chat",
+      headers: {
+        authorization: "Bearer test-token",
+        "x-pi-session-id": "session-a",
+      },
+      payload: {
+        provider: "deepseek-web",
+        model: "deepseek-web-chat",
+        messages: [{ role: "user", content: "hello" }],
+      },
+    });
+
+    await startedPromise;
+
+    const secondResponse = await app.inject({
+      method: "POST",
+      url: "/internal/pi/provider/chat",
+      headers: {
+        authorization: "Bearer test-token",
+        "x-pi-session-id": "session-a",
+      },
+      payload: {
+        provider: "deepseek-web",
+        model: "deepseek-web-chat",
+        messages: [{ role: "user", content: "again" }],
+      },
+    });
+
+    expect(secondResponse.statusCode).toBe(409);
+    expect(secondResponse.json()).toEqual({
+      error: "MODEL_BUSY",
+      message: "Another request is already in progress",
+    });
+    expect(bindCalls).toEqual([
+      { provider: "deepseek-web", openNew: true, tabId: undefined },
+    ]);
+
+    resolvePrompt?.();
+    await firstRequest;
+  });
+
   it("keeps provider binds isolated per pi session and reuses the bound tab inside one session", async () => {
     const bindCalls: Array<Record<string, unknown>> = [];
     let newTabCount = 0;
@@ -102,6 +193,91 @@ describe("internal pi routes", () => {
       { provider: "deepseek-web", openNew: undefined, tabId: "tab-1" },
       { provider: "deepseek-web", openNew: true, tabId: undefined },
     ]);
+  });
+
+  it("allows concurrent turns for different pi sessions when they bind different tabs", async () => {
+    let newTabCount = 0;
+    let currentConcurrent = 0;
+    let maxConcurrent = 0;
+    let startedCount = 0;
+    let releaseBoth: (() => void) | undefined;
+    const bothStarted = new Promise<void>((resolve) => {
+      releaseBoth = resolve;
+    });
+
+    const app = buildApp({
+      token: "test-token",
+      browserClient: {
+        getConnectionStatus: async () => "connected",
+        bindProviderTab: async (input: {
+          provider: string;
+          tabId?: string;
+          openNew?: boolean;
+        }) => ({
+          tabId: input.tabId ?? `tab-${++newTabCount}`,
+          url: "https://chat.deepseek.com/",
+          loginState: "logged_in",
+          bridgeInjected: true,
+          pageState: {
+            inputReady: true,
+            busy: false,
+            latestAssistantPreview: null,
+            assistantCount: 0,
+          },
+        }),
+        startNewChat: async () => undefined,
+        resetProvider: async () => undefined,
+        sendChatPrompt: async ({ prompt }: { prompt: string }) => {
+          currentConcurrent += 1;
+          maxConcurrent = Math.max(maxConcurrent, currentConcurrent);
+          startedCount += 1;
+          if (startedCount === 2) {
+            releaseBoth?.();
+          }
+          await bothStarted;
+          currentConcurrent -= 1;
+
+          return {
+            mode: "text",
+            outputText: `reply:${prompt}`,
+            modelLabel: "DeepSeek Web",
+          };
+        },
+      } as never,
+    });
+
+    const [first, second] = await Promise.all([
+      app.inject({
+        method: "POST",
+        url: "/internal/pi/provider/chat",
+        headers: {
+          authorization: "Bearer test-token",
+          "x-pi-session-id": "session-a",
+        },
+        payload: {
+          provider: "deepseek-web",
+          model: "deepseek-web-chat",
+          messages: [{ role: "user", content: "one" }],
+        },
+      }),
+      app.inject({
+        method: "POST",
+        url: "/internal/pi/provider/chat",
+        headers: {
+          authorization: "Bearer test-token",
+          "x-pi-session-id": "session-b",
+        },
+        payload: {
+          provider: "deepseek-web",
+          model: "deepseek-web-chat",
+          messages: [{ role: "user", content: "two" }],
+        },
+      }),
+    ]);
+
+    expect(first.statusCode).toBe(200);
+    expect(second.statusCode).toBe(200);
+    expect(maxConcurrent).toBe(2);
   });
 
   it("cleans up one pi session without touching another", async () => {

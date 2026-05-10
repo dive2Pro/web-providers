@@ -264,34 +264,47 @@ export class HelperRuntime {
   }) {
     const sessionId = input.sessionId ?? DEFAULT_SESSION_ID;
     const provider = (input.body.provider ?? "deepseek-web") as ProviderId;
-    const session = await this.ensureBound({ sessionId, provider });
-
-    if (this.state.hasRunningRequest()) {
+    if (!this.state.tryAcquireBinding(sessionId, provider)) {
       throw new HelperError("MODEL_BUSY", "Another request is already in progress");
     }
 
-    const promptInput = buildProviderPrompt({
-      messages: input.body.messages,
-      sessionInit: input.body.sessionInit,
-      providerInitialized: session.providerInitialized,
-      providerInitFingerprint: session.providerInitFingerprint,
-      providerSessionKey: session.providerSessionKey,
-    });
-    const prompt = promptInput.prompt;
-    const debugSeed = createBaseDebugRecord(sessionId, session, { ...input.body, provider }, prompt);
-    const baseDebugRecord = debugSeed.record;
-    this.state.setLastProviderRequest(provider, baseDebugRecord);
-    this.state.setActiveRequest({
-      requestId: debugSeed.requestId,
-      prompt,
-      accumulatedReply: "",
-      startedAt: debugSeed.startedAt,
-      lastEventAt: debugSeed.startedAt,
-      status: "running",
-      finalErrorCode: null,
-    });
+    let activeTabId: string | null = null;
+    let baseDebugRecord: ProviderRequestDebugRecord | null = null;
 
     try {
+      const session = await this.ensureBound({ sessionId, provider });
+      activeTabId = session.tabId;
+
+      if (this.state.hasRunningRequest(session.tabId)) {
+        throw new HelperError("MODEL_BUSY", "Another request is already in progress");
+      }
+
+      const promptInput = buildProviderPrompt({
+        messages: input.body.messages,
+        sessionInit: input.body.sessionInit,
+        providerInitialized: session.providerInitialized,
+        providerInitFingerprint: session.providerInitFingerprint,
+        providerSessionKey: session.providerSessionKey,
+      });
+      const prompt = promptInput.prompt;
+      const debugSeed = createBaseDebugRecord(
+        sessionId,
+        session,
+        { ...input.body, provider },
+        prompt,
+      );
+      baseDebugRecord = debugSeed.record;
+      this.state.setLastProviderRequest(provider, baseDebugRecord);
+      this.state.setActiveRequest(session.tabId, {
+        requestId: debugSeed.requestId,
+        prompt,
+        accumulatedReply: "",
+        startedAt: debugSeed.startedAt,
+        lastEventAt: debugSeed.startedAt,
+        status: "running",
+        finalErrorCode: null,
+      });
+
       if (promptInput.shouldStartFresh) {
         await this.browserClient.startNewChat(
           this.browserClient.bindProviderTab
@@ -310,7 +323,7 @@ export class HelperRuntime {
       });
 
       const response = toProviderResponse(result);
-      this.state.setActiveRequest(null);
+      this.state.setActiveRequest(session.tabId, null);
       this.state.setLastProviderRequest(provider, {
         ...baseDebugRecord,
         completedAt: new Date().toISOString(),
@@ -340,7 +353,9 @@ export class HelperRuntime {
 
       return response;
     } catch (error) {
-      this.state.setActiveRequest(null);
+      if (activeTabId) {
+        this.state.setActiveRequest(activeTabId, null);
+      }
 
       if (input.signal?.aborted) {
         throw error;
@@ -357,17 +372,21 @@ export class HelperRuntime {
               "AUTOMATION_DESYNC",
               `Unexpected automation failure: ${rootCauseMessage}`,
             );
-      this.state.setLastProviderRequest(provider, {
-        ...baseDebugRecord,
-        completedAt: new Date().toISOString(),
-        status: "failed",
-        automation: helperError.automationDebug,
-        error: {
-          code: helperError.code,
-          message: helperError.message,
-        },
-      });
+      if (baseDebugRecord) {
+        this.state.setLastProviderRequest(provider, {
+          ...baseDebugRecord,
+          completedAt: new Date().toISOString(),
+          status: "failed",
+          automation: helperError.automationDebug,
+          error: {
+            code: helperError.code,
+            message: helperError.message,
+          },
+        });
+      }
       throw helperError;
+    } finally {
+      this.state.releaseBinding(sessionId, provider);
     }
   }
 
@@ -381,6 +400,8 @@ export class HelperRuntime {
       : [...this.state.getAllSessionBoundSessions(sessionId).values()];
 
     for (const session of sessionsToReset) {
+      this.state.setActiveRequest(session.tabId, null);
+      this.state.releaseBinding(sessionId, session.provider);
       if (this.browserClient.resetProvider) {
         await this.browserClient.resetProvider({
           provider: session.provider,
@@ -392,13 +413,13 @@ export class HelperRuntime {
     }
 
     if (input.provider) {
+      this.state.releaseBinding(sessionId, input.provider);
       this.state.setSessionBoundSession(sessionId, input.provider, null);
       this.state.setLastProviderRequest(input.provider, null);
       return;
     }
 
     this.state.clearSessionState(sessionId);
-    this.state.setActiveRequest(null);
     this.state.setDegraded(false);
     this.state.setLastBridgeHeartbeatAt(null);
   }
@@ -407,6 +428,8 @@ export class HelperRuntime {
     const sessions = [...this.state.getAllSessionBoundSessions(sessionId).values()];
 
     for (const session of sessions) {
+      this.state.setActiveRequest(session.tabId, null);
+      this.state.releaseBinding(sessionId, session.provider);
       if (this.browserClient.resetProvider) {
         await this.browserClient.resetProvider({
           provider: session.provider,

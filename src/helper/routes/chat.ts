@@ -24,7 +24,7 @@ export function registerChatRoute(app: FastifyInstance, ctx: AppContext) {
       });
     }
 
-    if (ctx.state.hasRunningRequest()) {
+    if (ctx.state.hasRunningRequest(session.tabId)) {
       return reply.code(409).send({
         error: "MODEL_BUSY",
         message: "Another request is already in progress",
@@ -33,7 +33,7 @@ export function registerChatRoute(app: FastifyInstance, ctx: AppContext) {
 
     const now = new Date().toISOString();
 
-    ctx.state.setActiveRequest({
+    ctx.state.setActiveRequest(session.tabId, {
       requestId: `req-${Date.now()}`,
       prompt: body.prompt,
       accumulatedReply: "",
@@ -54,7 +54,7 @@ export function registerChatRoute(app: FastifyInstance, ctx: AppContext) {
           ? result.outputText
           : (result.outputText ?? "");
 
-      ctx.state.setActiveRequest(null);
+      ctx.state.setActiveRequest(session.tabId, null);
 
       return {
         reply: replyText,
@@ -68,7 +68,7 @@ export function registerChatRoute(app: FastifyInstance, ctx: AppContext) {
           ? error
           : new HelperError("AUTOMATION_DESYNC", "Unexpected automation failure");
 
-      ctx.state.setActiveRequest(null);
+      ctx.state.setActiveRequest(session.tabId, null);
 
       return reply.code(409).send({
         error: helperError.code,
