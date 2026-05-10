@@ -2,12 +2,12 @@ import type { FastifyInstance } from "fastify";
 import { normalizeChatCompletionsRequest } from "../normalize";
 import { serializeChatCompletions } from "../serialize-chat";
 import { serializeChatCompletionsStream } from "../streaming/chat-completions";
-import type { HelperClient } from "../app";
+import type { ExecutionClient } from "../app";
 import { handlePseudoStreamRoute, sendAdapterRouteError } from "./streaming";
 
 export function registerChatCompletionsRoute(
   app: FastifyInstance,
-  helperClient: HelperClient,
+  executionClient: ExecutionClient,
 ) {
   app.post("/v1/chat/completions", async (request, reply) => {
     try {
@@ -29,8 +29,9 @@ export function registerChatCompletionsRoute(
       };
       return await handlePseudoStreamRoute({
         body,
+        request,
         reply,
-        helperClient,
+        executionClient,
         idPrefix: "chatcmpl",
         normalize: normalizeChatCompletionsRequest,
         serialize: serializeChatCompletions,

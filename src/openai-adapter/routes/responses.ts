@@ -2,12 +2,12 @@ import type { FastifyInstance } from "fastify";
 import { normalizeResponsesRequest } from "../normalize";
 import { serializeResponses } from "../serialize-responses";
 import { serializeResponsesStream } from "../streaming/responses";
-import type { HelperClient } from "../app";
+import type { ExecutionClient } from "../app";
 import { handlePseudoStreamRoute, sendAdapterRouteError } from "./streaming";
 
 export function registerResponsesRoute(
   app: FastifyInstance,
-  helperClient: HelperClient,
+  executionClient: ExecutionClient,
 ) {
   app.post("/v1/responses", async (request, reply) => {
     try {
@@ -30,8 +30,9 @@ export function registerResponsesRoute(
       };
       return await handlePseudoStreamRoute({
         body,
+        request,
         reply,
-        helperClient,
+        executionClient,
         idPrefix: "resp",
         normalize: normalizeResponsesRequest,
         serialize: serializeResponses,

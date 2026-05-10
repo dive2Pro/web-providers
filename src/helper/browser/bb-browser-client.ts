@@ -40,10 +40,11 @@ interface BbBrowserTabListEnvelope {
 
 export interface BbBrowserTransport {
   getConnectionStatus(): Promise<"connected" | "disconnected">;
+  getTab?(tabId: string): Promise<{ id: string; url: string }>;
   findDeepSeekTab(): Promise<{ id: string; url: string }>;
   findQwenTab?(): Promise<{ id: string; url: string }>;
-  openDeepSeek(url: string): Promise<void>;
-  openQwen?(url: string): Promise<void>;
+  openDeepSeek(url: string): Promise<{ id: string; url: string } | void>;
+  openQwen?(url: string): Promise<{ id: string; url: string } | void>;
   evaluate<T>(tabId: string, script: string): Promise<T>;
   submitPrompt(tabId: string, prompt: string): Promise<void>;
 }
@@ -176,6 +177,17 @@ export function createBbBrowserTransport(): BbBrowserTransport {
       return tab;
     },
 
+    async getTab(tabId: string) {
+      const list = await listTabs();
+      const tab = list.find((entry) => entry.id === tabId);
+
+      if (!tab) {
+        throw new HelperError("NOT_BOUND", `No browser tab is available for ${tabId}`);
+      }
+
+      return tab;
+    },
+
     async evaluate<T>(tabId: string, script: string): Promise<T> {
       await selectTabById(tabId);
       const raw = await runBbBrowserJson(["eval", script]);
@@ -213,11 +225,27 @@ export function createBbBrowserTransport(): BbBrowserTransport {
     },
 
     async openDeepSeek(url: string) {
+      const before = await listTabs();
       await runBbBrowserJson(["open", url]);
+      const after = await listTabs();
+      const next = after.find(
+        (candidate) =>
+          !before.some((existing) => existing.id === candidate.id) &&
+          candidate.url.includes("deepseek.com"),
+      );
+      return next;
     },
 
     async openQwen(url: string) {
+      const before = await listTabs();
       await runBbBrowserJson(["open", url]);
+      const after = await listTabs();
+      const next = after.find(
+        (candidate) =>
+          !before.some((existing) => existing.id === candidate.id) &&
+          candidate.url.includes("chat.qwen.ai"),
+      );
+      return next;
     },
   };
 }
@@ -341,8 +369,15 @@ export class BbBrowserClient implements BrowserAutomationClient {
     return this.providerRegistry["deepseek-web"].bindTab();
   }
 
-  async bindProviderTab(input: { provider: "deepseek-web" | "qwen-web" }): Promise<BindResult> {
-    return this.providerRegistry[input.provider].bindTab();
+  async bindProviderTab(input: {
+    provider: "deepseek-web" | "qwen-web";
+    tabId?: string;
+    openNew?: boolean;
+  }): Promise<BindResult> {
+    return this.providerRegistry[input.provider].bindTab({
+      tabId: input.tabId,
+      openNew: input.openNew,
+    });
   }
 
   async resetPageBridge(tabId: string): Promise<void> {

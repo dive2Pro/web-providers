@@ -193,7 +193,11 @@ describe("pi provider extension", () => {
   });
 
   it("sends provider-aware helper requests for qwen-web", async () => {
-    const calls: Array<{ path: string; body: Record<string, unknown> }> = [];
+    const calls: Array<{
+      path: string;
+      body: Record<string, unknown>;
+      headers?: Record<string, string>;
+    }> = [];
     let qwenConfig: ProviderConfig | undefined;
 
     registerDeepSeekExtension(
@@ -216,9 +220,12 @@ describe("pi provider extension", () => {
             _baseUrl: string,
             path: string,
             body: Record<string, unknown>,
+            _token?: string,
+            _signal?: AbortSignal,
+            options?: { headers?: Record<string, string> },
           ) => {
-            calls.push({ path, body });
-            if (path === "/v1/bind") {
+            calls.push({ path, body, headers: options?.headers });
+            if (path === "/internal/pi/session/shutdown") {
               return { ok: true } as T;
             }
 
@@ -252,13 +259,12 @@ describe("pi provider extension", () => {
 
     await stream?.result();
 
-    const bindCall = calls.find((call) => call.path === "/v1/bind");
-    const chatCall = calls.find((call) => call.path === "/v1/provider/chat");
-    expect(bindCall?.body).toEqual({ provider: "qwen-web" });
+    const chatCall = calls.find((call) => call.path === "/internal/pi/provider/chat");
     expect(chatCall?.body).toMatchObject({
       provider: "qwen-web",
       model: "qwen-web-chat",
     });
+    expect(chatCall?.headers?.["x-pi-session-id"]).toBe("token-123");
   });
 
   it("registers the deepseek-web provider and model", () => {
@@ -347,7 +353,7 @@ describe("pi provider extension", () => {
           ) => {
             calls.push(`post:${baseUrl}:${path}:${token}:${JSON.stringify(body)}`);
 
-            if (path === "/v1/bind") {
+            if (path === "/internal/pi/session/shutdown") {
               return { ok: true } as T;
             }
 
@@ -394,16 +400,15 @@ describe("pi provider extension", () => {
     ]);
 
     expect(calls[0]).toBe("spawn:token-123:4318");
-    expect(calls[1]).toBe(
-      'post:http://127.0.0.1:4318:/v1/bind:token-123:{"provider":"deepseek-web"}',
+    expect(calls[1]).toContain(
+      'post:http://127.0.0.1:4318:/internal/pi/provider/chat:token-123:',
     );
-    expect(calls[2]).toContain('post:http://127.0.0.1:4318:/v1/provider/chat:token-123:');
-    expect(calls[2]).toContain('"model":"deepseek-web-chat"');
-    expect(calls[2]).toContain('"messages":[{"role":"user","content":"hello"}]');
-    expect(calls[2]).toContain('"temperature":0.3');
-    expect(calls[2]).toContain('"maxOutputTokens":512');
-    expect(calls[2]).toContain('\\"type\\":\\"message\\"');
-    expect(calls[2]).toContain('system prompt');
+    expect(calls[1]).toContain('"model":"deepseek-web-chat"');
+    expect(calls[1]).toContain('"messages":[{"role":"user","content":"hello"}]');
+    expect(calls[1]).toContain('"temperature":0.3');
+    expect(calls[1]).toContain('"maxOutputTokens":512');
+    expect(calls[1]).toContain('\\"type\\":\\"message\\"');
+    expect(calls[1]).toContain('system prompt');
     expect(eventTypes).toEqual(["start", "text_start", "text_delta", "text_end", "done"]);
     expect(result).toMatchObject({
       role: "assistant",
@@ -448,7 +453,7 @@ describe("pi provider extension", () => {
             ) => {
               calls.push(`post:${baseUrl}:${path}:${token}:${JSON.stringify(body)}`);
 
-              if (path === "/v1/bind") {
+              if (path === "/internal/pi/session/shutdown") {
                 return { ok: true } as T;
               }
 
@@ -486,8 +491,9 @@ describe("pi provider extension", () => {
       await collectEventTypes(stream as AssistantMessageEventStreamLike);
 
       expect(calls[0]).toBe("spawn:token-123:4521");
-      expect(calls[1]).toContain("post:http://127.0.0.1:4521:/v1/bind:token-123:");
-      expect(calls[2]).toContain("post:http://127.0.0.1:4521:/v1/provider/chat:token-123:");
+      expect(calls[1]).toContain(
+        "post:http://127.0.0.1:4521:/internal/pi/provider/chat:token-123:",
+      );
     } finally {
       if (previousPort === undefined) {
         delete process.env.PI_DEEPSEEK_HELPER_PORT;
@@ -515,7 +521,7 @@ describe("pi provider extension", () => {
         }),
         helperClient: {
           post: async <T>(_baseUrl: string, path: string) => {
-            if (path === "/v1/bind") {
+            if (path === "/internal/pi/session/shutdown") {
               return { ok: true } as T;
             }
 
@@ -608,7 +614,7 @@ describe("pi provider extension", () => {
           ) => {
             calls.push({ path, body });
 
-            if (path === "/v1/bind") {
+            if (path === "/internal/pi/session/shutdown") {
               return { ok: true } as T;
             }
 
@@ -665,7 +671,9 @@ describe("pi provider extension", () => {
       events.push(event);
     }
 
-    const providerChatCall = calls.find((call) => call.path === "/v1/provider/chat");
+    const providerChatCall = calls.find(
+      (call) => call.path === "/internal/pi/provider/chat",
+    );
     const providerMessages = Array.isArray(providerChatCall?.body.messages)
       ? (providerChatCall.body.messages as Array<{ content?: string }>)
       : [];
@@ -732,7 +740,7 @@ describe("pi provider extension", () => {
         }),
         helperClient: {
           post: async <T>(_baseUrl: string, path: string) => {
-            if (path === "/v1/bind") {
+            if (path === "/internal/pi/session/shutdown") {
               return { ok: true } as T;
             }
 
@@ -833,7 +841,7 @@ describe("pi provider extension", () => {
           ) => {
             calls.push({ path, body });
 
-            if (path === "/v1/bind") {
+            if (path === "/internal/pi/session/shutdown") {
               return { ok: true } as T;
             }
 
@@ -880,7 +888,9 @@ describe("pi provider extension", () => {
       // Drain the stream so the provider request completes and `calls` is populated.
     }
 
-    const providerChatCall = calls.find((call) => call.path === "/v1/provider/chat");
+    const providerChatCall = calls.find(
+      (call) => call.path === "/internal/pi/provider/chat",
+    );
     const providerSessionInit =
       (providerChatCall?.body as { sessionInit?: { prompt?: string } } | undefined)?.sessionInit;
 
@@ -912,7 +922,7 @@ describe("pi provider extension", () => {
           ) => {
             calls.push({ path, body });
 
-            if (path === "/v1/bind") {
+            if (path === "/internal/pi/session/shutdown") {
               return { ok: true } as T;
             }
 
@@ -966,7 +976,9 @@ describe("pi provider extension", () => {
       // Drain the stream so the provider request completes and `calls` is populated.
     }
 
-    const providerChatCall = calls.find((call) => call.path === "/v1/provider/chat");
+    const providerChatCall = calls.find(
+      (call) => call.path === "/internal/pi/provider/chat",
+    );
     const providerSessionInit =
       (providerChatCall?.body as { sessionInit?: { prompt?: string } } | undefined)?.sessionInit;
 
@@ -993,7 +1005,7 @@ describe("pi provider extension", () => {
         }),
         helperClient: {
           post: async <T>(_baseUrl: string, path: string) => {
-            if (path === "/v1/bind") {
+            if (path === "/internal/pi/session/shutdown") {
               return { ok: true } as T;
             }
 
@@ -1091,7 +1103,7 @@ describe("pi provider extension", () => {
           ) => {
             calls.push({ path, body });
 
-            if (path === "/v1/bind") {
+            if (path === "/internal/pi/session/shutdown") {
               return { ok: true } as T;
             }
 
@@ -1167,7 +1179,9 @@ describe("pi provider extension", () => {
       events.push(event);
     }
 
-    const providerCalls = calls.filter((call) => call.path === "/v1/provider/chat");
+    const providerCalls = calls.filter(
+      (call) => call.path === "/internal/pi/provider/chat",
+    );
     expect(providerCalls).toHaveLength(2);
     const repairMessages =
       (providerCalls[1]?.body as { messages?: Array<{ content?: string }> } | undefined)?.messages;
@@ -1228,7 +1242,7 @@ describe("pi provider extension", () => {
           ) => {
             calls.push({ path, body });
 
-            if (path === "/v1/bind") {
+            if (path === "/internal/pi/session/shutdown") {
               return { ok: true } as T;
             }
 
@@ -1280,7 +1294,9 @@ describe("pi provider extension", () => {
       collectEventTypes(stream as AssistantMessageEventStreamLike),
     ]);
 
-    const providerCalls = calls.filter((call) => call.path === "/v1/provider/chat");
+    const providerCalls = calls.filter(
+      (call) => call.path === "/internal/pi/provider/chat",
+    );
     expect(providerCalls).toHaveLength(2);
     const repairMessages = (providerCalls[1]?.body as { messages?: Array<{ content?: unknown }> })
       ?.messages;
@@ -1312,7 +1328,7 @@ describe("pi provider extension", () => {
         }),
         helperClient: {
           post: async <T>(_baseUrl: string, path: string) => {
-            if (path === "/v1/bind") {
+            if (path === "/internal/pi/session/shutdown") {
               return { ok: true } as T;
             }
 
@@ -1401,7 +1417,7 @@ describe("pi provider extension", () => {
           ) => {
             calls.push({ path, body });
 
-            if (path === "/v1/bind") {
+            if (path === "/internal/pi/session/shutdown") {
               return { ok: true } as T;
             }
 
@@ -1462,7 +1478,9 @@ describe("pi provider extension", () => {
 
     const result = await stream?.result();
 
-    const providerCalls = calls.filter((call) => call.path === "/v1/provider/chat");
+    const providerCalls = calls.filter(
+      (call) => call.path === "/internal/pi/provider/chat",
+    );
     expect(providerCalls).toHaveLength(3);
     const minimalRepairMessage =
       (providerCalls[2]?.body as { messages?: Array<{ content?: string }> } | undefined)?.messages?.[0]
@@ -1497,7 +1515,7 @@ describe("pi provider extension", () => {
         }),
         helperClient: {
           post: async <T>(_baseUrl: string, path: string) => {
-            if (path === "/v1/bind") {
+            if (path === "/internal/pi/session/shutdown") {
               return { ok: true } as T;
             }
 
@@ -1577,7 +1595,7 @@ describe("pi provider extension", () => {
         }),
         helperClient: {
           post: async <T>(_baseUrl: string, path: string) => {
-            if (path === "/v1/bind") {
+            if (path === "/internal/pi/session/shutdown") {
               return { ok: true } as T;
             }
 
@@ -1659,8 +1677,18 @@ describe("pi provider extension", () => {
           },
         }),
         helperClient: {
-          post: async <T>() =>
-            ({ mode: "text", outputText: "ok", finishReason: "stop" } as T),
+          post: async <T>(
+            _baseUrl: string,
+            path: string,
+            body: Record<string, unknown>,
+          ) => {
+            calls.push(`${path}:${JSON.stringify(body)}`);
+            if (path === "/internal/pi/session/shutdown") {
+              return { ok: true } as T;
+            }
+
+            return { mode: "text", outputText: "ok", finishReason: "stop" } as T;
+          },
         },
         randomToken: () => "token-123",
       },
@@ -1689,7 +1717,11 @@ describe("pi provider extension", () => {
     await stream?.result();
     await shutdownHandler?.();
 
-    expect(calls).toEqual(["stop"]);
+    expect(calls).toEqual([
+      expect.stringContaining("/internal/pi/provider/chat"),
+      '\/internal/pi/session/shutdown:{"sessionId":"token-123"}',
+      "stop",
+    ]);
   });
 
   it("reuses one helper instance across deepseek and qwen streams", async () => {
@@ -1719,7 +1751,7 @@ describe("pi provider extension", () => {
             body: Record<string, unknown>,
           ) => {
             calls.push(`${path}:${JSON.stringify(body)}`);
-            if (path === "/v1/bind") {
+            if (path === "/internal/pi/session/shutdown") {
               return { ok: true } as T;
             }
 

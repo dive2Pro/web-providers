@@ -418,6 +418,61 @@ describe("openai adapter app", () => {
     });
   });
 
+  it("rejects chat completions requests when body is not a json object", async () => {
+    const app = buildOpenAiAdapterApp({
+      token: "adapter-token",
+      helperBaseUrl: "http://127.0.0.1:4318",
+      helperToken: "helper-token",
+      fetchImpl: vi.fn(),
+    });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/chat/completions",
+      headers: {
+        authorization: "Bearer adapter-token",
+        "content-type": "application/json",
+      },
+      payload: [],
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json()).toEqual({
+      error: {
+        code: "invalid_request",
+        message: "Request body must be a JSON object",
+      },
+    });
+  });
+
+  it("rejects chat completions requests without model", async () => {
+    const app = buildOpenAiAdapterApp({
+      token: "adapter-token",
+      helperBaseUrl: "http://127.0.0.1:4318",
+      helperToken: "helper-token",
+      fetchImpl: vi.fn(),
+    });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/chat/completions",
+      headers: {
+        authorization: "Bearer adapter-token",
+      },
+      payload: {
+        messages: [{ role: "user", content: "hello" }],
+      },
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json()).toEqual({
+      error: {
+        code: "invalid_request",
+        message: "model is required",
+      },
+    });
+  });
+
   it("streams chat text responses as SSE chunks and terminates with [DONE]", async () => {
     const app = buildOpenAiAdapterApp({
       token: "adapter-token",

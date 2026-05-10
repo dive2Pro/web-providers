@@ -3,8 +3,14 @@ import { createHelperClient } from "./helper-client";
 import { registerChatCompletionsRoute } from "./routes/chat-completions";
 import { registerModelsRoute } from "./routes/models";
 import { registerResponsesRoute } from "./routes/responses";
+import type { ExecutionResult, NormalizedRequest } from "./types";
 
-export type HelperClient = ReturnType<typeof createHelperClient>;
+export type ExecutionClient = {
+  run(
+    request: NormalizedRequest,
+    options?: { sessionId?: string; signal?: AbortSignal },
+  ): Promise<ExecutionResult>;
+};
 
 export function buildOpenAiAdapterApp(input: {
   token?: string;
@@ -13,7 +19,7 @@ export function buildOpenAiAdapterApp(input: {
   fetchImpl?: typeof fetch;
 }) {
   const app = Fastify();
-  const helperClient = createHelperClient({
+  const executionClient: ExecutionClient = createHelperClient({
     helperBaseUrl: input.helperBaseUrl,
     helperToken: input.helperToken,
     fetchImpl: input.fetchImpl,
@@ -31,8 +37,8 @@ export function buildOpenAiAdapterApp(input: {
   });
 
   registerModelsRoute(app);
-  registerChatCompletionsRoute(app, helperClient);
-  registerResponsesRoute(app, helperClient);
+  registerChatCompletionsRoute(app, executionClient);
+  registerResponsesRoute(app, executionClient);
 
   return app;
 }

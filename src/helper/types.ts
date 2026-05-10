@@ -29,7 +29,14 @@ export interface ActiveRequest {
   finalErrorCode: string | null;
 }
 
+export interface SessionStateMeta {
+  sessionId: string;
+  createdAt: string;
+  lastSeenAt: string;
+}
+
 export interface ProviderRequestDebugRecord {
+  sessionId?: string;
   provider: ProviderId;
   requestId: string;
   rawRequest: ProviderChatRequest;

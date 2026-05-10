@@ -48,3 +48,13 @@ export function mapHelperError(payload: { error?: string; message?: string }) {
       );
   }
 }
+
+export function mapHelperErrorCode(input: {
+  code?: string;
+  message?: string;
+}) {
+  return mapHelperError({
+    error: input.code,
+    message: input.message,
+  });
+}

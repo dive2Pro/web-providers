@@ -223,6 +223,50 @@ describe("BbBrowserClient", () => {
     expect(opened).toEqual(["https://chat.deepseek.com"]);
   });
 
+  it("reopens a DeepSeek tab when bridge injection hits a missing page target", async () => {
+    const opened: string[] = [];
+    const evaluations: string[] = [];
+    let currentTabId = "tab-stale";
+
+    const client = new BbBrowserClient({
+      getConnectionStatus: async () => "connected",
+      getTab: async (tabId: string) => ({
+        id: tabId,
+        url: "https://chat.deepseek.com/",
+      }),
+      findDeepSeekTab: async () => ({
+        id: currentTabId,
+        url: "https://chat.deepseek.com/",
+      }),
+      openDeepSeek: async (url: string) => {
+        opened.push(url);
+        currentTabId = "tab-fresh";
+        return {
+          id: currentTabId,
+          url: "https://chat.deepseek.com/",
+        };
+      },
+      submitPrompt: async () => undefined,
+      evaluate: async <T>(tabId: string, script: string) => {
+        evaluations.push(`${tabId}:${script.slice(0, 20)}`);
+        if (tabId === "tab-stale") {
+          throw new Error("No page target found");
+        }
+        return undefined as T;
+      },
+    } as never);
+
+    const result = await client.bindProviderTab({
+      provider: "deepseek-web",
+      tabId: "tab-stale",
+    });
+
+    expect(result.tabId).toBe("tab-fresh");
+    expect(opened).toEqual(["https://chat.deepseek.com"]);
+    expect(evaluations[0]).toContain("tab-stale");
+    expect(evaluations[1]).toContain("tab-fresh");
+  });
+
   it("treats expected target navigation during startNewChat as success and reinjects the bridge", async () => {
     const evaluations: Array<{ tabId: string; script: string }> = [];
     let callCount = 0;

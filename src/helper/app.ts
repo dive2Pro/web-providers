@@ -1,11 +1,18 @@
 import Fastify from "fastify";
 import type { BrowserAutomationClient } from "./browser/types";
+import { toProviderChatRequest } from "../openai-adapter/helper-client";
+import { registerChatCompletionsRoute } from "../openai-adapter/routes/chat-completions";
+import { registerModelsRoute } from "../openai-adapter/routes/models";
+import { registerResponsesRoute } from "../openai-adapter/routes/responses";
 import { registerBindRoute } from "./routes/bind";
 import { registerChatRoute } from "./routes/chat";
 import { registerDebugProviderLastRoute } from "./routes/debug-provider-last";
 import { registerHealthRoute } from "./routes/health";
+import { registerInternalPiProviderChatRoute } from "./routes/internal-pi-provider-chat";
+import { registerInternalPiSessionShutdownRoute } from "./routes/internal-pi-session-shutdown";
 import { registerProviderChatRoute } from "./routes/provider-chat";
 import { registerResetRoute } from "./routes/reset";
+import { HelperRuntime } from "./runtime";
 import { HelperState } from "./state";
 
 export interface AppDeps {
@@ -16,15 +23,24 @@ export interface AppDeps {
 export interface AppContext {
   browserClient: BrowserAutomationClient;
   state: HelperState;
+  runtime: HelperRuntime;
 }
 
 export function buildApp(deps: AppDeps) {
   const app = Fastify();
+  const state = new HelperState();
+  const runtime = new HelperRuntime(deps.browserClient, state);
   const ctx: AppContext = {
     browserClient: deps.browserClient,
-    state: new HelperState(),
+    state,
+    runtime,
   };
   const unauthenticatedPaths = new Set(["/v1/debug/provider-last"]);
+  const openAiPublicPaths = new Set([
+    "/v1/models",
+    "/v1/chat/completions",
+    "/v1/responses",
+  ]);
 
   app.addHook("onRequest", async (request, reply) => {
     const pathname = request.url.split("?")[0] ?? request.url;
@@ -33,6 +49,14 @@ export function buildApp(deps: AppDeps) {
     }
 
     if (deps.token && request.headers.authorization !== `Bearer ${deps.token}`) {
+      if (openAiPublicPaths.has(pathname)) {
+        return reply.code(401).send({
+          error: {
+            code: "unauthorized",
+            message: "Unauthorized",
+          },
+        });
+      }
       return reply.code(401).send({ error: "UNAUTHORIZED" });
     }
   });
@@ -42,7 +66,22 @@ export function buildApp(deps: AppDeps) {
   registerResetRoute(app, ctx);
   registerChatRoute(app, ctx);
   registerProviderChatRoute(app, ctx);
+  registerInternalPiProviderChatRoute(app, ctx);
+  registerInternalPiSessionShutdownRoute(app, ctx);
   registerDebugProviderLastRoute(app, ctx);
+  registerModelsRoute(app);
+  const executionClient = {
+    run: async (
+      request: Parameters<typeof toProviderChatRequest>[0],
+      options?: { sessionId?: string },
+    ) =>
+      ctx.runtime.executeProviderChat({
+        sessionId: options?.sessionId,
+        body: toProviderChatRequest(request),
+      }),
+  };
+  registerChatCompletionsRoute(app, executionClient);
+  registerResponsesRoute(app, executionClient);
 
   return app;
 }

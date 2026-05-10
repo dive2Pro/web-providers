@@ -301,6 +301,7 @@ export interface ExtensionDeps {
       body: Record<string, unknown>,
       token: string,
       signal?: AbortSignal,
+      options?: { headers?: Record<string, string> },
     ): Promise<T>;
   };
   randomToken(): string;
@@ -1141,12 +1142,14 @@ async function postJson<T>(
   body: Record<string, unknown>,
   token: string,
   signal?: AbortSignal,
+  options?: { headers?: Record<string, string> },
 ) {
   const response = await fetch(`${baseUrl}${path}`, {
     method: "POST",
     headers: {
       authorization: `Bearer ${token}`,
       "content-type": "application/json",
+      ...(options?.headers ?? {}),
     },
     body: JSON.stringify(body),
     signal,
@@ -1286,6 +1289,7 @@ export default function registerDeepSeekExtension(
   pi: PiExtensionApi,
   deps: ExtensionDeps = defaultDeps(),
 ) {
+  const piSessionId = deps.randomToken();
   let helperPromise: Promise<ManagedHelper> | null = null;
   let helper: ManagedHelper | null = null;
 
@@ -1323,6 +1327,23 @@ export default function registerDeepSeekExtension(
 
   pi.on("session_start", async () => undefined);
   pi.on("session_shutdown", async () => {
+    const current = helper ?? (helperPromise ? await helperPromise.catch(() => null) : null);
+    if (current) {
+      try {
+        await deps.helperClient.post(
+          current.baseUrl,
+          "/internal/pi/session/shutdown",
+          { sessionId: piSessionId },
+          current.token,
+          undefined,
+          {
+            headers: {
+              "x-pi-session-id": piSessionId,
+            },
+          },
+        );
+      } catch {}
+    }
     await stopHelper();
   });
 
@@ -1356,16 +1377,6 @@ export default function registerDeepSeekExtension(
 
         try {
           const current = await ensureHelper();
-
-          await deps.helperClient.post(
-            current.baseUrl,
-            "/v1/bind",
-            {
-              provider: model.provider,
-            },
-            current.token,
-            options?.signal,
-          );
 
           const sessionInit = buildSessionInitPrompt(context);
           const emitText = (text: string) => {
@@ -1487,7 +1498,7 @@ export default function registerDeepSeekExtension(
 
             const response = await deps.helperClient.post<ProviderChatResponse>(
               current.baseUrl,
-              "/v1/provider/chat",
+              "/internal/pi/provider/chat",
               (() => {
                 logProviderDebug("provider chat request", {
                   helperBaseUrl: current.baseUrl,
@@ -1498,6 +1509,11 @@ export default function registerDeepSeekExtension(
               })(),
               current.token,
               options?.signal,
+              {
+                headers: {
+                  "x-pi-session-id": piSessionId,
+                },
+              },
             );
             logProviderDebug("provider chat response", {
               helperBaseUrl: current.baseUrl,

@@ -77,6 +77,24 @@ function buildSessionInit(request: NormalizedRequest) {
   };
 }
 
+export function toProviderChatRequest(
+  request: NormalizedRequest,
+): ProviderChatRequest {
+  const sessionInit = buildSessionInit(request);
+  return {
+    provider: request.provider,
+    model: request.publicModel,
+    messages: request.messages,
+    ...(sessionInit ? { sessionInit } : {}),
+    ...(typeof request.temperature === "number"
+      ? { temperature: request.temperature }
+      : {}),
+    ...(typeof request.maxOutputTokens === "number"
+      ? { maxOutputTokens: request.maxOutputTokens }
+      : {}),
+  };
+}
+
 export function createHelperClient(input: {
   helperBaseUrl: string;
   helperToken?: string;
@@ -86,19 +104,7 @@ export function createHelperClient(input: {
 
   return {
     async run(request: NormalizedRequest): Promise<ProviderChatResponse> {
-      const sessionInit = buildSessionInit(request);
-      const helperRequest: ProviderChatRequest = {
-        provider: request.provider,
-        model: request.publicModel,
-        messages: request.messages,
-        ...(sessionInit ? { sessionInit } : {}),
-        ...(typeof request.temperature === "number"
-          ? { temperature: request.temperature }
-          : {}),
-        ...(typeof request.maxOutputTokens === "number"
-          ? { maxOutputTokens: request.maxOutputTokens }
-          : {}),
-      };
+      const helperRequest = toProviderChatRequest(request);
 
       const response = await fetchImpl(
         `${input.helperBaseUrl}/v1/provider/chat`,
