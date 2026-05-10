@@ -15,7 +15,11 @@ export function createQwenAdapter(
     );
   }
 
-  async function resolveTab(input?: { tabId?: string; openNew?: boolean }) {
+  async function resolveTab(input?: {
+    tabId?: string;
+    openNew?: boolean;
+    openUrl?: string;
+  }) {
     if (!qwenTransport) {
       throw new HelperError(
         "NOT_BOUND",
@@ -31,10 +35,17 @@ export function createQwenAdapter(
     }
 
     if (input?.openNew) {
-      const opened = await qwenTransport.openQwen?.("https://chat.qwen.ai/");
+      const opened = await qwenTransport.openQwen?.(
+        input.openUrl ?? "https://chat.qwen.ai/",
+      );
       if (opened) {
         return opened;
       }
+
+      throw new HelperError(
+        "NOT_BOUND",
+        "Opened Qwen in bb-browser. Finish login in that page and retry.",
+      );
     }
 
     if (!qwenTransport.findQwenTab) {
@@ -51,7 +62,7 @@ export function createQwenAdapter(
     providerId: "qwen-web",
     async bindTab(input): Promise<BindResult> {
       const attemptBind = async (
-        attemptInput?: { tabId?: string; openNew?: boolean },
+        attemptInput?: { tabId?: string; openNew?: boolean; openUrl?: string },
       ): Promise<BindResult> => {
         const tab = await resolveTab(attemptInput);
         const normalizedUrl = assertQwenUrl(tab.url);
@@ -73,6 +84,10 @@ export function createQwenAdapter(
         return await attemptBind(input);
       } catch (error) {
         if (error instanceof HelperError && error.code === "NOT_BOUND") {
+          if (input?.openNew) {
+            throw error;
+          }
+
           await qwenTransport?.openQwen?.("https://chat.qwen.ai/");
           throw new HelperError(
             "NOT_BOUND",
@@ -82,7 +97,7 @@ export function createQwenAdapter(
 
         if (isNoPageTargetError(error)) {
           try {
-            return await attemptBind({ openNew: true });
+            return await attemptBind({ openNew: true, openUrl: input?.openUrl });
           } catch (retryError) {
             if (isNoPageTargetError(retryError)) {
               throw new HelperError(

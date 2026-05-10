@@ -179,6 +179,163 @@ describe("merged helper openai routes", () => {
     ]);
   });
 
+  it("reuses the same public openai tab when x-web-providers-session-id stays the same", async () => {
+    const bindCalls: Array<Record<string, unknown>> = [];
+    let openedCount = 0;
+    const tabUrls = new Map<string, string>([["tab-1", "https://chat.deepseek.com/"]]);
+
+    const app = buildApp({
+      token: "test-token",
+      browserClient: {
+        getConnectionStatus: async () => "connected",
+        getProviderTabUrl: async ({ tabId }: { provider: string; tabId: string }) =>
+          tabUrls.get(tabId) ?? null,
+        bindProviderTab: async (input: {
+          provider: string;
+          tabId?: string;
+          openNew?: boolean;
+          openUrl?: string;
+        }) => {
+          bindCalls.push(input);
+          if (input.tabId) {
+            return {
+              tabId: input.tabId,
+              url: tabUrls.get(input.tabId) ?? "https://chat.deepseek.com/",
+              loginState: "logged_in",
+              bridgeInjected: true,
+              pageState: {
+                inputReady: true,
+                busy: false,
+                latestAssistantPreview: null,
+                assistantCount: 0,
+              },
+            };
+          }
+
+          openedCount += 1;
+          const tabId = `tab-${openedCount}`;
+          return {
+            tabId,
+            url: tabUrls.get(tabId) ?? "https://chat.deepseek.com/",
+            loginState: "logged_in",
+            bridgeInjected: true,
+            pageState: {
+              inputReady: true,
+              busy: false,
+              latestAssistantPreview: null,
+              assistantCount: 0,
+            },
+          };
+        },
+        startNewChat: async () => undefined,
+        sendChatPrompt: async ({ prompt }: { prompt: string }) => ({
+          mode: "text",
+          outputText: `reply:${prompt}`,
+          modelLabel: "DeepSeek Web",
+        }),
+      } as never,
+    });
+
+    for (const prompt of ["one", "two"]) {
+      const response = await app.inject({
+        method: "POST",
+        url: "/v1/chat/completions",
+        headers: {
+          authorization: "Bearer test-token",
+          "x-web-providers-session-id": "public-session-a",
+        },
+        payload: {
+          model: "deepseek-web-chat",
+          messages: [{ role: "user", content: prompt }],
+        },
+      });
+
+      expect(response.statusCode).toBe(200);
+
+      if (prompt === "one") {
+        tabUrls.set("tab-1", "https://chat.deepseek.com/a/chat/s/session-1");
+      }
+    }
+
+    expect(bindCalls).toEqual([
+      { provider: "deepseek-web", openNew: true, tabId: undefined },
+      { provider: "deepseek-web", openNew: undefined, tabId: "tab-1" },
+    ]);
+  });
+
+  it("reopens and rebinds a fresh public openai tab when the remembered tab has been closed", async () => {
+    const bindCalls: Array<Record<string, unknown>> = [];
+    const tabUrls = new Map<string, string>([["tab-1", "https://chat.deepseek.com/a/chat/s/original-session"]]);
+
+    const app = buildApp({
+      token: "test-token",
+      browserClient: {
+        getConnectionStatus: async () => "connected",
+        getProviderTabUrl: async ({ tabId }: { provider: string; tabId: string }) =>
+          tabUrls.get(tabId) ?? null,
+        bindProviderTab: async (input: {
+          provider: string;
+          tabId?: string;
+          openNew?: boolean;
+          openUrl?: string;
+        }) => {
+          bindCalls.push(input);
+
+          if (input.openNew) {
+            return {
+              tabId: bindCalls.length === 1 ? "tab-1" : "tab-2",
+              url: input.openUrl ?? "https://chat.deepseek.com/",
+              loginState: "logged_in",
+              bridgeInjected: true,
+              pageState: {
+                inputReady: true,
+                busy: false,
+                latestAssistantPreview: null,
+                assistantCount: 0,
+              },
+            };
+          }
+
+          throw new Error("Tab not found: tab-1");
+        },
+        startNewChat: async () => undefined,
+        sendChatPrompt: async ({ prompt }: { prompt: string }) => ({
+          mode: "text",
+          outputText: `reply:${prompt}`,
+          modelLabel: "DeepSeek Web",
+        }),
+      } as never,
+    });
+
+    for (const prompt of ["one", "two"]) {
+      const response = await app.inject({
+        method: "POST",
+        url: "/v1/chat/completions",
+        headers: {
+          authorization: "Bearer test-token",
+          "x-web-providers-session-id": "public-session-stale",
+        },
+        payload: {
+          model: "deepseek-web-chat",
+          messages: [{ role: "user", content: prompt }],
+        },
+      });
+
+      expect(response.statusCode).toBe(200);
+    }
+
+    expect(bindCalls).toEqual([
+      { provider: "deepseek-web", openNew: true, tabId: undefined },
+      { provider: "deepseek-web", openNew: undefined, tabId: "tab-1" },
+      {
+        provider: "deepseek-web",
+        openNew: true,
+        openUrl: "https://chat.deepseek.com/a/chat/s/original-session",
+        tabId: undefined,
+      },
+    ]);
+  });
+
   it("returns 400 when the merged openai route receives no model", async () => {
     const app = buildApp({
       token: "test-token",

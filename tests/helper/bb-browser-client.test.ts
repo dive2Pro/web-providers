@@ -3,6 +3,7 @@ import { HelperError } from "../../src/helper/errors";
 import {
   BbBrowserClient,
   extractTabsFromTabList,
+  findOpenedTabFromSnapshots,
   unwrapEvalResult,
 } from "../../src/helper/browser/bb-browser-client";
 
@@ -53,6 +54,35 @@ describe("BbBrowserClient", () => {
     ).toEqual({
       ok: true,
       reply: "hello",
+    });
+  });
+
+  it("detects a newly opened matching tab or a tab navigated into the provider page", () => {
+    expect(
+      findOpenedTabFromSnapshots(
+        [{ index: 0, id: "tab-blank", url: "about:blank" }],
+        [{ index: 0, id: "tab-blank", url: "https://chat.deepseek.com/" }],
+        (tab) => tab.url.includes("deepseek.com"),
+      ),
+    ).toEqual({
+      index: 0,
+      id: "tab-blank",
+      url: "https://chat.deepseek.com/",
+    });
+
+    expect(
+      findOpenedTabFromSnapshots(
+        [{ index: 0, id: "tab-blank", url: "about:blank" }],
+        [
+          { index: 0, id: "tab-blank", url: "about:blank" },
+          { index: 1, id: "tab-deepseek", url: "https://chat.deepseek.com/" },
+        ],
+        (tab) => tab.url.includes("deepseek.com"),
+      ),
+    ).toEqual({
+      index: 1,
+      id: "tab-deepseek",
+      url: "https://chat.deepseek.com/",
     });
   });
 

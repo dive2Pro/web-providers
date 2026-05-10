@@ -9,7 +9,7 @@ import type {
 export interface BoundSession {
   provider: ProviderId;
   tabId: string;
-  url: string;
+  tabUrl: string;
   loginState: "logged_in" | "logged_out";
   bridgeInjected: boolean;
   pageState: PageStateSummary;

@@ -18,7 +18,7 @@ export function registerBindRoute(app: FastifyInstance, ctx: AppContext) {
       return {
         provider,
         tabId: result.tabId,
-        url: result.url,
+        url: result.tabUrl,
         loginState: result.loginState,
         bridgeInjected: result.bridgeInjected,
         pageState: result.pageState,

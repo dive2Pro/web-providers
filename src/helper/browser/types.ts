@@ -78,10 +78,15 @@ export interface ChatTextResult {
 
 export interface BrowserAutomationClient {
   getConnectionStatus(): Promise<BrowserConnectionStatus>;
+  getProviderTabUrl?(input: {
+    provider: ProviderId;
+    tabId: string;
+  }): Promise<string | null>;
   bindProviderTab?(input: {
     provider: ProviderId;
     tabId?: string;
     openNew?: boolean;
+    openUrl?: string;
   }): Promise<BindResult>;
   bindDeepSeekTab(): Promise<BindResult>;
   resetProvider?(input: { provider: ProviderId; tabId: string }): Promise<void>;

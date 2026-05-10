@@ -17,7 +17,11 @@ export function createDeepSeekAdapter(
     );
   }
 
-  async function resolveTab(input?: { tabId?: string; openNew?: boolean }) {
+  async function resolveTab(input?: {
+    tabId?: string;
+    openNew?: boolean;
+    openUrl?: string;
+  }) {
     if (input?.tabId) {
       const tab = await transport.getTab?.(input.tabId);
       if (tab) {
@@ -26,10 +30,17 @@ export function createDeepSeekAdapter(
     }
 
     if (input?.openNew) {
-      const opened = await transport.openDeepSeek("https://chat.deepseek.com");
+      const opened = await transport.openDeepSeek(
+        input.openUrl ?? "https://chat.deepseek.com",
+      );
       if (opened) {
         return opened;
       }
+
+      throw new HelperError(
+        "NOT_BOUND",
+        "Opened DeepSeek in bb-browser. Finish login in that page and retry.",
+      );
     }
 
     return transport.findDeepSeekTab();
@@ -39,7 +50,7 @@ export function createDeepSeekAdapter(
     providerId: "deepseek-web",
     async bindTab(input): Promise<BindResult> {
       const attemptBind = async (
-        attemptInput?: { tabId?: string; openNew?: boolean },
+        attemptInput?: { tabId?: string; openNew?: boolean; openUrl?: string },
       ): Promise<BindResult> => {
         const tab = await resolveTab(attemptInput);
         const normalizedUrl = assertDeepSeekUrl(tab.url);
@@ -63,6 +74,10 @@ export function createDeepSeekAdapter(
         return await attemptBind(input);
       } catch (error) {
         if (error instanceof HelperError && error.code === "NOT_BOUND") {
+          if (input?.openNew) {
+            throw error;
+          }
+
           await transport.openDeepSeek("https://chat.deepseek.com");
           throw new HelperError(
             "NOT_BOUND",
@@ -72,7 +87,7 @@ export function createDeepSeekAdapter(
 
         if (isNoPageTargetError(error)) {
           try {
-            return await attemptBind({ openNew: true });
+            return await attemptBind({ openNew: true, openUrl: input?.openUrl });
           } catch (retryError) {
             if (isNoPageTargetError(retryError)) {
               throw new HelperError(

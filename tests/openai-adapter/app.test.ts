@@ -83,6 +83,45 @@ describe("openai adapter helper client", () => {
     );
   });
 
+  it("forwards explicit public session ids to helper", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        mode: "text",
+        outputText: "helper says hi",
+        finishReason: "stop",
+      }),
+    });
+
+    const client = createHelperClient({
+      helperBaseUrl: "http://127.0.0.1:4318",
+      helperToken: "helper-token",
+      fetchImpl: fetchMock,
+    });
+
+    await client.run(
+      {
+        publicModel: "qwen-web-chat",
+        provider: "qwen-web",
+        responseFormat: "chat_completions",
+        messages: [{ role: "user", content: "hello" }],
+        tools: [],
+        toolChoice: "none",
+      },
+      { sessionId: "session-123" },
+    );
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://127.0.0.1:4318/v1/provider/chat",
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          authorization: "Bearer helper-token",
+          "x-web-providers-session-id": "session-123",
+        }),
+      }),
+    );
+  });
+
   it("injects session init instructions when tools or system prompts are present", async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,

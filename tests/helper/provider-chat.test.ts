@@ -3,6 +3,83 @@ import { buildApp } from "../../src/helper/app";
 import { HelperError } from "../../src/helper/errors";
 
 describe("provider chat route", () => {
+  it("uses x-web-providers-session-id to reuse the same bound tab across public provider chat requests", async () => {
+    const bindCalls: Array<Record<string, unknown>> = [];
+    let newTabCount = 0;
+
+    const app = buildApp({
+      token: "test-token",
+      browserClient: {
+        getConnectionStatus: async () => "connected",
+        bindProviderTab: async (input: {
+          provider: string;
+          tabId?: string;
+          openNew?: boolean;
+        }) => {
+          bindCalls.push(input);
+          if (input.tabId) {
+            return {
+              tabId: input.tabId,
+              url: "https://chat.deepseek.com/",
+              loginState: "logged_in",
+              bridgeInjected: true,
+              pageState: {
+                inputReady: true,
+                busy: false,
+                latestAssistantPreview: null,
+                assistantCount: 0,
+              },
+            };
+          }
+
+          newTabCount += 1;
+          return {
+            tabId: `tab-${newTabCount}`,
+            url: "https://chat.deepseek.com/",
+            loginState: "logged_in",
+            bridgeInjected: true,
+            pageState: {
+              inputReady: true,
+              busy: false,
+              latestAssistantPreview: null,
+              assistantCount: 0,
+            },
+          };
+        },
+        resetProvider: async () => undefined,
+        startNewChat: async () => undefined,
+        sendChatPrompt: async ({ prompt }: { prompt: string }) => ({
+          mode: "text",
+          outputText: `reply:${prompt}`,
+          modelLabel: "DeepSeek Web",
+        }),
+      } as never,
+    });
+
+    for (const prompt of ["one", "two"]) {
+      const response = await app.inject({
+        method: "POST",
+        url: "/v1/provider/chat",
+        headers: {
+          authorization: "Bearer test-token",
+          "x-web-providers-session-id": "public-session-a",
+        },
+        payload: {
+          provider: "deepseek-web",
+          model: "deepseek-web-chat",
+          messages: [{ role: "user", content: prompt }],
+        },
+      });
+
+      expect(response.statusCode).toBe(200);
+    }
+
+    expect(bindCalls).toEqual([
+      { provider: "deepseek-web", openNew: true, tabId: undefined },
+      { provider: "deepseek-web", openNew: undefined, tabId: "tab-1" },
+    ]);
+  });
+
   it("requires provider on provider chat requests and stores debug state per provider", async () => {
     const app = buildApp({
       token: "test-token",

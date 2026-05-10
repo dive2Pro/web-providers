@@ -103,7 +103,10 @@ export function createHelperClient(input: {
   const fetchImpl = input.fetchImpl ?? fetch;
 
   return {
-    async run(request: NormalizedRequest): Promise<ProviderChatResponse> {
+    async run(
+      request: NormalizedRequest,
+      options?: { sessionId?: string; signal?: AbortSignal },
+    ): Promise<ProviderChatResponse> {
       const helperRequest = toProviderChatRequest(request);
 
       const response = await fetchImpl(
@@ -115,7 +118,11 @@ export function createHelperClient(input: {
             ...(input.helperToken
               ? { authorization: `Bearer ${input.helperToken}` }
               : {}),
+            ...(options?.sessionId
+              ? { "x-web-providers-session-id": options.sessionId }
+              : {}),
           },
+          ...(options?.signal ? { signal: options.signal } : {}),
           body: JSON.stringify(helperRequest),
         },
       );

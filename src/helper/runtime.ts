@@ -97,7 +97,7 @@ function createBaseDebugRecord(
       prompt,
       session: {
         tabId: session.tabId,
-        url: session.url,
+        url: session.tabUrl,
       },
       startedAt,
       completedAt: null,
@@ -157,6 +157,10 @@ function isSameTab(previousSession: BoundSession | null, nextTabId: string) {
   return previousSession?.tabId === nextTabId;
 }
 
+function isSameSessionUrl(previousSession: BoundSession | null, nextTabUrl: string) {
+  return previousSession?.tabUrl === nextTabUrl;
+}
+
 export class HelperRuntime {
   constructor(
     private readonly browserClient: BrowserAutomationClient,
@@ -173,21 +177,27 @@ export class HelperRuntime {
       input.provider,
     );
     const sameTab = isSameTab(previousSession, input.result.tabId);
+    const sameSessionUrl = isSameSessionUrl(previousSession, input.result.url);
+    const preserveSessionState = sameTab || sameSessionUrl;
     const nextConversationId = createConversationId(input.provider, input.result.tabId);
 
     const nextSession: BoundSession = {
       provider: input.provider,
-      ...input.result,
-      conversationId: sameTab
+      tabId: input.result.tabId,
+      tabUrl: input.result.url,
+      loginState: input.result.loginState,
+      bridgeInjected: input.result.bridgeInjected,
+      pageState: input.result.pageState,
+      conversationId: preserveSessionState
         ? previousSession?.conversationId ?? nextConversationId
         : nextConversationId,
-      providerInitialized: sameTab
+      providerInitialized: preserveSessionState
         ? (previousSession?.providerInitialized ?? false)
         : false,
-      providerInitFingerprint: sameTab
+      providerInitFingerprint: preserveSessionState
         ? (previousSession?.providerInitFingerprint ?? null)
         : null,
-      providerSessionKey: sameTab
+      providerSessionKey: preserveSessionState
         ? (previousSession?.providerSessionKey ?? null)
         : null,
     };
@@ -201,6 +211,7 @@ export class HelperRuntime {
     provider: ProviderId;
     openNew?: boolean;
     tabId?: string;
+    openUrl?: string;
   }) {
     const sessionId = input.sessionId ?? DEFAULT_SESSION_ID;
     this.state.touchSession(sessionId);
@@ -210,6 +221,7 @@ export class HelperRuntime {
             provider: input.provider,
             openNew: input.openNew,
             tabId: input.tabId,
+            openUrl: input.openUrl,
           })
         : await this.browserClient.bindDeepSeekTab();
 
@@ -253,6 +265,7 @@ export class HelperRuntime {
         sessionId: input.sessionId,
         provider: input.provider,
         openNew: true,
+        openUrl: existing.tabUrl,
       });
     }
   }
@@ -323,6 +336,20 @@ export class HelperRuntime {
       });
 
       const response = toProviderResponse(result);
+      const latestTabUrl =
+        this.browserClient.getProviderTabUrl
+          ? await this.browserClient.getProviderTabUrl({
+              provider,
+              tabId: session.tabId,
+            })
+          : null;
+      const currentSession = this.state.getSessionBoundSession(sessionId, provider) ?? session;
+      if (latestTabUrl) {
+        this.state.setSessionBoundSession(sessionId, provider, {
+          ...currentSession,
+          tabUrl: latestTabUrl,
+        });
+      }
       this.state.setActiveRequest(session.tabId, null);
       this.state.setLastProviderRequest(provider, {
         ...baseDebugRecord,
@@ -333,21 +360,21 @@ export class HelperRuntime {
       });
 
       if (promptInput.shouldStartFresh || input.body.sessionInit?.fingerprint) {
-        const currentSession = this.state.getSessionBoundSession(sessionId, provider) ?? session;
+        const updatedSession = this.state.getSessionBoundSession(sessionId, provider) ?? currentSession;
         const nextConversationId =
           provider === "deepseek-web"
-            ? `conv-${currentSession.tabId}`
-            : `conv-${provider}-${currentSession.tabId}-${Date.now()}`;
+            ? `conv-${updatedSession.tabId}`
+            : `conv-${provider}-${updatedSession.tabId}-${Date.now()}`;
         this.state.setSessionBoundSession(sessionId, provider, {
-          ...currentSession,
+          ...updatedSession,
           conversationId: promptInput.shouldStartFresh
             ? nextConversationId
-            : currentSession.conversationId,
+            : updatedSession.conversationId,
           providerInitialized: true,
           providerInitFingerprint:
-            input.body.sessionInit?.fingerprint ?? currentSession.providerInitFingerprint,
+            input.body.sessionInit?.fingerprint ?? updatedSession.providerInitFingerprint,
           providerSessionKey:
-            input.body.sessionInit?.sessionKey ?? currentSession.providerSessionKey,
+            input.body.sessionInit?.sessionKey ?? updatedSession.providerSessionKey,
         });
       }
 

@@ -11,6 +11,7 @@ import type {
 import { assertDeepSeekUrl, INJECTED_BRIDGE_SOURCE } from "./deepseek-page-bridge";
 import { createProviderRegistry } from "../providers/registry";
 import {
+  assertQwenUrl,
   INJECTED_QWEN_BRIDGE_SOURCE,
   QWEN_PAGE_STATE_SCRIPT,
   QWEN_PROGRESS_SCRIPT,
@@ -111,6 +112,55 @@ export function unwrapEvalResult<T>(raw: unknown): T {
   }
 
   return unwrapped as T;
+}
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+export function findOpenedTabFromSnapshots(
+  before: Array<{ index: number; id: string; url: string }>,
+  after: Array<{ index: number; id: string; url: string }>,
+  matcher: (tab: { index: number; id: string; url: string }) => boolean,
+) {
+  const beforeById = new Map(before.map((tab) => [tab.id, tab]));
+
+  return after.find((candidate) => {
+    if (!matcher(candidate)) {
+      return false;
+    }
+
+    const previous = beforeById.get(candidate.id);
+    if (!previous) {
+      return true;
+    }
+
+    return previous.url !== candidate.url;
+  });
+}
+
+async function waitForOpenedTab(input: {
+  listTabs: () => Promise<Array<{ index: number; id: string; url: string }>>;
+  before: Array<{ index: number; id: string; url: string }>;
+  matcher: (tab: { index: number; id: string; url: string }) => boolean;
+  timeoutMs?: number;
+  pollMs?: number;
+}) {
+  const timeoutMs = input.timeoutMs ?? 3_000;
+  const pollMs = input.pollMs ?? 100;
+  const startedAt = Date.now();
+
+  while (Date.now() - startedAt <= timeoutMs) {
+    const after = await input.listTabs();
+    const opened = findOpenedTabFromSnapshots(input.before, after, input.matcher);
+    if (opened) {
+      return opened;
+    }
+
+    await sleep(pollMs);
+  }
+
+  return undefined;
 }
 
 async function runBbBrowserJson(args: string[]) {
@@ -227,25 +277,21 @@ export function createBbBrowserTransport(): BbBrowserTransport {
     async openDeepSeek(url: string) {
       const before = await listTabs();
       await runBbBrowserJson(["open", url]);
-      const after = await listTabs();
-      const next = after.find(
-        (candidate) =>
-          !before.some((existing) => existing.id === candidate.id) &&
-          candidate.url.includes("deepseek.com"),
-      );
-      return next;
+      return waitForOpenedTab({
+        before,
+        listTabs,
+        matcher: (candidate) => candidate.url.includes("deepseek.com"),
+      });
     },
 
     async openQwen(url: string) {
       const before = await listTabs();
       await runBbBrowserJson(["open", url]);
-      const after = await listTabs();
-      const next = after.find(
-        (candidate) =>
-          !before.some((existing) => existing.id === candidate.id) &&
-          candidate.url.includes("chat.qwen.ai"),
-      );
-      return next;
+      return waitForOpenedTab({
+        before,
+        listTabs,
+        matcher: (candidate) => candidate.url.includes("chat.qwen.ai"),
+      });
     },
   };
 }
@@ -369,14 +415,34 @@ export class BbBrowserClient implements BrowserAutomationClient {
     return this.providerRegistry["deepseek-web"].bindTab();
   }
 
+  async getProviderTabUrl(input: {
+    provider: "deepseek-web" | "qwen-web";
+    tabId: string;
+  }) {
+    try {
+      const tab = await this.transport.getTab?.(input.tabId);
+      if (!tab) {
+        return null;
+      }
+
+      return input.provider === "qwen-web"
+        ? assertQwenUrl(tab.url)
+        : assertDeepSeekUrl(tab.url);
+    } catch {
+      return null;
+    }
+  }
+
   async bindProviderTab(input: {
     provider: "deepseek-web" | "qwen-web";
     tabId?: string;
     openNew?: boolean;
+    openUrl?: string;
   }): Promise<BindResult> {
     return this.providerRegistry[input.provider].bindTab({
       tabId: input.tabId,
       openNew: input.openNew,
+      openUrl: input.openUrl,
     });
   }
 
