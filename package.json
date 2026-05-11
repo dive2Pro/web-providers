@@ -6,6 +6,7 @@
     "dev:helper": "tsx src/helper/main.ts",
     "dev:openai-adapter": "tsx src/openai-adapter/main.ts",
     "dev:anthropic-adapter": "tsx src/anthropic-adapter/main.ts",
+    "dev:gateway": "tsx src/gateway/main.ts",
     "dev:openai-stack": "bash scripts/dev-openai-stack.sh",
     "test": "vitest run",
     "build": "rm -rf dist && tsc -p tsconfig.json",

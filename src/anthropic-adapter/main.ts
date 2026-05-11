@@ -9,7 +9,12 @@ const app = buildAnthropicAdapterApp({
   helperToken: config.helperToken,
 });
 
-await app.listen({
+const address = await app.listen({
   host: "127.0.0.1",
   port: config.port,
 });
+
+console.log(`[anthropic-adapter] listening on ${address}`);
+console.log(
+  `[anthropic-adapter] endpoints: ${address}/v1/models ${address}/v1/messages ${address}/v1/messages/count_tokens`,
+);
