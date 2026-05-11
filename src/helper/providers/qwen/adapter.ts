@@ -34,6 +34,13 @@ export function createQwenAdapter(
       }
     }
 
+    if (input?.openUrl && qwenTransport.findTabByUrl) {
+      const tab = await qwenTransport.findTabByUrl(input.openUrl);
+      if (tab) {
+        return tab;
+      }
+    }
+
     if (input?.openNew) {
       const opened = await qwenTransport.openQwen?.(
         input.openUrl ?? "https://chat.qwen.ai/",
@@ -84,7 +91,7 @@ export function createQwenAdapter(
         return await attemptBind(input);
       } catch (error) {
         if (error instanceof HelperError && error.code === "NOT_BOUND") {
-          if (input?.openNew) {
+          if (input?.openNew || input?.tabId || input?.openUrl) {
             throw error;
           }
 

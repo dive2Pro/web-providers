@@ -15,39 +15,25 @@ function buildProviderPrompt(input: {
   messages: ProviderChatRequest["messages"];
   sessionInit?: ProviderChatRequest["sessionInit"];
   providerInitialized: boolean;
-  providerInitFingerprint: string | null;
-  providerSessionKey: string | null;
 }) {
   const currentUser = [...input.messages]
     .reverse()
     .find((message) => message.role === "user");
 
   const userPrompt = currentUser?.content ?? "";
-  const nextFingerprint = input.sessionInit?.fingerprint ?? null;
-  const nextSessionKey = input.sessionInit?.sessionKey ?? null;
-  const shouldStartFresh =
-    nextFingerprint !== null &&
-    nextSessionKey !== null &&
-    (!input.providerInitialized ||
-      input.providerInitFingerprint !== nextFingerprint ||
-      input.providerSessionKey !== nextSessionKey);
+  const initPrompt = input.sessionInit?.prompt.trim() ?? "";
+  const shouldStartFresh = initPrompt.length > 0 && !input.providerInitialized;
 
   if (!shouldStartFresh) {
     return {
       prompt: userPrompt,
       shouldStartFresh: false,
-      nextFingerprint: input.providerInitFingerprint,
-      nextSessionKey: input.providerSessionKey,
     };
   }
-
-  const initPrompt = input.sessionInit?.prompt.trim() ?? "";
 
   return {
     prompt: [initPrompt, userPrompt].filter((part) => part.length > 0).join("\n\n"),
     shouldStartFresh: true,
-    nextFingerprint,
-    nextSessionKey,
   };
 }
 
@@ -70,8 +56,6 @@ function createBaseDebugRecord(
     ...(body.sessionInit
       ? {
           sessionInit: {
-            fingerprint: body.sessionInit.fingerprint,
-            sessionKey: body.sessionInit.sessionKey,
             prompt: body.sessionInit.prompt,
           },
         }
@@ -161,6 +145,21 @@ function isSameSessionUrl(previousSession: BoundSession | null, nextTabUrl: stri
   return previousSession?.tabUrl === nextTabUrl;
 }
 
+function isRecoverableTabLookupError(error: unknown) {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+
+  const message = error.message.toLowerCase();
+  return (
+    message.includes("no browser tab is available") ||
+    message.includes("tab not found") ||
+    message.includes("no page target found") ||
+    message.includes("inspected target navigated or closed") ||
+    message.includes("execution context was destroyed")
+  );
+}
+
 export class HelperRuntime {
   constructor(
     private readonly browserClient: BrowserAutomationClient,
@@ -194,12 +193,6 @@ export class HelperRuntime {
       providerInitialized: preserveSessionState
         ? (previousSession?.providerInitialized ?? false)
         : false,
-      providerInitFingerprint: preserveSessionState
-        ? (previousSession?.providerInitFingerprint ?? null)
-        : null,
-      providerSessionKey: preserveSessionState
-        ? (previousSession?.providerSessionKey ?? null)
-        : null,
     };
 
     this.state.setSessionBoundSession(input.sessionId, nextSession);
@@ -231,7 +224,7 @@ export class HelperRuntime {
         input.provider === "qwen-web"
           ? "Open Qwen in the browser tab, sign in on that page, then retry."
           : result.pageState.blockingMessage ??
-              `Log in to ${input.provider} in the browser tab and retry.`,
+              "DeepSeek tab is still loading. Wait for the page to finish loading and retry.",
       );
     }
 
@@ -260,13 +253,32 @@ export class HelperRuntime {
         provider: input.provider,
         tabId: existing.tabId,
       });
-    } catch {
-      return this.bindProvider({
-        sessionId: input.sessionId,
-        provider: input.provider,
-        openNew: true,
-        openUrl: existing.tabUrl,
-      });
+    } catch (error) {
+      if (!isRecoverableTabLookupError(error)) {
+        throw error;
+      }
+
+      try {
+        return await this.bindProvider({
+          sessionId: input.sessionId,
+          provider: input.provider,
+          openUrl: existing.tabUrl,
+        });
+      } catch (recoveryError) {
+        if (
+          !isRecoverableTabLookupError(recoveryError) &&
+          !(recoveryError instanceof HelperError && recoveryError.code === "NOT_BOUND")
+        ) {
+          throw recoveryError;
+        }
+
+        return this.bindProvider({
+          sessionId: input.sessionId,
+          provider: input.provider,
+          openNew: true,
+          openUrl: existing.tabUrl,
+        });
+      }
     }
   }
 
@@ -296,8 +308,6 @@ export class HelperRuntime {
         messages: input.body.messages,
         sessionInit: input.body.sessionInit,
         providerInitialized: session.providerInitialized,
-        providerInitFingerprint: session.providerInitFingerprint,
-        providerSessionKey: session.providerSessionKey,
       });
       const prompt = promptInput.prompt;
       const debugSeed = createBaseDebugRecord(
@@ -359,7 +369,7 @@ export class HelperRuntime {
         automation: result.debug ?? null,
       });
 
-      if (promptInput.shouldStartFresh || input.body.sessionInit?.fingerprint) {
+      if (input.body.sessionInit?.prompt) {
         const updatedSession = this.state.getSessionBoundSession(sessionId, provider) ?? currentSession;
         const nextConversationId =
           provider === "deepseek-web"
@@ -371,10 +381,6 @@ export class HelperRuntime {
             ? nextConversationId
             : updatedSession.conversationId,
           providerInitialized: true,
-          providerInitFingerprint:
-            input.body.sessionInit?.fingerprint ?? updatedSession.providerInitFingerprint,
-          providerSessionKey:
-            input.body.sessionInit?.sessionKey ?? updatedSession.providerSessionKey,
         });
       }
 

@@ -122,6 +122,25 @@ describe("openai adapter normalization", () => {
     });
   });
 
+  it("normalizes a responses request with string input", () => {
+    const normalized = normalizeResponsesRequest(
+      {
+        model: "qwen-web-chat",
+        input: "hello",
+      },
+      chatModel!,
+    );
+
+    expect(normalized).toMatchObject({
+      publicModel: "qwen-web-chat",
+      provider: "qwen-web",
+      responseFormat: "responses",
+      messages: [{ role: "user", content: "hello" }],
+      tools: [],
+      toolChoice: "none",
+    });
+  });
+
   it("normalizes responses tool schema from input_schema", () => {
     const normalized = normalizeResponsesRequest(
       {

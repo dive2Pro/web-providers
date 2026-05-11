@@ -7,6 +7,13 @@ import {
 } from "./page-bridge";
 import type { ProviderAdapter } from "../types";
 
+const DEEPSEEK_PAGE_STATE_SCRIPT =
+  `${INJECTED_BRIDGE_SOURCE}; window.__piDeepSeekBridge.getPageState()`;
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 export function createDeepSeekAdapter(
   transport: BbBrowserTransport,
 ): ProviderAdapter {
@@ -29,6 +36,13 @@ export function createDeepSeekAdapter(
       }
     }
 
+    if (input?.openUrl && transport.findTabByUrl) {
+      const tab = await transport.findTabByUrl(input.openUrl);
+      if (tab) {
+        return tab;
+      }
+    }
+
     if (input?.openNew) {
       const opened = await transport.openDeepSeek(
         input.openUrl ?? "https://chat.deepseek.com",
@@ -46,6 +60,50 @@ export function createDeepSeekAdapter(
     return transport.findDeepSeekTab();
   }
 
+  async function waitForReadyPageState(tabId: string) {
+    const timeoutMs = 10_000;
+    const pollMs = 250;
+    const startedAt = Date.now();
+    let lastState: BindResult["pageState"] | null = null;
+    const fallbackState = {
+      inputReady: false,
+      busy: false,
+      latestAssistantPreview: null,
+      assistantCount: 0,
+      blockingMessage: "DeepSeek tab is still loading. Wait for the page to finish loading.",
+    } satisfies BindResult["pageState"];
+
+    while (Date.now() - startedAt <= timeoutMs) {
+      const rawState = await transport.evaluate<BindResult["pageState"] | undefined>(
+        tabId,
+        DEEPSEEK_PAGE_STATE_SCRIPT,
+      );
+      const pageState =
+        rawState &&
+        typeof rawState === "object" &&
+        "inputReady" in rawState &&
+        "busy" in rawState &&
+        "assistantCount" in rawState
+          ? rawState
+          : null;
+
+      if (!pageState) {
+        await sleep(pollMs);
+        continue;
+      }
+
+      lastState = pageState;
+
+      if (pageState.inputReady || pageState.blockingMessage) {
+        return pageState;
+      }
+
+      await sleep(pollMs);
+    }
+
+    return lastState ?? fallbackState;
+  }
+
   return {
     providerId: "deepseek-web",
     async bindTab(input): Promise<BindResult> {
@@ -55,18 +113,14 @@ export function createDeepSeekAdapter(
         const tab = await resolveTab(attemptInput);
         const normalizedUrl = assertDeepSeekUrl(tab.url);
         await transport.evaluate(tab.id, INJECTED_BRIDGE_SOURCE);
+        const pageState = await waitForReadyPageState(tab.id);
 
         return {
           tabId: tab.id,
           url: normalizedUrl,
-          loginState: "logged_in",
+          loginState: pageState.inputReady ? "logged_in" : "logged_out",
           bridgeInjected: true,
-          pageState: {
-            inputReady: true,
-            busy: false,
-            latestAssistantPreview: null,
-            assistantCount: 0,
-          },
+          pageState,
         };
       };
 
@@ -74,7 +128,7 @@ export function createDeepSeekAdapter(
         return await attemptBind(input);
       } catch (error) {
         if (error instanceof HelperError && error.code === "NOT_BOUND") {
-          if (input?.openNew) {
+          if (input?.openNew || input?.tabId || input?.openUrl) {
             throw error;
           }
 

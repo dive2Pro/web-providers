@@ -1,5 +1,8 @@
-import { createHash } from "node:crypto";
 import type { ProviderChatRequest, ProviderChatResponse } from "../shared/contracts";
+import {
+  buildSessionTitleResponse,
+  isSessionTitleRequest,
+} from "../shared/session-title";
 import { mapHelperError } from "./errors";
 import type { NormalizedRequest } from "./types";
 
@@ -67,13 +70,8 @@ function buildSessionInit(request: NormalizedRequest) {
     return undefined;
   }
 
-  const prompt = parts.join("\n\n");
-  const fingerprint = createHash("sha256").update(prompt).digest("hex");
-
   return {
-    prompt,
-    fingerprint,
-    sessionKey: `session-${fingerprint}`,
+    prompt: parts.join("\n\n"),
   };
 }
 
@@ -107,6 +105,10 @@ export function createHelperClient(input: {
       request: NormalizedRequest,
       options?: { sessionId?: string; signal?: AbortSignal },
     ): Promise<ProviderChatResponse> {
+      if (isSessionTitleRequest(request.messages)) {
+        return buildSessionTitleResponse(request.messages);
+      }
+
       const helperRequest = toProviderChatRequest(request);
 
       const response = await fetchImpl(

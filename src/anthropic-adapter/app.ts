@@ -5,6 +5,15 @@ import { registerCountTokensRoute } from "./routes/count-tokens";
 import { registerAnthropicModelsRoute } from "./routes/models";
 import { authenticationError } from "./errors";
 import type { ExecutionResult, NormalizedRequest } from "./types";
+import {
+  registerRequestLogging,
+  type RequestLogger,
+} from "../shared/request-logging";
+import {
+  LocalRequestLogStore,
+  type RequestLogStore,
+} from "../shared/request-log-store";
+import { registerRequestLogRoutes } from "../shared/request-log-routes";
 
 export type ExecutionClient = {
   run(
@@ -24,8 +33,24 @@ export function buildAnthropicAdapterApp(input: {
   helperBaseUrl: string;
   helperToken?: string;
   fetchImpl?: typeof fetch;
+  requestLogger?: RequestLogger;
+  requestLogDir?: string;
+  requestLogStore?: RequestLogStore;
 }) {
   const app = Fastify();
+  const requestLogStore =
+    input.requestLogStore ??
+    (input.requestLogDir
+      ? new LocalRequestLogStore({
+          scope: "anthropic-adapter",
+          dir: input.requestLogDir,
+        })
+      : null);
+  registerRequestLogging(app, {
+    scope: "anthropic-adapter",
+    logger: input.requestLogger,
+    store: requestLogStore ?? undefined,
+  });
   const executionClient: ExecutionClient = createHelperClient({
     helperBaseUrl: input.helperBaseUrl,
     helperToken: input.helperToken,
@@ -46,6 +71,12 @@ export function buildAnthropicAdapterApp(input: {
   });
 
   registerAnthropicModelsRoute(app);
+  if (requestLogStore) {
+    registerRequestLogRoutes(app, {
+      scope: "anthropic-adapter",
+      store: requestLogStore,
+    });
+  }
   registerMessagesRoute(app, executionClient);
   registerCountTokensRoute(app);
 

@@ -15,8 +15,6 @@ export interface BoundSession {
   pageState: PageStateSummary;
   conversationId: string;
   providerInitialized: boolean;
-  providerInitFingerprint: string | null;
-  providerSessionKey: string | null;
 }
 
 export interface ActiveRequest {
@@ -33,6 +31,24 @@ export interface SessionStateMeta {
   sessionId: string;
   createdAt: string;
   lastSeenAt: string;
+}
+
+export interface SessionBindingDebugRecord {
+  sessionId: string;
+  createdAt: string;
+  lastSeenAt: string;
+  providers: Partial<
+    Record<
+      ProviderId,
+      {
+        tabId: string;
+        tabUrl: string;
+        conversationId: string;
+        loginState: "logged_in" | "logged_out";
+        bridgeInjected: boolean;
+      }
+    >
+  >;
 }
 
 export interface ProviderRequestDebugRecord {

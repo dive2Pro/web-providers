@@ -1,5 +1,6 @@
 import { buildOpenAiAdapterApp } from "./app";
 import { loadOpenAiAdapterConfig } from "./config";
+import { getDefaultRequestLogDir } from "../shared/request-log-store";
 
 const config = loadOpenAiAdapterConfig();
 
@@ -7,6 +8,7 @@ const app = buildOpenAiAdapterApp({
   token: config.token,
   helperBaseUrl: config.helperBaseUrl,
   helperToken: config.helperToken,
+  requestLogDir: process.env.REQUEST_LOG_DIR ?? getDefaultRequestLogDir(),
 });
 
 const address = await app.listen({

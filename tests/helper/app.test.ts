@@ -1,7 +1,21 @@
-import { describe, expect, it } from "vitest";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { buildApp } from "../../src/helper/app";
 
 describe("helper app", () => {
+  const requestLogDirs: string[] = [];
+
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    await Promise.all(
+      requestLogDirs.splice(0).map((dir) =>
+        rm(dir, { recursive: true, force: true }),
+      ),
+    );
+  });
+
   it("returns provider-keyed debug records when multiple providers have history", async () => {
     const app = buildApp({
       token: "test-token",
@@ -122,6 +136,236 @@ describe("helper app", () => {
     expect(response.statusCode).toBe(401);
     expect(response.json()).toEqual({
       error: "UNAUTHORIZED",
+    });
+  });
+
+  it("logs request headers and body for helper routes", async () => {
+    const requestLogger = vi.fn();
+    const app = buildApp({
+      token: "test-token",
+      requestLogger,
+      browserClient: {
+        bindProviderTab: async () => ({
+          tabId: "tab-1",
+          url: "https://chat.deepseek.com/",
+          loginState: "logged_in",
+          bridgeInjected: true,
+          pageState: {
+            inputReady: true,
+            busy: false,
+            latestAssistantPreview: null,
+            assistantCount: 0,
+          },
+        }),
+        getConnectionStatus: async () => "connected",
+      } as never,
+    });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/bind",
+      headers: {
+        authorization: "Bearer test-token",
+        "x-request-source": "helper-test",
+      },
+      payload: {
+        provider: "deepseek-web",
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(requestLogger).toHaveBeenCalledWith(
+      expect.objectContaining({
+        scope: "helper",
+        method: "POST",
+        url: "/v1/bind",
+        routePath: "/v1/bind",
+        statusCode: 200,
+        headers: expect.objectContaining({
+          authorization: "Bearer test-token",
+          "x-request-source": "helper-test",
+        }),
+        body: {
+          provider: "deepseek-web",
+        },
+      }),
+    );
+  });
+
+  it("persists request logs locally and exposes them via api", async () => {
+    const requestLogDir = await mkdtemp(
+      join(tmpdir(), "web-providers-helper-logs-"),
+    );
+    requestLogDirs.push(requestLogDir);
+
+    const app = buildApp({
+      token: "test-token",
+      requestLogDir,
+      browserClient: {
+        bindProviderTab: async () => ({
+          tabId: "tab-1",
+          url: "https://chat.deepseek.com/",
+          loginState: "logged_in",
+          bridgeInjected: true,
+          pageState: {
+            inputReady: true,
+            busy: false,
+            latestAssistantPreview: null,
+            assistantCount: 0,
+          },
+        }),
+        getConnectionStatus: async () => "connected",
+      } as never,
+    });
+
+    const postResponse = await app.inject({
+      method: "POST",
+      url: "/v1/bind",
+      headers: {
+        authorization: "Bearer test-token",
+        "x-request-source": "helper-api-test",
+      },
+      payload: {
+        provider: "deepseek-web",
+      },
+    });
+
+    expect(postResponse.statusCode).toBe(200);
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/v1/debug/request-logs?limit=5",
+      headers: {
+        authorization: "Bearer test-token",
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      scope: "helper",
+      filePath: expect.stringContaining("helper.ndjson"),
+      logs: [
+        expect.objectContaining({
+          scope: "helper",
+          method: "POST",
+          url: "/v1/bind",
+          headers: expect.objectContaining({
+            authorization: "Bearer test-token",
+            "x-request-source": "helper-api-test",
+          }),
+          body: {
+            provider: "deepseek-web",
+          },
+        }),
+      ],
+    });
+  });
+
+  it("exposes session to provider to tab bindings via authenticated debug api", async () => {
+    let nextTabId = 0;
+    const app = buildApp({
+      token: "test-token",
+      browserClient: {
+        getConnectionStatus: async () => "connected",
+        bindProviderTab: async (input: {
+          provider: string;
+          tabId?: string;
+          openNew?: boolean;
+        }) => ({
+          tabId: input.tabId ?? `tab-${++nextTabId}`,
+          url:
+            input.provider === "qwen-web"
+              ? "https://chat.qwen.ai/"
+              : "https://chat.deepseek.com/",
+          loginState: "logged_in",
+          bridgeInjected: true,
+          pageState: {
+            inputReady: true,
+            busy: false,
+            latestAssistantPreview: null,
+            assistantCount: 0,
+          },
+        }),
+        startNewChat: async () => undefined,
+        resetProvider: async () => undefined,
+        sendChatPrompt: async ({ provider, prompt }: { provider?: string; prompt: string }) => ({
+          mode: "text",
+          outputText: `${provider}:${prompt}`,
+          modelLabel: provider === "qwen-web" ? "Qwen Web" : "DeepSeek Web",
+        }),
+      } as never,
+    });
+
+    const publicResponse = await app.inject({
+      method: "POST",
+      url: "/v1/provider/chat",
+      headers: {
+        authorization: "Bearer test-token",
+        "x-web-providers-session-id": "public-session-a",
+      },
+      payload: {
+        provider: "deepseek-web",
+        model: "deepseek-web-chat",
+        messages: [{ role: "user", content: "hello" }],
+      },
+    });
+
+    const piResponse = await app.inject({
+      method: "POST",
+      url: "/internal/pi/provider/chat",
+      headers: {
+        authorization: "Bearer test-token",
+        "x-pi-session-id": "pi-session-a",
+      },
+      payload: {
+        provider: "qwen-web",
+        model: "qwen-web-chat",
+        messages: [{ role: "user", content: "hello" }],
+      },
+    });
+
+    const debugResponse = await app.inject({
+      method: "GET",
+      url: "/v1/debug/session-bindings",
+      headers: {
+        authorization: "Bearer test-token",
+      },
+    });
+
+    expect(publicResponse.statusCode).toBe(200);
+    expect(piResponse.statusCode).toBe(200);
+    expect(debugResponse.statusCode).toBe(200);
+    expect(debugResponse.json()).toEqual({
+      sessions: [
+        {
+          sessionId: "pi-session-a",
+          createdAt: expect.any(String),
+          lastSeenAt: expect.any(String),
+          providers: {
+            "qwen-web": {
+              tabId: "tab-2",
+              tabUrl: "https://chat.qwen.ai/",
+              conversationId: "conv-qwen-web-tab-2",
+              loginState: "logged_in",
+              bridgeInjected: true,
+            },
+          },
+        },
+        {
+          sessionId: "public-session-a",
+          createdAt: expect.any(String),
+          lastSeenAt: expect.any(String),
+          providers: {
+            "deepseek-web": {
+              tabId: "tab-1",
+              tabUrl: "https://chat.deepseek.com/",
+              conversationId: "conv-tab-1",
+              loginState: "logged_in",
+              bridgeInjected: true,
+            },
+          },
+        },
+      ],
     });
   });
 

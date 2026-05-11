@@ -46,8 +46,6 @@ export interface ProviderChatRequest {
     content: string;
   }>;
   sessionInit?: {
-    fingerprint: string;
-    sessionKey: string;
     prompt: string;
   };
   temperature?: number;

@@ -681,8 +681,6 @@ describe("pi provider extension", () => {
     expect(providerMessages.at(-1)?.content).toBe("inspect the project");
     expect(providerChatCall?.body.sessionInit).toMatchObject({
       prompt: expect.stringContaining('"type":"message"'),
-      fingerprint: expect.any(String),
-      sessionKey: expect.any(String),
     });
     const providerSessionInit =
       (providerChatCall?.body as { sessionInit?: { prompt?: string } } | undefined)?.sessionInit;

@@ -8,6 +8,15 @@ import { authenticationError } from "../anthropic-adapter/errors";
 import { registerGatewayModelsRoutes } from "./routes/models";
 import type { ExecutionClient as OpenAiExecutionClient } from "../openai-adapter/app";
 import type { ExecutionClient as AnthropicExecutionClient } from "../anthropic-adapter/app";
+import {
+  registerRequestLogging,
+  type RequestLogger,
+} from "../shared/request-logging";
+import {
+  LocalRequestLogStore,
+  type RequestLogStore,
+} from "../shared/request-log-store";
+import { registerRequestLogRoutes } from "../shared/request-log-routes";
 
 function isBearerAuthorized(headers: Record<string, unknown>, token: string) {
   return headers.authorization === `Bearer ${token}`;
@@ -43,19 +52,44 @@ function isOpenAiModelsAuthorized(input: {
   );
 }
 
+function isGatewayAuthorized(input: {
+  headers: Record<string, unknown>;
+  openAiToken?: string;
+  anthropicToken?: string;
+}) {
+  return isOpenAiModelsAuthorized(input);
+}
+
 export function buildGatewayApp(input: {
   openAiToken?: string;
   anthropicToken?: string;
   helperBaseUrl: string;
   helperToken?: string;
   fetchImpl?: typeof fetch;
+  requestLogger?: RequestLogger;
+  requestLogDir?: string;
+  requestLogStore?: RequestLogStore;
 }) {
   const app = Fastify();
+  const requestLogStore =
+    input.requestLogStore ??
+    (input.requestLogDir
+      ? new LocalRequestLogStore({
+          scope: "gateway",
+          dir: input.requestLogDir,
+        })
+      : null);
+  registerRequestLogging(app, {
+    scope: "gateway",
+    logger: input.requestLogger,
+    store: requestLogStore ?? undefined,
+  });
   const executionClient = createHelperClient({
     helperBaseUrl: input.helperBaseUrl,
     helperToken: input.helperToken,
     fetchImpl: input.fetchImpl,
   });
+  const fetchImpl = input.fetchImpl ?? fetch;
 
   app.addHook("onRequest", async (request, reply) => {
     const url = request.url.split("?")[0] ?? request.url;
@@ -116,9 +150,45 @@ export function buildGatewayApp(input: {
         },
       });
     }
+
+    if (
+      (input.openAiToken || input.anthropicToken) &&
+      !isGatewayAuthorized({
+        headers,
+        openAiToken: input.openAiToken,
+        anthropicToken: input.anthropicToken,
+      })
+    ) {
+      return reply.code(401).send({
+        error: {
+          code: "unauthorized",
+          message: "Unauthorized",
+        },
+      });
+    }
   });
 
   registerGatewayModelsRoutes(app);
+  if (requestLogStore) {
+    registerRequestLogRoutes(app, {
+      scope: "gateway",
+      store: requestLogStore,
+    });
+  }
+  app.get("/v1/debug/session-bindings", async (_request, reply) => {
+    const response = await fetchImpl(
+      `${input.helperBaseUrl}/v1/debug/session-bindings`,
+      {
+        method: "GET",
+        headers: input.helperToken
+          ? { authorization: `Bearer ${input.helperToken}` }
+          : {},
+      },
+    );
+
+    const payload = (await response.json()) as unknown;
+    return reply.code(response.status).send(payload);
+  });
   registerChatCompletionsRoute(
     app,
     executionClient as unknown as OpenAiExecutionClient,

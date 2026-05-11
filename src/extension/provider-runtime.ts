@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { createServer } from "node:net";
@@ -1043,19 +1043,8 @@ function buildSessionInitPrompt(context: ProviderContext) {
     return undefined;
   }
 
-  const firstTimestamp = [...context.messages]
-    .map((message) => message.timestamp)
-    .filter((timestamp) => Number.isFinite(timestamp))
-    .sort((left, right) => left - right)[0];
-  const sessionKey =
-    typeof firstTimestamp === "number"
-      ? `session-${firstTimestamp}`
-      : `session-${createHash("sha256").update(prompt).digest("hex")}`;
-
   return {
     prompt,
-    fingerprint: createHash("sha256").update(prompt).digest("hex"),
-    sessionKey,
   };
 }
 

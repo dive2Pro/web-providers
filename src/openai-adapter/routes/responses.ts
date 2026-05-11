@@ -13,10 +13,12 @@ export function registerResponsesRoute(
     try {
       const body = request.body as {
         model: string;
-        input?: Array<{
-          role: "system" | "user" | "assistant";
-          content?: Array<{ type: string; text?: string }>;
-        }>;
+        input?:
+          | string
+          | Array<{
+              role: "system" | "user" | "assistant";
+              content?: string | Array<{ type: string; text?: string }>;
+            }>;
         stream?: boolean;
         tools?: Array<{
           type?: "function";

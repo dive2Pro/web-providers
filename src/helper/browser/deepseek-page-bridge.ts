@@ -761,6 +761,42 @@ export const INJECTED_BRIDGE_SOURCE = `
     return document.querySelector("textarea");
   }
 
+  function detectBlockingMessage() {
+    const pageText = (document.body?.innerText || "").trim();
+    const path = (window.location?.pathname || "").toLowerCase();
+    const normalizedText = pageText.toLowerCase();
+
+    if (pageText.includes("One more step before you proceed")) {
+      return "One more step before you proceed...";
+    }
+
+    const signInIndicators = [
+      "sign in",
+      "log in",
+      "continue with google",
+      "continue with apple",
+      "forgot password",
+    ];
+    const authPath =
+      path.includes("login") ||
+      path.includes("signin") ||
+      path.includes("sign-in") ||
+      path.includes("auth");
+    const signInPrompt = signInIndicators.some((indicator) =>
+      normalizedText.includes(indicator),
+    );
+
+    if (authPath || signInPrompt) {
+      return "Please sign in to DeepSeek in the browser tab.";
+    }
+
+    if (document.readyState !== "complete" && !findComposer()) {
+      return "DeepSeek tab is still loading. Wait for the page to finish loading.";
+    }
+
+    return null;
+  }
+
   function findComposerControlsRoot(composer) {
     let node = composer?.parentElement || null;
     while (node) {
@@ -1048,13 +1084,10 @@ export const INJECTED_BRIDGE_SOURCE = `
     getPageState() {
       const composer = findComposer();
       const latestAssistant = latestAssistantNode();
-      const pageText = (document.body?.innerText || "").trim();
-      const blockingMessage = pageText.includes("One more step before you proceed")
-        ? "One more step before you proceed..."
-        : null;
+      const blockingMessage = detectBlockingMessage();
       const domReply = latestAssistant ? (latestAssistant.textContent || "").trim() || null : null;
       return {
-        inputReady: Boolean(composer),
+        inputReady: Boolean(!blockingMessage && composer),
         busy: Boolean(findStopButton()) || completionState.status === "streaming",
         latestAssistantPreview: domReply,
         assistantCount:

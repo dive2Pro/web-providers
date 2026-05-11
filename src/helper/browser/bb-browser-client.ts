@@ -42,6 +42,7 @@ interface BbBrowserTabListEnvelope {
 export interface BbBrowserTransport {
   getConnectionStatus(): Promise<"connected" | "disconnected">;
   getTab?(tabId: string): Promise<{ id: string; url: string }>;
+  findTabByUrl?(url: string): Promise<{ id: string; url: string } | null>;
   findDeepSeekTab(): Promise<{ id: string; url: string }>;
   findQwenTab?(): Promise<{ id: string; url: string }>;
   openDeepSeek(url: string): Promise<{ id: string; url: string } | void>;
@@ -116,6 +117,26 @@ export function unwrapEvalResult<T>(raw: unknown): T {
 
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function normalizeUrlForMatch(url: string) {
+  try {
+    const parsed = new URL(url);
+    parsed.hash = "";
+    return parsed.toString().replace(/\/$/, "");
+  } catch {
+    return url.replace(/\/$/, "");
+  }
+}
+
+export function extractDeepSeekTextboxRefFromSnapshot(snapshotText: string) {
+  const namedTextboxRef = snapshotText.match(
+    /textbox \[ref=(\d+)\] "Message DeepSeek"/i,
+  )?.[1];
+  const textboxMatches = Array.from(snapshotText.matchAll(/textbox \[ref=(\d+)\]/g));
+  const fallbackTextboxRef = textboxMatches.at(-1)?.[1];
+
+  return namedTextboxRef ?? fallbackTextboxRef ?? null;
 }
 
 export function findOpenedTabFromSnapshots(
@@ -216,6 +237,15 @@ export function createBbBrowserTransport(): BbBrowserTransport {
       return tab;
     },
 
+    async findTabByUrl(url: string) {
+      const list = await listTabs();
+      const normalizedTarget = normalizeUrlForMatch(url);
+      return (
+        list.find((entry) => normalizeUrlForMatch(entry.url) === normalizedTarget) ??
+        null
+      );
+    },
+
     async findQwenTab() {
       const list = await listTabs();
       const tab = list.find((entry) => entry.url.includes("chat.qwen.ai"));
@@ -247,23 +277,43 @@ export function createBbBrowserTransport(): BbBrowserTransport {
     async submitPrompt(tabId: string, prompt: string) {
       await selectTabById(tabId);
 
-      const { stdout: snapshotText } = await execFileAsync(
-        "bb-browser",
-        ["snapshot", "-i", "-s", "textarea"],
-        {
-          maxBuffer: 20 * 1024 * 1024,
-        },
-      );
+      const startedAt = Date.now();
+      const timeoutMs = 3_000;
+      const pollMs = 150;
+      let textboxRef: string | null = null;
 
-      const namedTextboxRef = snapshotText.match(
-        /textbox \[ref=(\d+)\] "Message DeepSeek"/i,
-      )?.[1];
-      const textboxMatches = Array.from(snapshotText.matchAll(/textbox \[ref=(\d+)\]/g));
-      const fallbackTextboxRef = textboxMatches.at(-1)?.[1];
-      const textboxRef = namedTextboxRef ?? fallbackTextboxRef;
+      while (Date.now() - startedAt <= timeoutMs) {
+        const { stdout: scopedSnapshotText } = await execFileAsync(
+          "bb-browser",
+          ["snapshot", "-i", "-s", "textarea"],
+          {
+            maxBuffer: 20 * 1024 * 1024,
+          },
+        );
+        textboxRef = extractDeepSeekTextboxRefFromSnapshot(scopedSnapshotText);
+
+        if (!textboxRef) {
+          const { stdout: fullSnapshotText } = await execFileAsync(
+            "bb-browser",
+            ["snapshot", "-i"],
+            {
+              maxBuffer: 20 * 1024 * 1024,
+            },
+          );
+          textboxRef = extractDeepSeekTextboxRefFromSnapshot(fullSnapshotText);
+        }
+
+        if (textboxRef) {
+          break;
+        }
+
+        await sleep(pollMs);
+      }
 
       if (!textboxRef) {
-        throw new Error("DeepSeek composer textbox not found in snapshot");
+        throw new Error(
+          "DeepSeek composer textbox not found in snapshot; the tab may still be loading or blocked by verification",
+        );
       }
 
       await execFileAsync("bb-browser", ["fill", textboxRef, prompt], {

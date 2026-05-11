@@ -1,8 +1,14 @@
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { buildAnthropicAdapterApp } from "../../src/anthropic-adapter/app";
 import { loadAnthropicAdapterConfig } from "../../src/anthropic-adapter/config";
+import { createHelperClient } from "../../src/anthropic-adapter/helper-client";
 import { normalizeMessagesRequest } from "../../src/anthropic-adapter/normalize";
 import { getAnthropicPublicModel } from "../../src/anthropic-adapter/models";
+
+const requestLogDirs: string[] = [];
 
 describe("anthropic adapter config", () => {
   it("falls back to local helper url and default port", () => {
@@ -90,9 +96,174 @@ describe("anthropic adapter normalization", () => {
   });
 });
 
+describe("anthropic adapter helper client", () => {
+  it("handles session title generation locally without opening a provider chat", async () => {
+    const fetchMock = vi.fn();
+    const client = createHelperClient({
+      helperBaseUrl: "http://127.0.0.1:4318",
+      helperToken: "helper-token",
+      fetchImpl: fetchMock,
+    });
+
+    const result = await client.run({
+      publicModel: "anthropic-deepseek-web-chat",
+      provider: "deepseek-web",
+      responseFormat: "anthropic_messages",
+      messages: [
+        {
+          role: "system",
+          content: [
+            "You are Claude Code, Anthropic's official CLI for Claude.",
+            "Generate a concise, sentence-case title (3-7 words) that captures the main topic or goal of this coding session.",
+            'Return JSON with a single "title" field.',
+          ].join("\n"),
+        },
+        {
+          role: "user",
+          content: "fix login button on mobile",
+        },
+      ],
+      tools: [],
+      toolChoice: "none",
+    });
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(result).toEqual({
+      mode: "text",
+      outputText: "{\"title\":\"Fix login button on mobile\"}",
+      finishReason: "stop",
+    });
+  });
+});
+
 describe("anthropic adapter app", () => {
-  afterEach(() => {
+  afterEach(async () => {
     vi.restoreAllMocks();
+    await Promise.all(
+      requestLogDirs.splice(0).map((dir) =>
+        rm(dir, { recursive: true, force: true }),
+      ),
+    );
+  });
+
+  it("logs request headers and body for anthropic routes", async () => {
+    const requestLogger = vi.fn();
+    const app = buildAnthropicAdapterApp({
+      token: "adapter-token",
+      helperBaseUrl: "http://127.0.0.1:4318",
+      helperToken: "helper-token",
+      requestLogger,
+      fetchImpl: vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          mode: "text",
+          outputText: "hello from helper",
+          finishReason: "stop",
+        }),
+      }),
+    });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/messages",
+      headers: {
+        "x-api-key": "adapter-token",
+        "x-request-source": "anthropic-test",
+      },
+      payload: {
+        model: "anthropic-deepseek-web-chat",
+        max_tokens: 64,
+        messages: [{ role: "user", content: "hello" }],
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(requestLogger).toHaveBeenCalledWith(
+      expect.objectContaining({
+        scope: "anthropic-adapter",
+        method: "POST",
+        url: "/v1/messages",
+        routePath: "/v1/messages",
+        statusCode: 200,
+        headers: expect.objectContaining({
+          "x-api-key": "adapter-token",
+          "x-request-source": "anthropic-test",
+        }),
+        body: {
+          model: "anthropic-deepseek-web-chat",
+          max_tokens: 64,
+          messages: [{ role: "user", content: "hello" }],
+        },
+      }),
+    );
+  });
+
+  it("persists request logs locally and exposes them via api", async () => {
+    const requestLogDir = await mkdtemp(
+      join(tmpdir(), "web-providers-anthropic-logs-"),
+    );
+    requestLogDirs.push(requestLogDir);
+
+    const app = buildAnthropicAdapterApp({
+      token: "adapter-token",
+      helperBaseUrl: "http://127.0.0.1:4318",
+      helperToken: "helper-token",
+      requestLogDir,
+      fetchImpl: vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          mode: "text",
+          outputText: "hello from helper",
+          finishReason: "stop",
+        }),
+      }),
+    });
+
+    const postResponse = await app.inject({
+      method: "POST",
+      url: "/v1/messages",
+      headers: {
+        "x-api-key": "adapter-token",
+        "x-request-source": "anthropic-api-test",
+      },
+      payload: {
+        model: "anthropic-deepseek-web-chat",
+        max_tokens: 64,
+        messages: [{ role: "user", content: "hello" }],
+      },
+    });
+
+    expect(postResponse.statusCode).toBe(200);
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/v1/debug/request-logs?limit=5",
+      headers: {
+        "x-api-key": "adapter-token",
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      scope: "anthropic-adapter",
+      filePath: expect.stringContaining("anthropic-adapter.ndjson"),
+      logs: [
+        expect.objectContaining({
+          scope: "anthropic-adapter",
+          method: "POST",
+          url: "/v1/messages",
+          headers: expect.objectContaining({
+            "x-api-key": "adapter-token",
+            "x-request-source": "anthropic-api-test",
+          }),
+          body: {
+            model: "anthropic-deepseek-web-chat",
+            max_tokens: 64,
+            messages: [{ role: "user", content: "hello" }],
+          },
+        }),
+      ],
+    });
   });
 
   it("accepts x-api-key auth and returns the model list", async () => {

@@ -1,11 +1,13 @@
 import { buildApp } from "./app";
 import { BbBrowserClient, createBbBrowserTransport } from "./browser/bb-browser-client";
+import { getDefaultRequestLogDir } from "../shared/request-log-store";
 
 const token = process.env.HELPER_TOKEN;
 
 const app = buildApp({
   token,
   browserClient: new BbBrowserClient(createBbBrowserTransport()),
+  requestLogDir: process.env.REQUEST_LOG_DIR ?? getDefaultRequestLogDir(),
 });
 
 const address = await app.listen({

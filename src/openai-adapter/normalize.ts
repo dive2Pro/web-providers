@@ -23,10 +23,12 @@ type ChatCompletionsTool = {
 
 type ResponsesInputMessage = {
   role: NormalizedMessage["role"];
-  content?: Array<{
-    type: string;
-    text?: string;
-  }>;
+  content?:
+    | string
+    | Array<{
+        type: string;
+        text?: string;
+      }>;
 };
 
 type ResponsesTool = {
@@ -99,10 +101,36 @@ function normalizeChatTools(tools: ChatCompletionsTool[] = []): NormalizedTool[]
 }
 
 function textFromResponseInput(content: ResponsesInputMessage["content"] = []) {
+  if (typeof content === "string") {
+    return content;
+  }
+
   return content
     .filter((item) => item.type === "input_text" && typeof item.text === "string")
     .map((item) => item.text)
     .join("\n");
+}
+
+function normalizeResponsesInput(
+  input: string | ResponsesInputMessage[] | undefined,
+): NormalizedMessage[] {
+  if (typeof input === "string") {
+    return [
+      {
+        role: "user",
+        content: input,
+      },
+    ];
+  }
+
+  if (!Array.isArray(input)) {
+    return [];
+  }
+
+  return input.map((message) => ({
+    role: message.role,
+    content: textFromResponseInput(message.content),
+  }));
 }
 
 function normalizeResponsesTools(tools: ResponsesTool[] = []): NormalizedTool[] {
@@ -188,7 +216,7 @@ export function normalizeResponsesRequest(
   body: {
     model?: string;
     stream?: boolean;
-    input?: ResponsesInputMessage[];
+    input?: string | ResponsesInputMessage[];
     tools?: ResponsesTool[];
     tool_choice?: unknown;
     temperature?: number;
@@ -204,10 +232,7 @@ export function normalizeResponsesRequest(
     publicModel: model.id,
     provider: model.provider,
     responseFormat: "responses",
-    messages: (body.input ?? []).map((message) => ({
-      role: message.role,
-      content: textFromResponseInput(message.content),
-    })),
+    messages: normalizeResponsesInput(body.input),
     tools: normalizeResponsesTools(body.tools),
     toolChoice: normalizeResponsesToolChoice(body.tool_choice),
     ...(typeof body.temperature === "number"

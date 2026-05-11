@@ -2,6 +2,7 @@ import type {
   ActiveRequest,
   BoundSession,
   ProviderRequestDebugRecord,
+  SessionBindingDebugRecord,
   SessionStateMeta,
 } from "./types";
 import type { ProviderId } from "../shared/contracts";
@@ -55,6 +56,41 @@ export class HelperState {
 
   getSessionState(sessionId: string) {
     return this.sessionMeta.get(sessionId) ?? null;
+  }
+
+  getAllSessionBindingDebugRecords() {
+    const records: SessionBindingDebugRecord[] = [];
+
+    for (const [sessionId, meta] of this.sessionMeta.entries()) {
+      const bindings = this.boundSessionsBySession.get(sessionId);
+      if (!bindings || bindings.size === 0) {
+        continue;
+      }
+
+      const providers = Object.fromEntries(
+        [...bindings.entries()].map(([provider, session]) => [
+          provider,
+          {
+            tabId: session.tabId,
+            tabUrl: session.tabUrl,
+            conversationId: session.conversationId,
+            loginState: session.loginState,
+            bridgeInjected: session.bridgeInjected,
+          },
+        ]),
+      ) as SessionBindingDebugRecord["providers"];
+
+      records.push({
+        sessionId,
+        createdAt: meta.createdAt,
+        lastSeenAt: meta.lastSeenAt,
+        providers,
+      });
+    }
+
+    return records.sort((left, right) =>
+      left.sessionId.localeCompare(right.sessionId),
+    );
   }
 
   getSessionBoundSession(sessionId: string, provider?: ProviderId) {

@@ -1,5 +1,6 @@
 import { buildGatewayApp } from "./app";
 import { loadGatewayConfig } from "./config";
+import { getDefaultRequestLogDir } from "../shared/request-log-store";
 
 const config = loadGatewayConfig();
 
@@ -8,6 +9,7 @@ const app = buildGatewayApp({
   anthropicToken: config.anthropicToken,
   helperBaseUrl: config.helperBaseUrl,
   helperToken: config.helperToken,
+  requestLogDir: process.env.REQUEST_LOG_DIR ?? getDefaultRequestLogDir(),
 });
 
 const address = await app.listen({

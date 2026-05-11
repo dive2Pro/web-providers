@@ -80,6 +80,178 @@ describe("provider chat route", () => {
     ]);
   });
 
+  it("does not reopen a new tab when rebinding the existing session fails with a non-stale error", async () => {
+    const bindCalls: Array<Record<string, unknown>> = [];
+
+    const app = buildApp({
+      token: "test-token",
+      browserClient: {
+        getConnectionStatus: async () => "connected",
+        getProviderTabUrl: async () => "https://chat.deepseek.com/",
+        bindProviderTab: async (input: {
+          provider: string;
+          tabId?: string;
+          openNew?: boolean;
+        }) => {
+          bindCalls.push(input);
+
+          if (!input.tabId) {
+            return {
+              tabId: "tab-1",
+              url: "https://chat.deepseek.com/",
+              loginState: "logged_in",
+              bridgeInjected: true,
+              pageState: {
+                inputReady: true,
+                busy: false,
+                latestAssistantPreview: null,
+                assistantCount: 0,
+              },
+            };
+          }
+
+          throw new HelperError(
+            "NOT_BOUND",
+            "DeepSeek tab is still loading. Wait for the page to finish loading and retry.",
+          );
+        },
+        resetProvider: async () => undefined,
+        startNewChat: async () => undefined,
+        sendChatPrompt: async ({ prompt }: { prompt: string }) => ({
+          mode: "text",
+          outputText: `reply:${prompt}`,
+          modelLabel: "DeepSeek Web",
+        }),
+      } as never,
+    });
+
+    const firstResponse = await app.inject({
+      method: "POST",
+      url: "/v1/provider/chat",
+      headers: {
+        authorization: "Bearer test-token",
+        "x-web-providers-session-id": "public-session-a",
+      },
+      payload: {
+        provider: "deepseek-web",
+        model: "deepseek-web-chat",
+        messages: [{ role: "user", content: "one" }],
+      },
+    });
+
+    const secondResponse = await app.inject({
+      method: "POST",
+      url: "/v1/provider/chat",
+      headers: {
+        authorization: "Bearer test-token",
+        "x-web-providers-session-id": "public-session-a",
+      },
+      payload: {
+        provider: "deepseek-web",
+        model: "deepseek-web-chat",
+        messages: [{ role: "user", content: "two" }],
+      },
+    });
+
+    expect(firstResponse.statusCode).toBe(200);
+    expect(secondResponse.statusCode).toBe(409);
+    expect(secondResponse.json()).toEqual({
+      error: "NOT_BOUND",
+      message: "DeepSeek tab is still loading. Wait for the page to finish loading and retry.",
+    });
+    expect(bindCalls).toEqual([
+      { provider: "deepseek-web", openNew: true, tabId: undefined },
+      { provider: "deepseek-web", openNew: undefined, tabId: "tab-1" },
+    ]);
+  });
+
+  it("rebinds by remembered url before opening a new tab when the tab id changes", async () => {
+    const bindCalls: Array<Record<string, unknown>> = [];
+
+    const app = buildApp({
+      token: "test-token",
+      browserClient: {
+        getConnectionStatus: async () => "connected",
+        bindProviderTab: async (input: {
+          provider: string;
+          tabId?: string;
+          openNew?: boolean;
+          openUrl?: string;
+        }) => {
+          bindCalls.push(input);
+
+          if (input.openNew) {
+            return {
+              tabId: "tab-1",
+              url: "https://chat.deepseek.com/a/chat/s/session-1",
+              loginState: "logged_in",
+              bridgeInjected: true,
+              pageState: {
+                inputReady: true,
+                busy: false,
+                latestAssistantPreview: null,
+                assistantCount: 0,
+              },
+            };
+          }
+
+          if (input.tabId) {
+            throw new Error("Tab not found: tab-1");
+          }
+
+          return {
+            tabId: "tab-2",
+            url: input.openUrl ?? "https://chat.deepseek.com/a/chat/s/session-1",
+            loginState: "logged_in",
+            bridgeInjected: true,
+            pageState: {
+              inputReady: true,
+              busy: false,
+              latestAssistantPreview: null,
+              assistantCount: 0,
+            },
+          };
+        },
+        resetProvider: async () => undefined,
+        startNewChat: async () => undefined,
+        sendChatPrompt: async ({ prompt }: { prompt: string }) => ({
+          mode: "text",
+          outputText: `reply:${prompt}`,
+          modelLabel: "DeepSeek Web",
+        }),
+      } as never,
+    });
+
+    for (const prompt of ["one", "two"]) {
+      const response = await app.inject({
+        method: "POST",
+        url: "/v1/provider/chat",
+        headers: {
+          authorization: "Bearer test-token",
+          "x-web-providers-session-id": "public-session-a",
+        },
+        payload: {
+          provider: "deepseek-web",
+          model: "deepseek-web-chat",
+          messages: [{ role: "user", content: prompt }],
+        },
+      });
+
+      expect(response.statusCode).toBe(200);
+    }
+
+    expect(bindCalls).toEqual([
+      { provider: "deepseek-web", openNew: true, tabId: undefined },
+      { provider: "deepseek-web", openNew: undefined, tabId: "tab-1" },
+      {
+        provider: "deepseek-web",
+        openNew: undefined,
+        openUrl: "https://chat.deepseek.com/a/chat/s/session-1",
+        tabId: undefined,
+      },
+    ]);
+  });
+
   it("requires provider on provider chat requests and stores debug state per provider", async () => {
     const app = buildApp({
       token: "test-token",
@@ -147,6 +319,102 @@ describe("provider chat route", () => {
         model: "qwen-web-chat",
       }),
     });
+  });
+
+  it("retries a stale remembered tab id reported as NOT_BOUND without opening a fresh tab first", async () => {
+    const bindCalls: Array<{
+      provider: string;
+      tabId?: string;
+      openNew?: boolean;
+      openUrl?: string;
+    }> = [];
+
+    const app = buildApp({
+      token: "test-token",
+      browserClient: {
+        getConnectionStatus: async () => "connected",
+        bindProviderTab: async (input: {
+          provider: string;
+          tabId?: string;
+          openNew?: boolean;
+          openUrl?: string;
+        }) => {
+          bindCalls.push(input);
+
+          if (input.openNew) {
+            return {
+              tabId: "tab-1",
+              url: "https://chat.deepseek.com/a/chat/s/session-1",
+              loginState: "logged_in",
+              bridgeInjected: true,
+              pageState: {
+                inputReady: true,
+                busy: false,
+                latestAssistantPreview: null,
+                assistantCount: 0,
+              },
+            };
+          }
+
+          if (input.tabId) {
+            throw new HelperError(
+              "NOT_BOUND",
+              "No browser tab is available for tab-1",
+            );
+          }
+
+          return {
+            tabId: "tab-2",
+            url: input.openUrl ?? "https://chat.deepseek.com/a/chat/s/session-1",
+            loginState: "logged_in",
+            bridgeInjected: true,
+            pageState: {
+              inputReady: true,
+              busy: false,
+              latestAssistantPreview: null,
+              assistantCount: 0,
+              blockingMessage: null,
+            },
+          };
+        },
+        resetProvider: async () => undefined,
+        startNewChat: async () => undefined,
+        sendChatPrompt: async ({ prompt }: { prompt: string }) => ({
+          mode: "text",
+          outputText: `reply:${prompt}`,
+          modelLabel: "DeepSeek Web",
+        }),
+      } as never,
+    });
+
+    for (const prompt of ["one", "two"]) {
+      const response = await app.inject({
+        method: "POST",
+        url: "/v1/provider/chat",
+        headers: {
+          authorization: "Bearer test-token",
+          "x-web-providers-session-id": "public-session-stale-not-bound",
+        },
+        payload: {
+          provider: "deepseek-web",
+          model: "deepseek-web-chat",
+          messages: [{ role: "user", content: prompt }],
+        },
+      });
+
+      expect(response.statusCode).toBe(200);
+    }
+
+    expect(bindCalls).toEqual([
+      { provider: "deepseek-web", openNew: true, tabId: undefined },
+      { provider: "deepseek-web", openNew: undefined, tabId: "tab-1" },
+      {
+        provider: "deepseek-web",
+        openNew: undefined,
+        openUrl: "https://chat.deepseek.com/a/chat/s/session-1",
+        tabId: undefined,
+      },
+    ]);
   });
 
   it("accepts provider messages and returns structured text output", async () => {
@@ -428,8 +696,6 @@ describe("provider chat route", () => {
         model: "deepseek-web-chat",
         messages: [{ role: "user", content: "hello" }],
         sessionInit: {
-          fingerprint: "fp-1",
-          sessionKey: "session-1",
           prompt: "You are terse.",
         },
       },
@@ -439,7 +705,7 @@ describe("provider chat route", () => {
     expect(capturedPrompt).toBe("You are terse.\n\nhello");
   });
 
-  it("reuses the current provider chat when the initialization fingerprint is unchanged", async () => {
+  it("reuses the current provider chat on repeated initialized requests", async () => {
     const prompts: string[] = [];
     let freshChatCount = 0;
 
@@ -488,8 +754,6 @@ describe("provider chat route", () => {
         model: "deepseek-web-chat",
         messages: [{ role: "user", content: "hello" }],
         sessionInit: {
-          fingerprint: "fp-1",
-          sessionKey: "session-1",
           prompt: "You are terse.",
         },
       },
@@ -503,8 +767,6 @@ describe("provider chat route", () => {
         model: "deepseek-web-chat",
         messages: [{ role: "user", content: "continue" }],
         sessionInit: {
-          fingerprint: "fp-1",
-          sessionKey: "session-1",
           prompt: "You are terse.",
         },
       },
@@ -514,7 +776,7 @@ describe("provider chat route", () => {
     expect(prompts).toEqual(["You are terse.\n\nhello", "continue"]);
   });
 
-  it("starts a fresh provider chat when the session key changes even if the fingerprint is unchanged", async () => {
+  it("does not start a fresh provider chat when later requests change the initialization prompt", async () => {
     const prompts: string[] = [];
     let freshChatCount = 0;
 
@@ -563,8 +825,6 @@ describe("provider chat route", () => {
         model: "deepseek-web-chat",
         messages: [{ role: "user", content: "hello" }],
         sessionInit: {
-          fingerprint: "fp-1",
-          sessionKey: "session-1",
           prompt: "You are terse.",
         },
       },
@@ -578,15 +838,13 @@ describe("provider chat route", () => {
         model: "deepseek-web-chat",
         messages: [{ role: "user", content: "hello again" }],
         sessionInit: {
-          fingerprint: "fp-1",
-          sessionKey: "session-2",
-          prompt: "You are terse.",
+          prompt: "You are detailed.",
         },
       },
     });
 
-    expect(freshChatCount).toBe(2);
-    expect(prompts).toEqual(["You are terse.\n\nhello", "You are terse.\n\nhello again"]);
+    expect(freshChatCount).toBe(1);
+    expect(prompts).toEqual(["You are terse.\n\nhello", "hello again"]);
   });
 
   it("preserves provider initialization across repeated binds on the same tab", async () => {
@@ -638,8 +896,6 @@ describe("provider chat route", () => {
         model: "deepseek-web-chat",
         messages: [{ role: "user", content: "hello" }],
         sessionInit: {
-          fingerprint: "fp-1",
-          sessionKey: "session-1",
           prompt: "You are terse.",
         },
       },
@@ -659,8 +915,6 @@ describe("provider chat route", () => {
         model: "deepseek-web-chat",
         messages: [{ role: "user", content: "continue" }],
         sessionInit: {
-          fingerprint: "fp-1",
-          sessionKey: "session-1",
           prompt: "You are terse.",
         },
       },
@@ -726,8 +980,6 @@ describe("provider chat route", () => {
         model: "deepseek-web-chat",
         messages: [{ role: "user", content: "hello" }],
         sessionInit: {
-          fingerprint: "fp-1",
-          sessionKey: "session-1",
           prompt: "You are terse.",
         },
       },
@@ -747,8 +999,6 @@ describe("provider chat route", () => {
         model: "deepseek-web-chat",
         messages: [{ role: "user", content: "continue" }],
         sessionInit: {
-          fingerprint: "fp-1",
-          sessionKey: "session-1",
           prompt: "You are terse.",
         },
       },

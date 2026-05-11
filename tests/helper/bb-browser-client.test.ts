@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { HelperError } from "../../src/helper/errors";
 import {
   BbBrowserClient,
+  extractDeepSeekTextboxRefFromSnapshot,
   extractTabsFromTabList,
   findOpenedTabFromSnapshots,
   unwrapEvalResult,
@@ -57,6 +58,22 @@ describe("BbBrowserClient", () => {
     });
   });
 
+  it("extracts the DeepSeek textbox ref from scoped or full snapshots", () => {
+    expect(
+      extractDeepSeekTextboxRefFromSnapshot(
+        '标题: DeepSeek\ntextbox [ref=21] "Message DeepSeek"\nbutton [ref=22]',
+      ),
+    ).toBe("21");
+
+    expect(
+      extractDeepSeekTextboxRefFromSnapshot(
+        "div [ref=0]\ntextbox [ref=9]\nbutton [ref=10]",
+      ),
+    ).toBe("9");
+
+    expect(extractDeepSeekTextboxRefFromSnapshot("div [ref=0]\nbutton [ref=1]")).toBeNull();
+  });
+
   it("detects a newly opened matching tab or a tab navigated into the provider page", () => {
     expect(
       findOpenedTabFromSnapshots(
@@ -99,6 +116,15 @@ describe("BbBrowserClient", () => {
       submitPrompt: async () => undefined,
       evaluate: async <T>(tabId: string, script: string) => {
         evaluations.push({ tabId, script });
+        if (script.includes("getPageState()")) {
+          return {
+            inputReady: true,
+            busy: false,
+            latestAssistantPreview: null,
+            assistantCount: 0,
+            blockingMessage: null,
+          } as T;
+        }
         return undefined as T;
       },
     });
@@ -115,9 +141,10 @@ describe("BbBrowserClient", () => {
         busy: false,
         latestAssistantPreview: null,
         assistantCount: 0,
+        blockingMessage: null,
       },
     });
-    expect(evaluations).toHaveLength(1);
+    expect(evaluations).toHaveLength(2);
     expect(evaluations[0]?.tabId).toBe("tab-1");
   });
 
@@ -134,6 +161,15 @@ describe("BbBrowserClient", () => {
       submitPrompt: async () => undefined,
       evaluate: async <T>(tabId: string, script: string) => {
         evaluations.push({ tabId, script });
+        if (script.includes("getPageState()")) {
+          return {
+            inputReady: true,
+            busy: false,
+            latestAssistantPreview: null,
+            assistantCount: 0,
+            blockingMessage: null,
+          } as T;
+        }
         return undefined as T;
       },
     });
@@ -146,8 +182,44 @@ describe("BbBrowserClient", () => {
       loginState: "logged_in",
       bridgeInjected: true,
     });
-    expect(evaluations).toHaveLength(1);
+    expect(evaluations).toHaveLength(2);
     expect(evaluations[0]?.tabId).toBe("tab-deepseek");
+  });
+
+  it("returns logged_out when the DeepSeek tab is still loading", async () => {
+    const client = new BbBrowserClient({
+      getConnectionStatus: async () => "connected",
+      findDeepSeekTab: async () => ({
+        id: "tab-loading",
+        url: "https://chat.deepseek.com/",
+      }),
+      openDeepSeek: async () => undefined,
+      submitPrompt: async () => undefined,
+      evaluate: async <T>(_tabId: string, script: string) => {
+        if (script.includes("getPageState()")) {
+          return {
+            inputReady: false,
+            busy: false,
+            latestAssistantPreview: null,
+            assistantCount: 0,
+            blockingMessage:
+              "DeepSeek tab is still loading. Wait for the page to finish loading.",
+          } as T;
+        }
+        return undefined as T;
+      },
+    });
+
+    const result = await client.bindDeepSeekTab();
+
+    expect(result).toMatchObject({
+      loginState: "logged_out",
+      pageState: {
+        inputReady: false,
+        blockingMessage:
+          "DeepSeek tab is still loading. Wait for the page to finish loading.",
+      },
+    });
   });
 
   it("binds a Qwen tab through provider dispatch", async () => {
@@ -295,6 +367,62 @@ describe("BbBrowserClient", () => {
     expect(opened).toEqual(["https://chat.deepseek.com"]);
     expect(evaluations[0]).toContain("tab-stale");
     expect(evaluations[1]).toContain("tab-fresh");
+  });
+
+  it("does not open a new DeepSeek tab immediately when a remembered tab id is stale", async () => {
+    const opened: string[] = [];
+
+    const client = new BbBrowserClient({
+      getConnectionStatus: async () => "connected",
+      getTab: async () => {
+        throw new HelperError("NOT_BOUND", "No browser tab is available for tab-stale");
+      },
+      findDeepSeekTab: async () => {
+        throw new HelperError("NOT_BOUND", "No logged-in DeepSeek tab is available");
+      },
+      openDeepSeek: async (url: string) => {
+        opened.push(url);
+      },
+      submitPrompt: async () => undefined,
+      evaluate: async <T>() => undefined as T,
+    } as never);
+
+    await expect(
+      client.bindProviderTab({ provider: "deepseek-web", tabId: "tab-stale" }),
+    ).rejects.toEqual(
+      new HelperError("NOT_BOUND", "No browser tab is available for tab-stale"),
+    );
+    expect(opened).toEqual([]);
+  });
+
+  it("does not open a new Qwen tab immediately when a remembered tab id is stale", async () => {
+    const opened: string[] = [];
+
+    const client = new BbBrowserClient({
+      getConnectionStatus: async () => "connected",
+      getTab: async () => {
+        throw new HelperError("NOT_BOUND", "No browser tab is available for tab-stale");
+      },
+      findDeepSeekTab: async () => {
+        throw new HelperError("NOT_BOUND", "No logged-in DeepSeek tab is available");
+      },
+      findQwenTab: async () => {
+        throw new HelperError("NOT_BOUND", "No logged-in Qwen tab is available");
+      },
+      openDeepSeek: async () => undefined,
+      openQwen: async (url: string) => {
+        opened.push(url);
+      },
+      submitPrompt: async () => undefined,
+      evaluate: async <T>() => undefined as T,
+    } as never);
+
+    await expect(
+      client.bindProviderTab({ provider: "qwen-web", tabId: "tab-stale" }),
+    ).rejects.toEqual(
+      new HelperError("NOT_BOUND", "No browser tab is available for tab-stale"),
+    );
+    expect(opened).toEqual([]);
   });
 
   it("treats expected target navigation during startNewChat as success and reinjects the bridge", async () => {

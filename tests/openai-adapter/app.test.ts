@@ -1,7 +1,12 @@
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { buildOpenAiAdapterApp } from "../../src/openai-adapter/app";
 import { loadOpenAiAdapterConfig } from "../../src/openai-adapter/config";
 import { createHelperClient } from "../../src/openai-adapter/helper-client";
+
+const requestLogDirs: string[] = [];
 
 describe("openai adapter helper client", () => {
   it("maps normalized requests into helper provider chat payloads", async () => {
@@ -223,6 +228,45 @@ describe("openai adapter helper client", () => {
       }),
     );
   });
+
+  it("handles session title generation locally without opening a provider chat", async () => {
+    const fetchMock = vi.fn();
+
+    const client = createHelperClient({
+      helperBaseUrl: "http://127.0.0.1:4318",
+      helperToken: "helper-token",
+      fetchImpl: fetchMock,
+    });
+
+    const result = await client.run({
+      publicModel: "deepseek-web-chat",
+      provider: "deepseek-web",
+      responseFormat: "responses",
+      messages: [
+        {
+          role: "system",
+          content: [
+            "You are Claude Code, Anthropic's official CLI for Claude.",
+            "Generate a concise, sentence-case title (3-7 words) that captures the main topic or goal of this coding session.",
+            'Return JSON with a single "title" field.',
+          ].join("\n"),
+        },
+        {
+          role: "user",
+          content: "add OAuth authentication",
+        },
+      ],
+      tools: [],
+      toolChoice: "none",
+    });
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(result).toEqual({
+      mode: "text",
+      outputText: "{\"title\":\"Add OAuth authentication\"}",
+      finishReason: "stop",
+    });
+  });
 });
 
 describe("openai adapter config", () => {
@@ -255,8 +299,129 @@ describe("openai adapter config", () => {
 });
 
 describe("openai adapter app", () => {
-  afterEach(() => {
+  afterEach(async () => {
     vi.restoreAllMocks();
+    await Promise.all(
+      requestLogDirs.splice(0).map((dir) =>
+        rm(dir, { recursive: true, force: true }),
+      ),
+    );
+  });
+
+  it("logs request headers and body for adapter routes", async () => {
+    const requestLogger = vi.fn();
+    const app = buildOpenAiAdapterApp({
+      token: "adapter-token",
+      helperBaseUrl: "http://127.0.0.1:4318",
+      helperToken: "helper-token",
+      requestLogger,
+      fetchImpl: vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          mode: "text",
+          outputText: "hello from helper",
+          finishReason: "stop",
+        }),
+      }),
+    });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/chat/completions",
+      headers: {
+        authorization: "Bearer adapter-token",
+        "x-request-source": "openai-test",
+      },
+      payload: {
+        model: "deepseek-web-chat",
+        messages: [{ role: "user", content: "hello" }],
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(requestLogger).toHaveBeenCalledWith(
+      expect.objectContaining({
+        scope: "openai-adapter",
+        method: "POST",
+        url: "/v1/chat/completions",
+        routePath: "/v1/chat/completions",
+        statusCode: 200,
+        headers: expect.objectContaining({
+          authorization: "Bearer adapter-token",
+          "x-request-source": "openai-test",
+        }),
+        body: {
+          model: "deepseek-web-chat",
+          messages: [{ role: "user", content: "hello" }],
+        },
+      }),
+    );
+  });
+
+  it("persists request logs locally and exposes them via api", async () => {
+    const requestLogDir = await mkdtemp(
+      join(tmpdir(), "web-providers-openai-logs-"),
+    );
+    requestLogDirs.push(requestLogDir);
+
+    const app = buildOpenAiAdapterApp({
+      token: "adapter-token",
+      helperBaseUrl: "http://127.0.0.1:4318",
+      helperToken: "helper-token",
+      requestLogDir,
+      fetchImpl: vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          mode: "text",
+          outputText: "hello from helper",
+          finishReason: "stop",
+        }),
+      }),
+    });
+
+    const postResponse = await app.inject({
+      method: "POST",
+      url: "/v1/chat/completions",
+      headers: {
+        authorization: "Bearer adapter-token",
+        "x-request-source": "openai-api-test",
+      },
+      payload: {
+        model: "deepseek-web-chat",
+        messages: [{ role: "user", content: "hello" }],
+      },
+    });
+
+    expect(postResponse.statusCode).toBe(200);
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/v1/debug/request-logs?limit=5",
+      headers: {
+        authorization: "Bearer adapter-token",
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      scope: "openai-adapter",
+      filePath: expect.stringContaining("openai-adapter.ndjson"),
+      logs: [
+        expect.objectContaining({
+          scope: "openai-adapter",
+          method: "POST",
+          url: "/v1/chat/completions",
+          headers: expect.objectContaining({
+            authorization: "Bearer adapter-token",
+            "x-request-source": "openai-api-test",
+          }),
+          body: {
+            model: "deepseek-web-chat",
+            messages: [{ role: "user", content: "hello" }],
+          },
+        }),
+      ],
+    });
   });
 
   it("requires bearer auth for public routes", async () => {
@@ -417,6 +582,47 @@ describe("openai adapter app", () => {
         {
           type: "function_call",
           name: "read_file",
+        },
+      ],
+    });
+  });
+
+  it("accepts string input for responses requests", async () => {
+    const app = buildOpenAiAdapterApp({
+      token: "adapter-token",
+      helperBaseUrl: "http://127.0.0.1:4318",
+      helperToken: "helper-token",
+      fetchImpl: vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          mode: "text",
+          outputText: "OK",
+          finishReason: "stop",
+        }),
+      }),
+    });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/responses",
+      headers: {
+        authorization: "Bearer adapter-token",
+      },
+      payload: {
+        model: "deepseek-web-chat",
+        input: "只回复 OK",
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      object: "response",
+      model: "deepseek-web-chat",
+      output: [
+        {
+          type: "message",
+          role: "assistant",
+          content: [{ type: "output_text", text: "OK" }],
         },
       ],
     });

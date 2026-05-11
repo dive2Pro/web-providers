@@ -1,5 +1,6 @@
 import { buildAnthropicAdapterApp } from "./app";
 import { loadAnthropicAdapterConfig } from "./config";
+import { getDefaultRequestLogDir } from "../shared/request-log-store";
 
 const config = loadAnthropicAdapterConfig();
 
@@ -7,6 +8,7 @@ const app = buildAnthropicAdapterApp({
   token: config.token,
   helperBaseUrl: config.helperBaseUrl,
   helperToken: config.helperToken,
+  requestLogDir: process.env.REQUEST_LOG_DIR ?? getDefaultRequestLogDir(),
 });
 
 const address = await app.listen({
