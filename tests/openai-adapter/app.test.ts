@@ -540,10 +540,12 @@ describe("openai adapter app", () => {
         ok: true,
         json: async () => ({
           mode: "json_fallback",
-          toolCall: {
-            name: "read_file",
-            argumentsJson: "{\"path\":\"src/helper/main.ts\"}",
-          },
+          toolCalls: [
+            {
+              name: "read_file",
+              argumentsJson: "{\"path\":\"src/helper/main.ts\"}",
+            },
+          ],
           finishReason: "stop",
         }),
       }),
@@ -764,10 +766,12 @@ describe("openai adapter app", () => {
         ok: true,
         json: async () => ({
           mode: "json_fallback",
-          toolCall: {
-            name: "read_file",
-            argumentsJson: "{\"path\":\"src/helper/main.ts\"}",
-          },
+          toolCalls: [
+            {
+              name: "read_file",
+              argumentsJson: "{\"path\":\"src/helper/main.ts\"}",
+            },
+          ],
           finishReason: "stop",
         }),
       }),
@@ -925,10 +929,12 @@ describe("openai adapter app", () => {
         ok: true,
         json: async () => ({
           mode: "json_fallback",
-          toolCall: {
-            name: "read_file",
-            argumentsJson: "{\"path\":\"src/helper/main.ts\"}",
-          },
+          toolCalls: [
+            {
+              name: "read_file",
+              argumentsJson: "{\"path\":\"src/helper/main.ts\"}",
+            },
+          ],
           finishReason: "stop",
         }),
       }),

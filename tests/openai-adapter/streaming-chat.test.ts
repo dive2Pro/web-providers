@@ -80,10 +80,12 @@ describe("serializeChatCompletionsStream", () => {
       model,
       result: {
         mode: "json_fallback",
-        toolCall: {
-          name: "read_file",
-          argumentsJson: "{\"path\":\"src/helper/main.ts\"}",
-        },
+        toolCalls: [
+          {
+            name: "read_file",
+            argumentsJson: "{\"path\":\"src/helper/main.ts\"}",
+          },
+        ],
         finishReason: "stop",
       },
     });
@@ -161,10 +163,12 @@ describe("serializeChatCompletionsStream", () => {
       model,
       result: {
         mode: "native_tool_call",
-        toolCall: {
-          name: "read_file",
-          argumentsJson: "{\"path\":\"src/helper/main.ts\"}",
-        },
+        toolCalls: [
+          {
+            name: "read_file",
+            argumentsJson: "{\"path\":\"src/helper/main.ts\"}",
+          },
+        ],
         finishReason: "stop",
       },
     });

@@ -53,6 +53,11 @@ export interface ProviderChatRequest {
   abortKey?: string;
 }
 
+export interface ProviderToolCall {
+  name: string;
+  argumentsJson: string;
+}
+
 export type ProviderChatResponse =
   | {
       mode: "text";
@@ -64,10 +69,7 @@ export type ProviderChatResponse =
   | {
       mode: "native_tool_call" | "json_fallback";
       thinkingText?: string;
-      toolCall: {
-        name: string;
-        argumentsJson: string;
-      };
+      toolCalls: ProviderToolCall[];
       finishReason: "stop" | "error";
       modelLabel?: string;
       outputText?: string;

@@ -39,10 +39,12 @@ describe("chat completions serializer", () => {
         model: "deepseek-web-tools",
         result: {
           mode: "native_tool_call",
-          toolCall: {
-            name: "read_file",
-            argumentsJson: "{\"path\":\"src/index.ts\"}",
-          },
+          toolCalls: [
+            {
+              name: "read_file",
+              argumentsJson: "{\"path\":\"src/index.ts\"}",
+            },
+          ],
           finishReason: "stop",
         },
       }),

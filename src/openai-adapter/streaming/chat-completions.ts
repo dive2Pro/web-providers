@@ -67,17 +67,15 @@ export function serializeChatCompletionsStream(
       {
         index: 0,
         delta: {
-          tool_calls: [
-            {
-              index: 0,
-              id: `${id}-tool-1`,
-              type: "function",
-              function: {
-                name: result.toolCall.name,
-                arguments: result.toolCall.argumentsJson,
-              },
+          tool_calls: result.toolCalls.map((toolCall, index) => ({
+            index,
+            id: `${id}-tool-${index + 1}`,
+            type: "function" as const,
+            function: {
+              name: toolCall.name,
+              arguments: toolCall.argumentsJson,
             },
-          ],
+          })),
         },
         finish_reason: null,
       },

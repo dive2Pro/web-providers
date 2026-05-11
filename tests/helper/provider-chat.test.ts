@@ -553,10 +553,12 @@ describe("provider chat route", () => {
         resetPageBridge: async () => undefined,
         sendChatPrompt: async () => ({
           mode: "json_fallback",
-          toolCall: {
-            name: "read",
-            argumentsJson: "{\"path\":\"src/index.ts\"}",
-          },
+          toolCalls: [
+            {
+              name: "read",
+              argumentsJson: "{\"path\":\"src/index.ts\"}",
+            },
+          ],
           modelLabel: "DeepSeek Web",
         }),
       } as never,
@@ -583,10 +585,12 @@ describe("provider chat route", () => {
     expect(response.statusCode).toBe(200);
     expect(response.json()).toEqual({
       mode: "json_fallback",
-      toolCall: {
-        name: "read",
-        argumentsJson: "{\"path\":\"src/index.ts\"}",
-      },
+      toolCalls: [
+        {
+          name: "read",
+          argumentsJson: "{\"path\":\"src/index.ts\"}",
+        },
+      ],
       finishReason: "stop",
       modelLabel: "DeepSeek Web",
     });

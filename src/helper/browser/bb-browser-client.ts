@@ -978,10 +978,10 @@ export class BbBrowserClient implements BrowserAutomationClient {
               }
             | {
                 mode: "native_tool_call";
-                toolCall: {
+                toolCalls: Array<{
                   name: string;
                   argumentsJson: string;
-                };
+                }>;
                 outputText?: string;
                 thinkingText?: string;
               }
@@ -1059,7 +1059,7 @@ export class BbBrowserClient implements BrowserAutomationClient {
       if (
         terminalObserved &&
         streamedTurn?.mode === "native_tool_call" &&
-        streamedTurn.toolCall
+        streamedTurn.toolCalls.length > 0
       ) {
         finalReply = (streamedTurn.outputText ?? "").trim();
         return {
@@ -1067,7 +1067,7 @@ export class BbBrowserClient implements BrowserAutomationClient {
           ...(streamedTurn.thinkingText
             ? { thinkingText: streamedTurn.thinkingText }
             : {}),
-          toolCall: streamedTurn.toolCall,
+          toolCalls: streamedTurn.toolCalls,
           ...(finalReply.length > 0 ? { outputText: finalReply } : {}),
           debug: buildAutomationDebug({
             source: "bridge_stream",

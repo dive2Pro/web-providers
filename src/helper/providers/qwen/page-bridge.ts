@@ -2,7 +2,23 @@ import { HelperError } from "../../errors";
 
 export const QWEN_HOST_ALLOWLIST = new Set(["chat.qwen.ai"]);
 const QWEN_COMPLETION_PATH = "/api/v2/chat/completions";
-export const QWEN_BRIDGE_VERSION = 6;
+export const QWEN_BRIDGE_VERSION = 7;
+
+function pushUniqueToolCall(
+  toolCalls: Array<{ name: string; argumentsJson: string }>,
+  toolCall: { name: string; argumentsJson: string },
+) {
+  const key = `${toolCall.name}\u0000${toolCall.argumentsJson}`;
+  if (
+    toolCalls.some(
+      (entry) => `${entry.name}\u0000${entry.argumentsJson}` === key,
+    )
+  ) {
+    return;
+  }
+
+  toolCalls.push(toolCall);
+}
 
 export function assertQwenUrl(rawUrl: string) {
   const url = new URL(rawUrl);
@@ -17,7 +33,8 @@ export function assertQwenUrl(rawUrl: string) {
   return url.toString();
 }
 
-function normalizeQwenToolCall(delta: Record<string, unknown>) {
+function normalizeQwenToolCalls(delta: Record<string, unknown>) {
+  const toolCalls: Array<{ name: string; argumentsJson: string }> = [];
   const candidates = [
     delta.tool_calls,
     delta.toolCalls,
@@ -52,22 +69,23 @@ function normalizeQwenToolCall(delta: Record<string, unknown>) {
       }
 
       if (typeof rawArguments === "string") {
-        return {
+        pushUniqueToolCall(toolCalls, {
           name,
           argumentsJson: rawArguments,
-        };
+        });
+        continue;
       }
 
       if (rawArguments && typeof rawArguments === "object" && !Array.isArray(rawArguments)) {
-        return {
+        pushUniqueToolCall(toolCalls, {
           name,
           argumentsJson: JSON.stringify(rawArguments),
-        };
+        });
       }
     }
   }
 
-  return null;
+  return toolCalls;
 }
 
 function parseQwenDeltaText(content: unknown, depth = 0): string {
@@ -117,7 +135,7 @@ function parseQwenDeltaText(content: unknown, depth = 0): string {
 function parseQwenCompletionSseState(body: string) {
   let thinkingText = "";
   let outputText = "";
-  let toolCall: { name: string; argumentsJson: string } | null = null;
+  const toolCalls: Array<{ name: string; argumentsJson: string }> = [];
   let finished = false;
 
   for (const rawLine of body.split("\n")) {
@@ -170,11 +188,11 @@ function parseQwenCompletionSseState(body: string) {
               ? delta.answer
               : delta,
       );
-      const nextToolCall = normalizeQwenToolCall(delta);
+      const nextToolCalls = normalizeQwenToolCalls(delta);
       const status = typeof delta.status === "string" ? delta.status : null;
 
-      if (nextToolCall) {
-        toolCall = nextToolCall;
+      for (const nextToolCall of nextToolCalls) {
+        pushUniqueToolCall(toolCalls, nextToolCall);
       }
 
       if (status === "finished") {
@@ -223,12 +241,12 @@ function parseQwenCompletionSseState(body: string) {
     }
   }
 
-  if (toolCall) {
+  if (toolCalls.length > 0) {
     return {
       mode: "native_tool_call" as const,
       finished,
       ...(thinkingText.length > 0 ? { thinkingText } : {}),
-      toolCall,
+      toolCalls,
       outputText: outputText.trim(),
     };
   }
@@ -247,13 +265,15 @@ export function parseQwenCompletionSse(body: string) {
 }
 
 function createQwenBridge() {
-  const normalizeToolCall = normalizeQwenToolCall.toString();
+  const pushToolCall = pushUniqueToolCall.toString();
+  const normalizeToolCalls = normalizeQwenToolCalls.toString();
   const parseDeltaText = parseQwenDeltaText.toString();
   const parseState = parseQwenCompletionSseState.toString();
   const parseSse = parseQwenCompletionSse.toString();
 
   return `(() => {
-    ${normalizeToolCall}
+    ${pushToolCall}
+    ${normalizeToolCalls}
     ${parseDeltaText}
     ${parseState}
     ${parseSse}
@@ -268,7 +288,7 @@ function createQwenBridge() {
         closed: false,
         thinking: "",
         streamReply: "",
-        toolCall: null,
+        toolCalls: [],
         parserSummary: "",
         lastError: "",
         lastEventAt: 0,
@@ -358,7 +378,7 @@ function createQwenBridge() {
       const state = ensureState();
       const reply = (state.streamReply || "").trim();
       const thinking = (state.thinking || "").trim();
-      const toolCall = state.toolCall;
+      const toolCalls = Array.isArray(state.toolCalls) ? state.toolCalls : [];
 
       return {
         observed: state.observed,
@@ -367,10 +387,10 @@ function createQwenBridge() {
         terminalAt: state.terminalAt || null,
         parserSummary: state.parserSummary || null,
         lastError: state.lastError || null,
-        turn: toolCall
+        turn: toolCalls.length > 0
           ? {
               mode: "native_tool_call",
-              toolCall,
+              toolCalls,
               ...(reply.length > 0 ? { outputText: reply } : {}),
               ...(thinking.length > 0 ? { thinkingText: thinking } : {}),
             }
@@ -412,13 +432,16 @@ function createQwenBridge() {
             finished: parsed.finished,
             hasThinking: Boolean(parsed.thinkingText),
             hasOutputText: Boolean(parsed.outputText),
-            hasToolCall: Boolean(parsed.mode !== "text" && parsed.toolCall),
+            toolCallCount:
+              parsed.mode !== "text" ? parsed.toolCalls.length : 0,
           });
           state.thinking = parsed.thinkingText || "";
           state.streamReply = parsed.outputText || "";
-          state.toolCall = parsed.mode !== "text" ? parsed.toolCall : null;
+          state.toolCalls = parsed.mode !== "text" ? parsed.toolCalls : [];
           state.status =
-            parsed.finished || state.streamReply.trim().length > 0 || state.toolCall
+            parsed.finished ||
+            state.streamReply.trim().length > 0 ||
+            state.toolCalls.length > 0
               ? "finished"
               : "idle";
           state.closed = true;

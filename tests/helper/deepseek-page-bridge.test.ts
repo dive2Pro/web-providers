@@ -298,10 +298,12 @@ describe("deepseek page bridge", () => {
       }),
     ).toEqual({
       mode: "native_tool_call",
-      toolCall: {
-        name: "read",
-        argumentsJson: "{\"path\":\"src/app.ts\"}",
-      },
+      toolCalls: [
+        {
+          name: "read",
+          argumentsJson: "{\"path\":\"src/app.ts\"}",
+        },
+      ],
     });
   });
 
@@ -313,10 +315,12 @@ describe("deepseek page bridge", () => {
       }),
     ).toEqual({
       mode: "json_fallback",
-      toolCall: {
-        name: "read",
-        argumentsJson: "{\"path\":\"src/app.ts\"}",
-      },
+      toolCalls: [
+        {
+          name: "read",
+          argumentsJson: "{\"path\":\"src/app.ts\"}",
+        },
+      ],
       outputText: "{\"type\":\"tool_call\",\"name\":\"read\",\"arguments\":{\"path\":\"src/app.ts\"}}",
     });
   });
@@ -361,10 +365,12 @@ describe("deepseek page bridge", () => {
       }),
     ).toEqual({
       mode: "json_fallback",
-      toolCall: {
-        name: "bash",
-        argumentsJson: "{\"cmd\":\"ls -la\"}",
-      },
+      toolCalls: [
+        {
+          name: "bash",
+          argumentsJson: "{\"cmd\":\"ls -la\"}",
+        },
+      ],
       outputText: reply,
     });
   });
@@ -382,10 +388,12 @@ describe("deepseek page bridge", () => {
       }),
     ).toEqual({
       mode: "json_fallback",
-      toolCall: {
-        name: "bash",
-        argumentsJson: "{\"cmd\":\"ls -la\"}",
-      },
+      toolCalls: [
+        {
+          name: "bash",
+          argumentsJson: "{\"cmd\":\"ls -la\"}",
+        },
+      ],
       outputText: reply,
     });
   });
@@ -405,6 +413,30 @@ describe("deepseek page bridge", () => {
     ).toEqual({
       mode: "text",
       outputText: reply,
+    });
+  });
+
+  it("classifies a tool_calls JSON envelope into multiple structured tool calls", () => {
+    expect(
+      classifyCompletionTurn({
+        reply:
+          "{\"type\":\"tool_calls\",\"calls\":[{\"name\":\"read\",\"arguments\":{\"path\":\"src/app.ts\"}},{\"name\":\"bash\",\"arguments\":{\"cmd\":\"pwd\"}}]}",
+        rawEvents: [],
+      }),
+    ).toEqual({
+      mode: "json_fallback",
+      toolCalls: [
+        {
+          name: "read",
+          argumentsJson: "{\"path\":\"src/app.ts\"}",
+        },
+        {
+          name: "bash",
+          argumentsJson: "{\"cmd\":\"pwd\"}",
+        },
+      ],
+      outputText:
+        "{\"type\":\"tool_calls\",\"calls\":[{\"name\":\"read\",\"arguments\":{\"path\":\"src/app.ts\"}},{\"name\":\"bash\",\"arguments\":{\"cmd\":\"pwd\"}}]}",
     });
   });
 
@@ -1014,10 +1046,12 @@ describe("deepseek page bridge", () => {
       ok: true,
       turn: {
         mode: "json_fallback",
-        toolCall: {
-          name: "read",
-          argumentsJson: "{\"path\":\"src/app.ts\"}",
-        },
+        toolCalls: [
+          {
+            name: "read",
+            argumentsJson: "{\"path\":\"src/app.ts\"}",
+          },
+        ],
         outputText:
           "{\"type\":\"tool_call\",\"name\":\"read\",\"arguments\":{\"path\":\"src/app.ts\"}}",
       },

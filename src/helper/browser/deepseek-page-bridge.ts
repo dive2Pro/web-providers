@@ -1,9 +1,9 @@
 import { HelperError } from "../errors";
 import type {
   ProviderTextTurn,
-  ProviderToolCall,
   ProviderToolCallTurn,
 } from "./types";
+import type { ProviderToolCall } from "../../shared/contracts";
 
 export const DEEPSEEK_HOST_ALLOWLIST = new Set([
   "chat.deepseek.com",
@@ -40,9 +40,25 @@ type JsonEnvelopeDetection =
       content: string;
     }
   | {
-      kind: "tool_call";
-      toolCall: ProviderToolCall;
+      kind: "tool_calls";
+      toolCalls: ProviderToolCall[];
     };
+
+function pushUniqueToolCall(
+  toolCalls: ProviderToolCall[],
+  toolCall: ProviderToolCall,
+) {
+  const key = `${toolCall.name}\u0000${toolCall.argumentsJson}`;
+  if (
+    toolCalls.some(
+      (entry) => `${entry.name}\u0000${entry.argumentsJson}` === key,
+    )
+  ) {
+    return;
+  }
+
+  toolCalls.push(toolCall);
+}
 
 function normalizeToolCallArguments(value: unknown) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
@@ -96,17 +112,19 @@ function normalizeToolCallCandidate(value: unknown): ProviderToolCall | null {
   };
 }
 
-function findToolCallInValue(
+function findToolCallsInValue(
   value: unknown,
   hintKey: string | null = null,
-): ProviderToolCall | null {
+  toolCalls: ProviderToolCall[] = [],
+): ProviderToolCall[] {
   if (!value || typeof value !== "object") {
-    return null;
+    return toolCalls;
   }
 
   const hinted =
     hintKey === "tool_call" ||
     hintKey === "tool_calls" ||
+    hintKey === "calls" ||
     hintKey === "toolCall" ||
     hintKey === "toolCalls" ||
     hintKey === "function_call" ||
@@ -118,52 +136,42 @@ function findToolCallInValue(
       for (const entry of value) {
         const direct = normalizeToolCallCandidate(entry);
         if (direct) {
-          return direct;
+          pushUniqueToolCall(toolCalls, direct);
         }
 
-        const nested = findToolCallInValue(entry);
-        if (nested) {
-          return nested;
-        }
+        findToolCallsInValue(entry, null, toolCalls);
       }
     } else {
       const direct = normalizeToolCallCandidate(value);
       if (direct) {
-        return direct;
+        pushUniqueToolCall(toolCalls, direct);
       }
     }
   }
 
   if (Array.isArray(value)) {
     for (const entry of value) {
-      const nested = findToolCallInValue(entry);
-      if (nested) {
-        return nested;
-      }
+      findToolCallsInValue(entry, null, toolCalls);
     }
 
-    return null;
+    return toolCalls;
   }
 
   for (const [key, nestedValue] of Object.entries(value)) {
-    const nested = findToolCallInValue(nestedValue, key);
-    if (nested) {
-      return nested;
-    }
+    findToolCallsInValue(nestedValue, key, toolCalls);
   }
 
-  return null;
+  return toolCalls;
 }
 
-export function detectNativeToolCall(rawEvents: CompletionRawEvent[]) {
+export function detectNativeToolCalls(rawEvents: CompletionRawEvent[]) {
+  const toolCalls: ProviderToolCall[] = [];
+
   for (const event of rawEvents) {
-    const detected = findToolCallInValue(event.parsed, event.eventType);
-    if (detected) {
-      return detected;
-    }
+    findToolCallsInValue(event.parsed, event.eventType, toolCalls);
   }
 
-  return null;
+  return toolCalls;
 }
 
 function detectJsonEnvelope(text: string): JsonEnvelopeDetection | null {
@@ -193,26 +201,36 @@ function detectJsonEnvelope(text: string): JsonEnvelopeDetection | null {
       };
     }
 
-    if (parsedObject.type === "tool_call" && typeof parsedObject.name === "string") {
-      const name = parsedObject.name.trim();
-      if (name.length === 0) {
-        return null;
-      }
-
-      if (
-        !parsedObject.arguments ||
-        typeof parsedObject.arguments !== "object" ||
-        Array.isArray(parsedObject.arguments)
-      ) {
+    if (parsedObject.type === "tool_call") {
+      const toolCall = normalizeToolCallCandidate(parsedObject);
+      if (!toolCall) {
         return null;
       }
 
       return {
-        kind: "tool_call",
-        toolCall: {
-          name,
-          argumentsJson: JSON.stringify(parsedObject.arguments),
-        },
+        kind: "tool_calls",
+        toolCalls: [toolCall],
+      };
+    }
+
+    if (parsedObject.type === "tool_calls") {
+      const toolCalls = findToolCallsInValue(
+        "tool_calls" in parsedObject
+          ? parsedObject.tool_calls
+          : "toolCalls" in parsedObject
+            ? parsedObject.toolCalls
+            : "calls" in parsedObject
+              ? parsedObject.calls
+            : null,
+        "tool_calls",
+      );
+      if (toolCalls.length === 0) {
+        return null;
+      }
+
+      return {
+        kind: "tool_calls",
+        toolCalls,
       };
     }
 
@@ -322,9 +340,9 @@ function detectJsonEnvelope(text: string): JsonEnvelopeDetection | null {
   return null;
 }
 
-export function detectJsonFallbackToolCall(text: string) {
+export function detectJsonFallbackToolCalls(text: string) {
   const detection = detectJsonEnvelope(text);
-  return detection?.kind === "tool_call" ? detection.toolCall : null;
+  return detection?.kind === "tool_calls" ? detection.toolCalls : null;
 }
 
 export function classifyCompletionTurn(input: {
@@ -334,21 +352,21 @@ export function classifyCompletionTurn(input: {
 }): CompletionTurn {
   const outputText = input.reply.trim();
   const thinkingText = input.thinking?.trim() ?? "";
-  const nativeToolCall = detectNativeToolCall(input.rawEvents);
-  if (nativeToolCall) {
+  const nativeToolCalls = detectNativeToolCalls(input.rawEvents);
+  if (nativeToolCalls.length > 0) {
     return {
       mode: "native_tool_call",
-      toolCall: nativeToolCall,
+      toolCalls: nativeToolCalls,
       ...(thinkingText.length > 0 ? { thinkingText } : {}),
       ...(outputText.length > 0 ? { outputText } : {}),
     };
   }
 
   const jsonEnvelope = detectJsonEnvelope(outputText);
-  if (jsonEnvelope?.kind === "tool_call") {
+  if (jsonEnvelope?.kind === "tool_calls") {
     return {
       mode: "json_fallback",
-      toolCall: jsonEnvelope.toolCall,
+      toolCalls: jsonEnvelope.toolCalls,
       ...(thinkingText.length > 0 ? { thinkingText } : {}),
       outputText,
     };
@@ -372,15 +390,16 @@ export function classifyCompletionTurn(input: {
 export const INJECTED_BRIDGE_SOURCE = `
 (() => {
   const KEY = "__piDeepSeekBridge";
-  const VERSION = 12;
+  const VERSION = 13;
   const __name = (target, _value) => target;
-  const detectNativeToolCall = ${detectNativeToolCall.toString()};
+  const detectNativeToolCalls = ${detectNativeToolCalls.toString()};
   const detectJsonEnvelope = ${detectJsonEnvelope.toString()};
-  const detectJsonFallbackToolCall = ${detectJsonFallbackToolCall.toString()};
+  const detectJsonFallbackToolCalls = ${detectJsonFallbackToolCalls.toString()};
   const classifyCompletionTurn = ${classifyCompletionTurn.toString()};
   const normalizeToolCallArguments = ${normalizeToolCallArguments.toString()};
   const normalizeToolCallCandidate = ${normalizeToolCallCandidate.toString()};
-  const findToolCallInValue = ${findToolCallInValue.toString()};
+  const pushUniqueToolCall = ${pushUniqueToolCall.toString()};
+  const findToolCallsInValue = ${findToolCallsInValue.toString()};
   const existing = window[KEY];
   if (
     existing &&

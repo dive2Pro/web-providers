@@ -131,7 +131,7 @@ export function serializeMessagesStream(input: {
       content_block: {
         type: "tool_use",
         id: `${input.id}_toolu_1`,
-        name: input.result.toolCall.name,
+        name: input.result.toolCalls[0]?.name ?? "unknown_tool",
         input: {},
       },
     }),
@@ -142,7 +142,9 @@ export function serializeMessagesStream(input: {
       index: nextIndex,
       delta: {
         type: "input_json_delta",
-        partial_json: JSON.stringify(parseToolInput(input.result.toolCall.argumentsJson)),
+        partial_json: JSON.stringify(
+          parseToolInput(input.result.toolCalls[0]?.argumentsJson ?? "{}"),
+        ),
       },
     }),
   );
@@ -152,6 +154,42 @@ export function serializeMessagesStream(input: {
       index: nextIndex,
     }),
   );
+  nextIndex += 1;
+  for (const [index, toolCall] of input.result.toolCalls.entries()) {
+    if (index === 0) {
+      continue;
+    }
+
+    events.push(
+      toSseEvent("content_block_start", {
+        type: "content_block_start",
+        index: nextIndex,
+        content_block: {
+          type: "tool_use",
+          id: `${input.id}_toolu_${index + 1}`,
+          name: toolCall.name,
+          input: {},
+        },
+      }),
+    );
+    events.push(
+      toSseEvent("content_block_delta", {
+        type: "content_block_delta",
+        index: nextIndex,
+        delta: {
+          type: "input_json_delta",
+          partial_json: JSON.stringify(parseToolInput(toolCall.argumentsJson)),
+        },
+      }),
+    );
+    events.push(
+      toSseEvent("content_block_stop", {
+        type: "content_block_stop",
+        index: nextIndex,
+      }),
+    );
+    nextIndex += 1;
+  }
   events.push(
     toSseEvent("message_delta", {
       type: "message_delta",

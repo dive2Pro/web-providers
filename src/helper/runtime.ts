@@ -6,6 +6,7 @@ import type {
   ProviderChatRequest,
   ProviderChatResponse,
   ProviderId,
+  ProviderToolCall,
 } from "../shared/contracts";
 
 export const DEFAULT_SESSION_ID = "__default__";
@@ -100,10 +101,7 @@ function toProviderResponse(result: {
   thinkingText?: string;
   outputText?: string;
   modelLabel?: string;
-  toolCall?: {
-    name: string;
-    argumentsJson: string;
-  };
+  toolCalls?: ProviderToolCall[];
 }): ProviderChatResponse {
   if (result.mode === "text") {
     return {
@@ -119,7 +117,7 @@ function toProviderResponse(result: {
 
   return {
     mode: result.mode,
-    toolCall: result.toolCall as { name: string; argumentsJson: string },
+    toolCalls: result.toolCalls as ProviderToolCall[],
     finishReason: "stop",
     modelLabel: result.modelLabel,
     ...(typeof result.thinkingText === "string"

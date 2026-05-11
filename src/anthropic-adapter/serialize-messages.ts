@@ -50,12 +50,12 @@ export function serializeMessagesResponse(input: {
             },
           ]
         : []),
-      {
-        type: "tool_use",
-        id: `${input.id}_toolu_1`,
-        name: input.result.toolCall.name,
-        input: parseToolInput(input.result.toolCall.argumentsJson),
-      },
+      ...input.result.toolCalls.map((toolCall, index) => ({
+        type: "tool_use" as const,
+        id: `${input.id}_toolu_${index + 1}`,
+        name: toolCall.name,
+        input: parseToolInput(toolCall.argumentsJson),
+      })),
     ],
     stop_reason: "tool_use",
     stop_sequence: null,

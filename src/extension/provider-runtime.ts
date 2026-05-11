@@ -93,6 +93,13 @@ type ProtocolEnvelope =
       type: "tool_call";
       name: string;
       arguments: Record<string, unknown>;
+    }
+  | {
+      type: "tool_calls";
+      calls: Array<{
+        name: string;
+        arguments: Record<string, unknown>;
+      }>;
     };
 
 interface ProviderContext {
@@ -328,10 +335,10 @@ const PROVIDER_DESCRIPTORS = [
 ] as const;
 const RESPONSE_ENVELOPE_INSTRUCTION = [
   "Your entire assistant reply must be exactly one JSON object.",
-  "Return exactly one final action object per reply: either a message or a tool_call, never both.",
-  "If you need multiple tool calls, return only the first tool_call and wait for the next turn.",
+  "Return exactly one final action object per reply: either a message, a tool_call, or a tool_calls object.",
   'For normal replies use: {"type":"message","content":"your response text"}',
   'For tool calls use: {"type":"tool_call","name":"tool_name","arguments":{"key":"value"}}',
+  'For multiple tool calls use: {"type":"tool_calls","calls":[{"name":"tool_name","arguments":{"key":"value"}}]}',
   "Do not add any prose before or after it.",
   "Do not wrap it in markdown or code fences.",
 ].join(" ");
@@ -396,6 +403,52 @@ function parseStrictProtocolEnvelope(text: string): {
       };
     }
 
+    if (candidate.type === "tool_calls") {
+      if (
+        Object.keys(candidate).length !== 2 ||
+        !Array.isArray(candidate.calls) ||
+        candidate.calls.length === 0
+      ) {
+        return null;
+      }
+
+      const calls = candidate.calls
+        .map((entry) => {
+          if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+            return null;
+          }
+
+          const call = entry as Record<string, unknown>;
+          if (
+            typeof call.name !== "string" ||
+            !call.arguments ||
+            typeof call.arguments !== "object" ||
+            Array.isArray(call.arguments)
+          ) {
+            return null;
+          }
+
+          return {
+            name: call.name,
+            arguments: call.arguments as Record<string, unknown>,
+          };
+        })
+        .filter(
+          (
+            entry,
+          ): entry is { name: string; arguments: Record<string, unknown> } => entry !== null,
+        );
+
+      if (calls.length !== candidate.calls.length) {
+        return null;
+      }
+
+      return {
+        type: "tool_calls",
+        calls,
+      };
+    }
+
     return null;
   }
 
@@ -410,6 +463,13 @@ function parseStrictProtocolEnvelope(text: string): {
     if (
       envelope.type === "tool_call" &&
       envelope.name.trim() === "tool_name"
+    ) {
+      return true;
+    }
+
+    if (
+      envelope.type === "tool_calls" &&
+      envelope.calls.every((call) => call.name.trim() === "tool_name")
     ) {
       return true;
     }
@@ -513,6 +573,38 @@ function parseStrictProtocolEnvelope(text: string): {
     const embedded = findEmbeddedEnvelopes(source);
 
     if (embedded.length > 1) {
+      const embeddedToolCalls = embedded.flatMap((entry) => {
+        if (entry.type === "tool_call") {
+          return [
+            {
+              name: entry.name,
+              arguments: entry.arguments,
+            },
+          ];
+        }
+
+        if (entry.type === "tool_calls") {
+          return entry.calls;
+        }
+
+        return [];
+      });
+
+      if (
+        embeddedToolCalls.length > 0 &&
+        embedded.every(
+          (entry) => entry.type === "tool_call" || entry.type === "tool_calls",
+        )
+      ) {
+        return {
+          envelope: {
+            type: "tool_calls",
+            calls: embeddedToolCalls,
+          },
+          error: null,
+        };
+      }
+
       return {
         envelope: null,
         error: "Multiple protocol envelopes were found. Return exactly one JSON object.",
@@ -527,7 +619,7 @@ function parseStrictProtocolEnvelope(text: string): {
 
   const trimmed = text.trim();
   const protocolLike =
-    /"type"\s*:\s*"(message|tool_call)"/.test(text) || trimmed.startsWith("{");
+    /"type"\s*:\s*"(message|tool_call|tool_calls)"/.test(text) || trimmed.startsWith("{");
 
   if (trimmed.length === 0) {
     return {
@@ -614,10 +706,19 @@ function parseStrictProtocolEnvelope(text: string): {
     };
   }
 
+  if (candidate.type === "tool_calls") {
+    return {
+      envelope: null,
+      protocolLike: true,
+      error:
+        'Multi-tool replies must match {"type":"tool_calls","calls":[{"name":"tool_name","arguments":{...}}]} exactly.',
+    };
+  }
+
   return {
     envelope: null,
     protocolLike,
-    error: 'Reply "type" must be either "message" or "tool_call".',
+    error: 'Reply "type" must be "message", "tool_call", or "tool_calls".',
   };
 }
 
@@ -637,16 +738,27 @@ function normalizeProtocolToolCallResponse(
   response: Extract<ProviderChatResponse, { mode: "text" }>,
 ): ProviderChatResponse {
   const parsed = parseStrictProtocolEnvelope(response.outputText);
-  if (parsed.envelope?.type !== "tool_call") {
+  if (
+    parsed.envelope?.type !== "tool_call" &&
+    parsed.envelope?.type !== "tool_calls"
+  ) {
     return response;
   }
 
   return {
     mode: "json_fallback",
-    toolCall: {
-      name: parsed.envelope.name,
-      argumentsJson: JSON.stringify(parsed.envelope.arguments),
-    },
+    toolCalls:
+      parsed.envelope.type === "tool_call"
+        ? [
+            {
+              name: parsed.envelope.name,
+              argumentsJson: JSON.stringify(parsed.envelope.arguments),
+            },
+          ]
+        : parsed.envelope.calls.map((toolCall) => ({
+            name: toolCall.name,
+            argumentsJson: JSON.stringify(toolCall.arguments),
+          })),
     finishReason: response.finishReason === "error" ? "error" : "stop",
     modelLabel: response.modelLabel,
     ...(typeof response.thinkingText === "string"
@@ -779,6 +891,20 @@ function validateToolCallAgainstTools(
   );
 }
 
+function validateToolCallsAgainstTools(
+  toolCalls: Array<{
+    name: string;
+    arguments: Record<string, unknown>;
+  }>,
+  tools: ToolDefinition[] | undefined,
+) {
+  return toolCalls.flatMap((toolCall, index) =>
+    validateToolCallAgainstTools(toolCall, tools).map(
+      (issue) => `toolCalls[${index}]: ${issue}`,
+    ),
+  );
+}
+
 function buildProtocolRepairPrompt(input: {
   rawOutput: string;
   issues: string[];
@@ -787,10 +913,10 @@ function buildProtocolRepairPrompt(input: {
   return [
     "The previous reply violated the required JSON response protocol.",
     "Return exactly one JSON object and nothing else.",
-    "Return exactly one final action object per reply: either a message or a tool_call, never both.",
-    "If you need multiple tool calls, return only the first tool_call and wait for the next turn.",
+    "Return exactly one final action object per reply: either a message, a tool_call, or a tool_calls object.",
     'For normal replies use: {"type":"message","content":"your response text"}',
     'For tool calls use: {"type":"tool_call","name":"tool_name","arguments":{"key":"value"}}',
+    'For multiple tool calls use: {"type":"tool_calls","calls":[{"name":"tool_name","arguments":{"key":"value"}}]}',
     "Problems to fix:",
     ...input.issues.map((issue) => `- ${issue}`),
     "Previous invalid reply:",
@@ -804,10 +930,10 @@ function buildProtocolRepairPrompt(input: {
 function buildMinimalProtocolRepairPrompt(tools: ToolDefinition[] | undefined) {
   return [
     "Return exactly one JSON object and nothing else.",
-    "Return exactly one final action object per reply: either a message or a tool_call, never both.",
-    "If you need multiple tool calls, return only the first tool_call and wait for the next turn.",
+    "Return exactly one final action object per reply: either a message, a tool_call, or a tool_calls object.",
     'For normal replies use: {"type":"message","content":"your response text"}',
     'For tool calls use: {"type":"tool_call","name":"tool_name","arguments":{"key":"value"}}',
+    'For multiple tool calls use: {"type":"tool_calls","calls":[{"name":"tool_name","arguments":{"key":"value"}}]}',
     "Do not repeat these instructions.",
     "Do not explain your answer.",
     "Do not wrap the JSON in markdown.",
@@ -834,12 +960,13 @@ function recoverPlainTextFromProtocolFailure(text: string) {
   const boilerplatePatterns = [
     /^The previous reply violated the required JSON response protocol\.\n?/g,
     /^Return exactly one JSON object and nothing else\.\n?/g,
-    /^Return exactly one final action object per reply: either a message or a tool_call, never both\.\n?/g,
-    /^If you need multiple tool calls, return only the first tool_call and wait for the next turn\.\n?/g,
+    /^Return exactly one final action object per reply: either a message, a tool_call, or a tool_calls object\.\n?/g,
     /^For normal replies use: .*?\n?/gm,
     /^For tool calls use: .*?\n?/gm,
+    /^For multiple tool calls use: .*?\n?/gm,
     /^\{"type":"message","content":"your response text"\}\n?/gm,
     /^\{"type":"tool_call","name":"tool_name","arguments":\{"key":"value"\}\}\n?/gm,
+    /^\{"type":"tool_calls","calls":\[.*\]\}\n?/gm,
     /^Problems to fix:\n?/gm,
     /^- .*?\n?/gm,
     /^Previous invalid reply:\n?/gm,
@@ -880,18 +1007,28 @@ function shouldRepairProviderResponse(
 } {
   if (response.mode !== "text") {
     try {
-      const toolCall = parseValidatedToolCall(response.toolCall);
-      const issues = validateToolCallAgainstTools(toolCall, tools);
+      const toolCalls = parseValidatedToolCalls(response.toolCalls);
+      const issues = validateToolCallsAgainstTools(toolCalls, tools);
       return {
         shouldRepair: issues.length > 0,
         issues,
         rawOutput:
           response.outputText ??
-          JSON.stringify({
-            type: "tool_call",
-            name: response.toolCall.name,
-            arguments: toolCall.arguments,
-          }),
+          JSON.stringify(
+            toolCalls.length === 1
+              ? {
+                  type: "tool_call",
+                  name: toolCalls[0]?.name,
+                  arguments: toolCalls[0]?.arguments,
+                }
+              : {
+                  type: "tool_calls",
+                  calls: toolCalls.map((toolCall) => ({
+                    name: toolCall.name,
+                    arguments: toolCall.arguments,
+                  })),
+                },
+          ),
       };
     } catch (error) {
       return {
@@ -1098,6 +1235,19 @@ function parseValidatedToolCall(input: {
     name,
     arguments: parsed as Record<string, unknown>,
   };
+}
+
+function parseValidatedToolCalls(
+  toolCalls: Array<{
+    name: string;
+    argumentsJson: string;
+  }>,
+) {
+  if (!Array.isArray(toolCalls) || toolCalls.length === 0) {
+    throw new Error("Invalid DeepSeek tool call payload");
+  }
+
+  return toolCalls.map((toolCall) => parseValidatedToolCall(toolCall));
 }
 
 function toErrorMessage(error: unknown) {
@@ -1433,40 +1583,44 @@ export default function registerDeepSeekExtension(
           };
 
           const emitToolCall = (response: Extract<ProviderChatResponse, { mode: "native_tool_call" | "json_fallback" }>) => {
-            const validatedToolCall = parseValidatedToolCall(response.toolCall);
-            const toolCallId = `${model.provider}-${output.content.length}`;
+            const validatedToolCalls = parseValidatedToolCalls(response.toolCalls);
 
-            output.content.push({
-              type: "toolCall",
-              id: toolCallId,
-              name: validatedToolCall.name,
-              arguments: {},
-            });
-            const contentIndex = output.content.length - 1;
-            stream.push({ type: "toolcall_start", contentIndex, partial: output });
+            for (const [index, validatedToolCall] of validatedToolCalls.entries()) {
+              const rawToolCall = response.toolCalls[index];
+              const toolCallId = `${model.provider}-${output.content.length}`;
 
-            const toolCallBlock = output.content[contentIndex];
-            if (toolCallBlock?.type === "toolCall") {
-              toolCallBlock.arguments = validatedToolCall.arguments;
-            }
-
-            stream.push({
-              type: "toolcall_delta",
-              contentIndex,
-              delta: response.toolCall.argumentsJson,
-              partial: output,
-            });
-            stream.push({
-              type: "toolcall_end",
-              contentIndex,
-              toolCall: {
+              output.content.push({
                 type: "toolCall",
                 id: toolCallId,
                 name: validatedToolCall.name,
-                arguments: validatedToolCall.arguments,
-              },
-              partial: output,
-            });
+                arguments: {},
+              });
+              const contentIndex = output.content.length - 1;
+              stream.push({ type: "toolcall_start", contentIndex, partial: output });
+
+              const toolCallBlock = output.content[contentIndex];
+              if (toolCallBlock?.type === "toolCall") {
+                toolCallBlock.arguments = validatedToolCall.arguments;
+              }
+
+              stream.push({
+                type: "toolcall_delta",
+                contentIndex,
+                delta: rawToolCall?.argumentsJson ?? "{}",
+                partial: output,
+              });
+              stream.push({
+                type: "toolcall_end",
+                contentIndex,
+                toolCall: {
+                  type: "toolCall",
+                  id: toolCallId,
+                  name: validatedToolCall.name,
+                  arguments: validatedToolCall.arguments,
+                },
+                partial: output,
+              });
+            }
           };
 
           const buildRequestPayload = (messages: ProviderChatRequest["messages"]) => ({

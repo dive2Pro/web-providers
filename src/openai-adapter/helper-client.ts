@@ -10,8 +10,8 @@ type FetchImpl = typeof fetch;
 
 const RESPONSE_ENVELOPE_INSTRUCTION = [
   "Your entire assistant reply must be exactly one JSON object.",
-  "Return exactly one final action object per reply: either a message or a tool_call, never both.",
-  "If you need multiple tool calls, return only the first tool_call and wait for the next turn.",
+  // "Return exactly one final action object per reply: either a message or a tool_call, never both.",
+  // "If you need multiple tool calls, return only the first tool_call and wait for the next turn.",
   'For normal replies use: {"type":"message","content":"your response text"}',
   'For tool calls use: {"type":"tool_call","name":"tool_name","arguments":{"key":"value"}}',
   "Do not add any prose before or after it.",

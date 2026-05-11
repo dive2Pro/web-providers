@@ -46,10 +46,12 @@ describe("qwen adapter", () => {
 
     expect(parsed).toEqual({
       mode: "native_tool_call",
-      toolCall: {
-        name: "read",
-        argumentsJson: "{\"path\":\"src/app.ts\"}",
-      },
+      toolCalls: [
+        {
+          name: "read",
+          argumentsJson: "{\"path\":\"src/app.ts\"}",
+        },
+      ],
       outputText: "",
     });
   });
@@ -86,7 +88,7 @@ describe("qwen adapter", () => {
     expect(INJECTED_QWEN_BRIDGE_SOURCE).toContain("!== BRIDGE_VERSION");
     expect(INJECTED_QWEN_BRIDGE_SOURCE).toContain("version: BRIDGE_VERSION");
     expect(INJECTED_QWEN_BRIDGE_SOURCE).toContain("function parseQwenDeltaText");
-    expect(INJECTED_QWEN_BRIDGE_SOURCE).toContain("function normalizeQwenToolCall");
+    expect(INJECTED_QWEN_BRIDGE_SOURCE).toContain("function normalizeQwenToolCalls");
   });
 
   it("embeds logged-out detection for sign-in screens in the injected bridge", () => {

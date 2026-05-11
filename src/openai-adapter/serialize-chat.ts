@@ -50,16 +50,14 @@ export function serializeChatCompletions(input: {
         message: {
           role: "assistant",
           content: input.result.outputText ?? null,
-          tool_calls: [
-            {
-              id: `${input.id}-tool-1`,
-              type: "function",
-              function: {
-                name: input.result.toolCall.name,
-                arguments: input.result.toolCall.argumentsJson,
-              },
+          tool_calls: input.result.toolCalls.map((toolCall, index) => ({
+            id: `${input.id}-tool-${index + 1}`,
+            type: "function",
+            function: {
+              name: toolCall.name,
+              arguments: toolCall.argumentsJson,
             },
-          ],
+          })),
         },
       },
     ],

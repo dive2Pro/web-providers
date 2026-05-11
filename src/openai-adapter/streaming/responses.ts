@@ -41,13 +41,13 @@ function outputTextDeltaEvent(delta: string): ResponsesOutputTextDeltaEvent {
 }
 
 function functionCallArgumentsDeltaEvent(input: {
-  id: string;
+  itemId: string;
   name: string;
   argumentsJson: string;
 }): ResponsesFunctionCallArgumentsDeltaEvent {
   return {
     type: "response.function_call_arguments.delta",
-    item_id: `${input.id}-tool-1`,
+    item_id: input.itemId,
     name: input.name,
     delta: input.argumentsJson,
   };
@@ -66,13 +66,15 @@ export function serializeResponsesStream(input: StreamInput): string[] {
     return events.map(toSseData);
   }
 
-  events.push(
-    functionCallArgumentsDeltaEvent({
-      id,
-      name: result.toolCall.name,
-      argumentsJson: result.toolCall.argumentsJson,
-    }),
-  );
+  for (const [index, toolCall] of result.toolCalls.entries()) {
+    events.push(
+      functionCallArgumentsDeltaEvent({
+        itemId: `${id}-tool-${index + 1}`,
+        name: toolCall.name,
+        argumentsJson: toolCall.argumentsJson,
+      }),
+    );
+  }
   events.push(completedEvent(input));
   return events.map(toSseData);
 }

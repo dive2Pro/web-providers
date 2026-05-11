@@ -1,6 +1,7 @@
 import type {
   BrowserConnectionStatus,
   ProviderId,
+  ProviderToolCall,
 } from "../../shared/contracts";
 
 export interface PageStateSummary {
@@ -19,14 +20,9 @@ export interface BindResult {
   pageState: PageStateSummary;
 }
 
-export interface ProviderToolCall {
-  name: string;
-  argumentsJson: string;
-}
-
 export interface ProviderToolCallTurn {
   mode: "native_tool_call" | "json_fallback";
-  toolCall: ProviderToolCall;
+  toolCalls: ProviderToolCall[];
   thinkingText?: string;
   outputText?: string;
   modelLabel?: string;

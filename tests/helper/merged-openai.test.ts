@@ -329,6 +329,12 @@ describe("merged helper openai routes", () => {
       { provider: "deepseek-web", openNew: undefined, tabId: "tab-1" },
       {
         provider: "deepseek-web",
+        openNew: undefined,
+        openUrl: "https://chat.deepseek.com/a/chat/s/original-session",
+        tabId: undefined,
+      },
+      {
+        provider: "deepseek-web",
         openNew: true,
         openUrl: "https://chat.deepseek.com/a/chat/s/original-session",
         tabId: undefined,

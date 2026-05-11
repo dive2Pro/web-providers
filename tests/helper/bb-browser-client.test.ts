@@ -652,10 +652,12 @@ describe("BbBrowserClient", () => {
                 closed: true,
                 turn: {
                   mode: "native_tool_call",
-                  toolCall: {
-                    name: "read",
-                    argumentsJson: "{\"path\":\"src/app.ts\"}",
-                  },
+                  toolCalls: [
+                    {
+                      name: "read",
+                      argumentsJson: "{\"path\":\"src/app.ts\"}",
+                    },
+                  ],
                   thinkingText: "Inspecting the file request",
                   outputText: "",
                 },
@@ -685,10 +687,12 @@ describe("BbBrowserClient", () => {
     ).resolves.toMatchObject({
       mode: "native_tool_call",
       thinkingText: "Inspecting the file request",
-      toolCall: {
-        name: "read",
-        argumentsJson: "{\"path\":\"src/app.ts\"}",
-      },
+      toolCalls: [
+        {
+          name: "read",
+          argumentsJson: "{\"path\":\"src/app.ts\"}",
+        },
+      ],
       modelLabel: "Qwen Web",
     });
     expect(submitted).toEqual(["read src/app.ts"]);
@@ -1332,10 +1336,12 @@ describe("BbBrowserClient", () => {
               terminalAt: Date.now(),
               turn: {
                 mode: "json_fallback",
-                toolCall: {
-                  name: "read",
-                  argumentsJson: "{\"path\":\"src/app.ts\"}",
-                },
+                toolCalls: [
+                  {
+                    name: "read",
+                    argumentsJson: "{\"path\":\"src/app.ts\"}",
+                  },
+                ],
                 outputText:
                   "{\"type\":\"tool_call\",\"name\":\"read\",\"arguments\":{\"path\":\"src/app.ts\"}}",
               },
@@ -1355,10 +1361,12 @@ describe("BbBrowserClient", () => {
       }),
     ).resolves.toMatchObject({
       mode: "json_fallback",
-      toolCall: {
-        name: "read",
-        argumentsJson: "{\"path\":\"src/app.ts\"}",
-      },
+      toolCalls: [
+        {
+          name: "read",
+          argumentsJson: "{\"path\":\"src/app.ts\"}",
+        },
+      ],
       outputText:
         "{\"type\":\"tool_call\",\"name\":\"read\",\"arguments\":{\"path\":\"src/app.ts\"}}",
       debug: {

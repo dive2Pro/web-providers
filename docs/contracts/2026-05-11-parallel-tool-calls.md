@@ -58,7 +58,10 @@
 
 ## 已确认项
 
-- 用户当前要的是“并行调用工具”的改造方案，不是立即开始实现
+- 用户同意采用推荐方案
+- 并行层级限定为“单轮返回多个 tool calls”，不做同会话多 provider turn 并发
+- contract 正式升级为 `toolCalls[]`
+- 网页侧目标语义限定为“最终结果里一次性返回多个工具调用”，不追求交错流式多工具
 
 ## 已核实项
 
@@ -91,7 +94,15 @@
 
 ## 当前状态
 
-- 当前代码不支持“单轮多个工具调用”
-- 当前代码支持“不同 session 绑定不同 tab 时的请求级并行”
-- 当前代码不适合作为“同会话多 turn 并发执行”的基础
-- 如按推荐方案推进，第一步应先改 shared contract 和 helper 出参，再改 OpenAI/Anthropic/extension 消费层
+- 已完成：
+  - shared contract 从单个 `toolCall` 升级为 `toolCalls[]`
+  - DeepSeek/Qwen bridge 结果可携带多个工具调用
+  - OpenAI chat/responses 序列化层支持多个工具调用
+  - OpenAI responses 在多工具结果下返回 `parallel_tool_calls: true`
+  - Anthropic messages 序列化层支持多个 `tool_use`
+  - extension/runtime 可逐个发出多组 toolcall 事件
+  - 相关测试已覆盖单工具、多工具和现有请求级并行语义
+- 保持不变：
+  - 同一 `sessionId + provider` 仍然串行
+  - 不同 session 绑定不同 tab 时仍可请求级并行
+  - 当前实现仍不适合作为“同会话多 turn 并发执行”的基础

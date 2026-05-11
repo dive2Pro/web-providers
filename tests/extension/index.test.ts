@@ -620,10 +620,12 @@ describe("pi provider extension", () => {
 
             return {
               mode: "json_fallback",
-              toolCall: {
-                name: "bash",
-                argumentsJson: "{\"cmd\":\"ls -la\"}",
-              },
+              toolCalls: [
+                {
+                  name: "bash",
+                  argumentsJson: "{\"cmd\":\"ls -la\"}",
+                },
+              ],
               finishReason: "stop",
               modelLabel: "DeepSeek Web",
             } as T;
@@ -686,7 +688,7 @@ describe("pi provider extension", () => {
       (providerChatCall?.body as { sessionInit?: { prompt?: string } } | undefined)?.sessionInit;
     expect(String(providerSessionInit?.prompt ?? "")).toContain('"type":"tool_call"');
     expect(String(providerSessionInit?.prompt ?? "")).toContain(
-      "Return exactly one final action object per reply: either a message or a tool_call, never both.",
+      "Return exactly one final action object per reply: either a message, a tool_call, or a tool_calls object.",
     );
     expect(String(providerSessionInit?.prompt ?? "")).toContain("Tool name: bash");
     expect(String(providerSessionInit?.prompt ?? "")).toContain("\"cmd\"");
@@ -718,6 +720,122 @@ describe("pi provider extension", () => {
         ],
       }),
     });
+  });
+
+  it("emits one pi tool-call event sequence per returned tool call", async () => {
+    let config: ProviderConfig | undefined;
+
+    registerDeepSeekExtension(
+      {
+        registerProvider(_name, providerConfig) {
+          config = providerConfig as ProviderConfig;
+        },
+        on() {},
+      },
+      {
+        spawnHelper: async () => ({
+          baseUrl: "http://127.0.0.1:4318",
+          token: "token-123",
+          stop: async () => undefined,
+        }),
+        helperClient: {
+          post: async <T>(_baseUrl: string, path: string) => {
+            if (path === "/internal/pi/session/shutdown") {
+              return { ok: true } as T;
+            }
+
+            return {
+              mode: "json_fallback",
+              toolCalls: [
+                {
+                  name: "read_file",
+                  argumentsJson: "{\"path\":\"README.md\"}",
+                },
+                {
+                  name: "bash",
+                  argumentsJson: "{\"cmd\":\"pwd\"}",
+                },
+              ],
+              finishReason: "stop",
+              modelLabel: "DeepSeek Web",
+            } as T;
+          },
+        },
+        randomToken: () => "token-123",
+      },
+    );
+
+    const stream = config?.streamSimple?.(
+      {
+        id: "deepseek-web-chat",
+        api: "deepseek-web-api",
+        provider: "deepseek-web",
+      },
+      {
+        messages: [
+          {
+            role: "user",
+            content: "inspect the repo",
+            timestamp: Date.now(),
+          },
+        ],
+        tools: [
+          {
+            name: "read_file",
+            inputSchema: {
+              type: "object",
+              properties: { path: { type: "string" } },
+              required: ["path"],
+            },
+          },
+          {
+            name: "bash",
+            inputSchema: {
+              type: "object",
+              properties: { cmd: { type: "string" } },
+              required: ["cmd"],
+            },
+          },
+        ],
+      },
+      {
+        signal: new AbortController().signal,
+      },
+    );
+
+    const events: StreamEvent[] = [];
+    for await (const event of stream as AssistantMessageEventStreamLike) {
+      events.push(event);
+    }
+
+    expect(events.map((event) => event.type)).toEqual([
+      "start",
+      "toolcall_start",
+      "toolcall_delta",
+      "toolcall_end",
+      "toolcall_start",
+      "toolcall_delta",
+      "toolcall_end",
+      "done",
+    ]);
+    expect(
+      events
+        .filter((event): event is Extract<StreamEvent, { type: "toolcall_end" }> => event.type === "toolcall_end")
+        .map((event) => event.toolCall),
+    ).toEqual([
+      {
+        type: "toolCall",
+        id: "deepseek-web-0",
+        name: "read_file",
+        arguments: { path: "README.md" },
+      },
+      {
+        type: "toolCall",
+        id: "deepseek-web-1",
+        name: "bash",
+        arguments: { cmd: "pwd" },
+      },
+    ]);
   });
 
   it("converts a text-mode protocol tool_call envelope into pi tool-call events", async () => {
@@ -813,6 +931,121 @@ describe("pi provider extension", () => {
         stopReason: "toolUse",
       }),
     });
+  });
+
+  it("converts consecutive text-mode protocol tool_call objects into multiple pi tool-call events", async () => {
+    let config: ProviderConfig | undefined;
+    const calls: Array<{ path: string; body?: Record<string, unknown> }> = [];
+
+    registerDeepSeekExtension(
+      {
+        registerProvider(_name, providerConfig) {
+          config = providerConfig as ProviderConfig;
+        },
+        on() {},
+      },
+      {
+        spawnHelper: async () => ({
+          baseUrl: "http://127.0.0.1:4318",
+          token: "token-123",
+          stop: async () => undefined,
+        }),
+        helperClient: {
+          post: async <T>(
+            _baseUrl: string,
+            path: string,
+            body?: Record<string, unknown>,
+          ) => {
+            calls.push({ path, body });
+
+            if (path === "/internal/pi/session/shutdown") {
+              return { ok: true } as T;
+            }
+
+            return {
+              mode: "text",
+              outputText: [
+                "{\"type\":\"tool_call\",\"name\":\"bash\",\"arguments\":{\"cmd\":\"git status\"}}",
+                "{\"type\":\"tool_call\",\"name\":\"bash\",\"arguments\":{\"cmd\":\"git diff\"}}",
+              ].join("\n\n"),
+              finishReason: "stop",
+              modelLabel: "Qwen Web",
+            } as T;
+          },
+        },
+        randomToken: () => "token-123",
+      },
+    );
+
+    const stream = config?.streamSimple?.(
+      {
+        id: "qwen-web-chat",
+        api: "qwen-web-api",
+        provider: "qwen-web",
+      },
+      {
+        messages: [
+          {
+            role: "user",
+            content: "inspect git changes",
+            timestamp: Date.now(),
+          },
+        ],
+        tools: [
+          {
+            name: "bash",
+            description: "Execute bash commands",
+            inputSchema: {
+              type: "object",
+              properties: {
+                cmd: { type: "string" },
+              },
+              required: ["cmd"],
+            },
+          },
+        ],
+      },
+      {
+        signal: new AbortController().signal,
+      },
+    );
+
+    const events: StreamEvent[] = [];
+    for await (const event of stream as AssistantMessageEventStreamLike) {
+      events.push(event);
+    }
+
+    expect(
+      calls.filter((call) => call.path === "/internal/pi/provider/chat"),
+    ).toHaveLength(1);
+    expect(events.map((event) => event.type)).toEqual([
+      "start",
+      "toolcall_start",
+      "toolcall_delta",
+      "toolcall_end",
+      "toolcall_start",
+      "toolcall_delta",
+      "toolcall_end",
+      "done",
+    ]);
+    expect(
+      events
+        .filter((event): event is Extract<StreamEvent, { type: "toolcall_end" }> => event.type === "toolcall_end")
+        .map((event) => event.toolCall),
+    ).toEqual([
+      {
+        type: "toolCall",
+        id: "qwen-web-0",
+        name: "bash",
+        arguments: { cmd: "git status" },
+      },
+      {
+        type: "toolCall",
+        id: "qwen-web-1",
+        name: "bash",
+        arguments: { cmd: "git diff" },
+      },
+    ]);
   });
 
   it("includes an explicit empty tool schema in first-turn session init", async () => {
@@ -1109,11 +1342,13 @@ describe("pi provider extension", () => {
             if (providerChatCount === 1) {
               return {
                 mode: "json_fallback",
-                toolCall: {
-                  name: "bash",
-                  argumentsJson:
-                    "{\"command\":\"ls -la /Users/yc/code/web-providers/src\",\"description\":\"List src directory structure\"}",
-                },
+                toolCalls: [
+                  {
+                    name: "bash",
+                    argumentsJson:
+                      "{\"command\":\"ls -la /Users/yc/code/web-providers/src\",\"description\":\"List src directory structure\"}",
+                  },
+                ],
                 finishReason: "stop",
                 modelLabel: "DeepSeek Web",
                 outputText:
@@ -1123,10 +1358,12 @@ describe("pi provider extension", () => {
 
             return {
               mode: "json_fallback",
-              toolCall: {
-                name: "bash",
-                argumentsJson: "{\"cmd\":\"ls -la /Users/yc/code/web-providers/src\"}",
-              },
+              toolCalls: [
+                {
+                  name: "bash",
+                  argumentsJson: "{\"cmd\":\"ls -la /Users/yc/code/web-providers/src\"}",
+                },
+              ],
               finishReason: "stop",
               modelLabel: "DeepSeek Web",
               outputText:
@@ -1485,7 +1722,7 @@ describe("pi provider extension", () => {
         ?.content ?? "";
     expect(minimalRepairMessage).toContain("Return exactly one JSON object and nothing else.");
     expect(minimalRepairMessage).toContain(
-      "If you need multiple tool calls, return only the first tool_call and wait for the next turn.",
+      "Return exactly one final action object per reply: either a message, a tool_call, or a tool_calls object.",
     );
     expect(minimalRepairMessage).not.toContain("Previous invalid reply:");
     expect(result).toMatchObject({

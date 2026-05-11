@@ -38,15 +38,13 @@ export function serializeResponses(input: {
     object: "response",
     created_at: input.created,
     model: input.model,
-    output: [
-      {
-        type: "function_call",
-        name: input.result.toolCall.name,
-        arguments: input.result.toolCall.argumentsJson,
-        call_id: `${input.id}-tool-1`,
-      },
-    ],
-    parallel_tool_calls: false,
+    output: input.result.toolCalls.map((toolCall, index) => ({
+      type: "function_call" as const,
+      name: toolCall.name,
+      arguments: toolCall.argumentsJson,
+      call_id: `${input.id}-tool-${index + 1}`,
+    })),
+    parallel_tool_calls: input.result.toolCalls.length > 1,
     usage: {
       input_tokens: 0,
       output_tokens: 0,

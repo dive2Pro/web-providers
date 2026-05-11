@@ -62,10 +62,12 @@ describe("serializeResponsesStream", () => {
       model,
       result: {
         mode: "native_tool_call",
-        toolCall: {
-          name: "ping",
-          argumentsJson: "{\"text\":\"hi\"}",
-        },
+        toolCalls: [
+          {
+            name: "ping",
+            argumentsJson: "{\"text\":\"hi\"}",
+          },
+        ],
         finishReason: "stop",
       },
     });
@@ -93,5 +95,48 @@ describe("serializeResponsesStream", () => {
       id,
       object: "response",
     });
+  });
+
+  it("serializes multiple tool calls into separate SSE function-call events", () => {
+    const id = "resp_test_3";
+    const created = 1710000002;
+    const model = "test-model";
+
+    const sse = serializeResponsesStream({
+      id,
+      created,
+      model,
+      result: {
+        mode: "native_tool_call",
+        toolCalls: [
+          {
+            name: "read_file",
+            argumentsJson: "{\"path\":\"README.md\"}",
+          },
+          {
+            name: "bash",
+            argumentsJson: "{\"cmd\":\"pwd\"}",
+          },
+        ],
+        finishReason: "stop",
+      },
+    });
+
+    expect(sse).toHaveLength(4);
+    const events = sse.map(parseSseDataLine) as any[];
+
+    expect(events[1]).toMatchObject({
+      type: "response.function_call_arguments.delta",
+      item_id: `${id}-tool-1`,
+      name: "read_file",
+      delta: "{\"path\":\"README.md\"}",
+    });
+    expect(events[2]).toMatchObject({
+      type: "response.function_call_arguments.delta",
+      item_id: `${id}-tool-2`,
+      name: "bash",
+      delta: "{\"cmd\":\"pwd\"}",
+    });
+    expect(events[3].type).toBe("response.completed");
   });
 });

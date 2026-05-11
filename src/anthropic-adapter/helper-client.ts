@@ -8,16 +8,6 @@ import type { NormalizedRequest } from "./types";
 
 type FetchImpl = typeof fetch;
 
-const RESPONSE_ENVELOPE_INSTRUCTION = [
-  "Your entire assistant reply must be exactly one JSON object.",
-  "Return exactly one final action object per reply: either a message or a tool_call, never both.",
-  "If you need multiple tool calls, return only the first tool_call and wait for the next turn.",
-  'For normal replies use: {"type":"message","content":"your response text"}',
-  'For tool calls use: {"type":"tool_call","name":"tool_name","arguments":{"key":"value"}}',
-  "Do not add any prose before or after it.",
-  "Do not wrap it in markdown or code fences.",
-].join(" ");
-
 function buildToolCatalogPrompt(tools: NormalizedRequest["tools"]) {
   if (tools.length === 0) {
     return "";
@@ -59,9 +49,9 @@ function buildSessionInit(request: NormalizedRequest) {
   const hasTooling = request.tools.length > 0;
   const parts = [
     ...systemPrompts,
-    ...(hasTooling ? [RESPONSE_ENVELOPE_INSTRUCTION] : []),
-    ...(hasTooling ? [buildToolCatalogPrompt(request.tools)] : []),
-    ...(hasTooling ? [buildToolChoicePrompt(request.toolChoice)] : []),
+    // ...(hasTooling ? [RESPONSE_ENVELOPE_INSTRUCTION] : []),
+    // ...(hasTooling ? [buildToolCatalogPrompt(request.tools)] : []),
+    // ...(hasTooling ? [buildToolChoicePrompt(request.toolChoice)] : []),
   ]
     .map((part) => part.trim())
     .filter((part) => part.length > 0);

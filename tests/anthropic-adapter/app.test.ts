@@ -383,10 +383,12 @@ describe("anthropic adapter app", () => {
         ok: true,
         json: async () => ({
           mode: "json_fallback",
-          toolCall: {
-            name: "read_file",
-            argumentsJson: "{\"path\":\"README.md\"}",
-          },
+          toolCalls: [
+            {
+              name: "read_file",
+              argumentsJson: "{\"path\":\"README.md\"}",
+            },
+          ],
           finishReason: "stop",
         }),
       }),
@@ -424,6 +426,62 @@ describe("anthropic adapter app", () => {
           input: {
             path: "README.md",
           },
+        },
+      ],
+    });
+  });
+
+  it("serializes multiple helper tool calls into multiple anthropic tool_use blocks", async () => {
+    const app = buildAnthropicAdapterApp({
+      token: "adapter-token",
+      helperBaseUrl: "http://127.0.0.1:4318",
+      helperToken: "helper-token",
+      fetchImpl: vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          mode: "json_fallback",
+          toolCalls: [
+            {
+              name: "read_file",
+              argumentsJson: "{\"path\":\"README.md\"}",
+            },
+            {
+              name: "bash",
+              argumentsJson: "{\"cmd\":\"pwd\"}",
+            },
+          ],
+          finishReason: "stop",
+        }),
+      }),
+    });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/messages",
+      headers: {
+        "x-api-key": "adapter-token",
+      },
+      payload: {
+        model: "anthropic-deepseek-web-tools",
+        max_tokens: 256,
+        messages: [{ role: "user", content: "inspect the project" }],
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      type: "message",
+      stop_reason: "tool_use",
+      content: [
+        {
+          type: "tool_use",
+          name: "read_file",
+          input: { path: "README.md" },
+        },
+        {
+          type: "tool_use",
+          name: "bash",
+          input: { cmd: "pwd" },
         },
       ],
     });
@@ -500,10 +558,12 @@ describe("anthropic adapter app", () => {
         ok: true,
         json: async () => ({
           mode: "json_fallback",
-          toolCall: {
-            name: "read_file",
-            argumentsJson: "{\"path\":\"README.md\"}",
-          },
+          toolCalls: [
+            {
+              name: "read_file",
+              argumentsJson: "{\"path\":\"README.md\"}",
+            },
+          ],
           finishReason: "stop",
         }),
       }),
