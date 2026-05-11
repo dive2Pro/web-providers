@@ -5,7 +5,8 @@ export type ErrorCode =
   | "PAGE_UNAVAILABLE"
   | "MODEL_BUSY"
   | "TIMEOUT"
-  | "AUTOMATION_DESYNC";
+  | "AUTOMATION_DESYNC"
+  | "INVALID_PROVIDER_RESPONSE";
 
 export interface HealthResponse {
   ok: true;

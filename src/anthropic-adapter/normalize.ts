@@ -30,8 +30,8 @@ type AnthropicContentBlock =
     };
 
 type AnthropicMessage = {
-  role: "user" | "assistant";
-  content: string | AnthropicContentBlock[];
+  role?: string;
+  content?: string | AnthropicContentBlock[];
 };
 
 type AnthropicTool = {
@@ -102,7 +102,7 @@ function normalizeContentBlocks(blocks: AnthropicContentBlock[]) {
           .join("\n");
       }
 
-      return `[unsupported ${block.type} block omitted]`;
+      return "";
     })
     .filter((part) => part.length > 0)
     .join("\n\n");
@@ -113,19 +113,19 @@ function normalizeMessageContent(content: AnthropicMessage["content"]) {
     return content;
   }
 
-  return normalizeContentBlocks(content);
+  return Array.isArray(content) ? normalizeContentBlocks(content) : "";
 }
 
 function normalizeMessages(messages: AnthropicMessage[] = []) {
   return messages.map<NormalizedMessage>((message) => ({
-    role: message.role,
-    content: normalizeMessageContent(message.content),
+    role: message.role as "user" | "assistant",
+    content: normalizeMessageContent(message.content ?? ""),
   }));
 }
 
 function normalizeSystem(system: AnthropicSystem | undefined) {
   if (typeof system === "string") {
-    return system;
+    return system.trim();
   }
 
   if (!Array.isArray(system)) {
@@ -133,26 +133,72 @@ function normalizeSystem(system: AnthropicSystem | undefined) {
   }
 
   return system
-    .filter((block) => block.type === "text" && typeof block.text === "string")
-    .map((block) => block.text)
+    .map((block, index) => {
+      if (!block || typeof block !== "object" || Array.isArray(block)) {
+        throw invalidRequestError(`system[${index}] must be an object`);
+      }
+
+      if (block.type !== "text") {
+        throw invalidRequestError(`system[${index}].type must be "text"`);
+      }
+
+      if (typeof block.text !== "string") {
+        throw invalidRequestError(`system[${index}].text must be a string`);
+      }
+
+      return block.text.trim();
+    })
+    .filter((block) => block.length > 0)
     .join("\n");
 }
 
 function normalizeTools(tools: AnthropicTool[] = []): NormalizedTool[] {
-  return tools
-    .filter((tool) => typeof tool.name === "string" && tool.name.length > 0)
-    .map((tool) => ({
-      name: tool.name as string,
+  return tools.map((tool, index) => {
+    if (!tool || typeof tool !== "object" || Array.isArray(tool)) {
+      throw invalidRequestError(`tools[${index}] must be an object`);
+    }
+
+    if (typeof tool.name !== "string" || tool.name.trim().length === 0) {
+      throw invalidRequestError(`tools[${index}].name must be a non-empty string`);
+    }
+
+    if (
+      tool.input_schema === undefined ||
+      !tool.input_schema ||
+      typeof tool.input_schema !== "object" ||
+      Array.isArray(tool.input_schema)
+    ) {
+      throw invalidRequestError(`tools[${index}].input_schema must be a JSON object`);
+    }
+
+    return {
+      name: tool.name.trim(),
       description: tool.description,
-      parametersJson: JSON.stringify(tool.input_schema ?? {}),
-    }));
+      parametersJson: JSON.stringify(tool.input_schema),
+    };
+  });
 }
 
 function normalizeToolChoice(toolChoice: AnthropicToolChoice): NormalizedToolChoice {
   const nextType = toolChoice?.type ?? "auto";
 
+  if (
+    nextType !== "auto" &&
+    nextType !== "any" &&
+    nextType !== "tool" &&
+    nextType !== "none"
+  ) {
+    throw invalidRequestError(
+      'tool_choice.type must be one of "auto", "any", "tool", or "none"',
+    );
+  }
+
   if (nextType === "none") {
     return "none";
+  }
+
+  if (nextType === "any") {
+    return "required";
   }
 
   if (nextType === "tool") {
@@ -169,6 +215,179 @@ function normalizeToolChoice(toolChoice: AnthropicToolChoice): NormalizedToolCho
   return "auto";
 }
 
+function normalizeToolResultTextArray(
+  content: Array<{ type?: string; text?: string }>,
+  path: string,
+) {
+  return content.map((item, index) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) {
+      throw invalidRequestError(`${path}[${index}] must be an object`);
+    }
+
+    if (item.type !== "text") {
+      throw invalidRequestError(`${path}[${index}].type must be "text"`);
+    }
+
+    if (typeof item.text !== "string") {
+      throw invalidRequestError(`${path}[${index}].text must be a string`);
+    }
+
+    return {
+      type: "text" as const,
+      text: item.text,
+    };
+  });
+}
+
+function validateContentBlocks(
+  blocks: AnthropicContentBlock[],
+  message: AnthropicMessage,
+  messageIndex: number,
+  previousMessage: AnthropicMessage | undefined,
+) {
+  let seenNonToolResult = false;
+  const previousToolUseIds = new Set<string>();
+
+  if (
+    previousMessage?.role === "assistant" &&
+    Array.isArray(previousMessage.content)
+  ) {
+    for (const block of previousMessage.content) {
+      if (
+        block?.type === "tool_use" &&
+        typeof block.id === "string" &&
+        block.id.trim().length > 0
+      ) {
+        previousToolUseIds.add(block.id.trim());
+      }
+    }
+  }
+
+  for (const [blockIndex, block] of blocks.entries()) {
+    const path = `messages[${messageIndex}].content[${blockIndex}]`;
+    if (!block || typeof block !== "object" || Array.isArray(block)) {
+      throw invalidRequestError(`${path} must be an object`);
+    }
+
+    if (block.type === "text") {
+      if (typeof block.text !== "string") {
+        throw invalidRequestError(`${path}.text must be a string`);
+      }
+      seenNonToolResult = true;
+      continue;
+    }
+
+    if (block.type === "tool_use") {
+      if (message.role !== "assistant") {
+        throw invalidRequestError(`${path}.type "tool_use" is only allowed in assistant messages`);
+      }
+
+      if (typeof block.id !== "string" || block.id.trim().length === 0) {
+        throw invalidRequestError(`${path}.id must be a non-empty string`);
+      }
+
+      if (typeof block.name !== "string" || block.name.trim().length === 0) {
+        throw invalidRequestError(`${path}.name must be a non-empty string`);
+      }
+
+      if (
+        !block.input ||
+        typeof block.input !== "object" ||
+        Array.isArray(block.input)
+      ) {
+        throw invalidRequestError(`${path}.input must be a JSON object`);
+      }
+
+      seenNonToolResult = true;
+      continue;
+    }
+
+    if (block.type === "tool_result") {
+      if (message.role !== "user") {
+        throw invalidRequestError(`${path}.type "tool_result" is only allowed in user messages`);
+      }
+
+      if (seenNonToolResult) {
+        throw invalidRequestError(
+          `messages[${messageIndex}].content tool_result blocks must come before all other content blocks`,
+        );
+      }
+
+      if (previousToolUseIds.size === 0) {
+        throw invalidRequestError(
+          `messages[${messageIndex}] tool_result blocks must immediately follow an assistant tool_use message`,
+        );
+      }
+
+      if (
+        typeof block.tool_use_id !== "string" ||
+        block.tool_use_id.trim().length === 0
+      ) {
+        throw invalidRequestError(`${path}.tool_use_id must be a non-empty string`);
+      }
+
+      if (!previousToolUseIds.has(block.tool_use_id.trim())) {
+        throw invalidRequestError(
+          `${path}.tool_use_id must reference a tool_use block in messages[${messageIndex - 1}]`,
+        );
+      }
+
+      if (
+        block.content !== undefined &&
+        typeof block.content !== "string" &&
+        !Array.isArray(block.content)
+      ) {
+        throw invalidRequestError(`${path}.content must be a string or an array of text blocks`);
+      }
+
+      if (Array.isArray(block.content)) {
+        normalizeToolResultTextArray(block.content, `${path}.content`);
+      }
+
+      if (
+        block.is_error !== undefined &&
+        typeof block.is_error !== "boolean"
+      ) {
+        throw invalidRequestError(`${path}.is_error must be a boolean`);
+      }
+
+      continue;
+    }
+
+    if (block.type === "image" || block.type === "document") {
+      throw invalidRequestError(`${path}.type "${block.type}" is not supported by this adapter`);
+    }
+
+    throw invalidRequestError(
+      `${path}.type must be one of "text", "tool_use", or "tool_result"`,
+    );
+  }
+}
+
+function validateMessages(messages: AnthropicMessage[] = []) {
+  for (const [index, message] of messages.entries()) {
+    if (!message || typeof message !== "object" || Array.isArray(message)) {
+      throw invalidRequestError(`messages[${index}] must be an object`);
+    }
+
+    if (message.role !== "user" && message.role !== "assistant") {
+      throw invalidRequestError(`messages[${index}].role must be "user" or "assistant"`);
+    }
+
+    if (typeof message.content === "string") {
+      continue;
+    }
+
+    if (!Array.isArray(message.content)) {
+      throw invalidRequestError(
+        `messages[${index}].content must be a string or an array of content blocks`,
+      );
+    }
+
+    validateContentBlocks(message.content, message, index, messages[index - 1]);
+  }
+}
+
 export function normalizeMessagesRequest(
   body: {
     model?: string;
@@ -182,6 +401,7 @@ export function normalizeMessagesRequest(
   },
   model: PublicModel,
 ): NormalizedRequest {
+  validateMessages(body.messages);
   const normalizedMessages = normalizeMessages(body.messages);
   const systemPrompt = normalizeSystem(body.system);
 

@@ -8,6 +8,15 @@ import type { NormalizedRequest } from "./types";
 
 type FetchImpl = typeof fetch;
 
+const RESPONSE_ENVELOPE_INSTRUCTION = [
+  "Your entire assistant reply must be exactly one JSON object.",
+  'For normal replies use: {"type":"message","content":"your response text"}',
+  'For tool calls use: {"type":"tool_call","name":"tool_name","arguments":{"key":"value"}}',
+  'For multiple tool calls use: {"type":"tool_calls","calls":[{"name":"tool_name","arguments":{"key":"value"}}]}',
+  "Do not add any prose before or after it.",
+  "Do not wrap it in markdown or code fences.",
+].join(" ");
+
 function buildToolCatalogPrompt(tools: NormalizedRequest["tools"]) {
   if (tools.length === 0) {
     return "";
@@ -33,6 +42,10 @@ function buildToolChoicePrompt(toolChoice: NormalizedRequest["toolChoice"]) {
     return "Do not call any tool. Return a normal reply JSON object.";
   }
 
+  if (toolChoice === "required") {
+    return "You must call at least one tool and return a tool_call or tool_calls JSON object.";
+  }
+
   if (toolChoice === "auto") {
     return "Call a tool only when it is necessary to answer correctly.";
   }
@@ -49,9 +62,9 @@ function buildSessionInit(request: NormalizedRequest) {
   const hasTooling = request.tools.length > 0;
   const parts = [
     ...systemPrompts,
-    // ...(hasTooling ? [RESPONSE_ENVELOPE_INSTRUCTION] : []),
-    // ...(hasTooling ? [buildToolCatalogPrompt(request.tools)] : []),
-    // ...(hasTooling ? [buildToolChoicePrompt(request.toolChoice)] : []),
+    ...(hasTooling ? [RESPONSE_ENVELOPE_INSTRUCTION] : []),
+    ...(hasTooling ? [buildToolCatalogPrompt(request.tools)] : []),
+    ...(hasTooling ? [buildToolChoicePrompt(request.toolChoice)] : []),
   ]
     .map((part) => part.trim())
     .filter((part) => part.length > 0);

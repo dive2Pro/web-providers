@@ -1,5 +1,9 @@
 import type { BrowserAutomationClient } from "./browser/types";
 import { HelperError } from "./errors";
+import {
+  buildProviderResponseRepairPrompt,
+  getProviderResponseRepairDecision,
+} from "./provider-response";
 import { HelperState } from "./state";
 import type { BoundSession, ProviderRequestDebugRecord } from "./types";
 import type {
@@ -11,6 +15,7 @@ import type {
 
 export const DEFAULT_SESSION_ID = "__default__";
 export const OPENAI_PUBLIC_SESSION_ID = "__openai_public__";
+const MAX_PROVIDER_RESPONSE_REPAIR_ATTEMPTS = 3;
 
 function buildProviderPrompt(input: {
   messages: ProviderChatRequest["messages"];
@@ -89,6 +94,7 @@ function createBaseDebugRecord(
       status: "running",
       response: null,
       automation: null,
+      repair: null,
       error: null,
     } satisfies ProviderRequestDebugRecord,
     startedAt,
@@ -293,6 +299,7 @@ export class HelperRuntime {
 
     let activeTabId: string | null = null;
     let baseDebugRecord: ProviderRequestDebugRecord | null = null;
+    let repairSummary: ProviderRequestDebugRecord["repair"] = null;
 
     try {
       const session = await this.ensureBound({ sessionId, provider });
@@ -334,16 +341,65 @@ export class HelperRuntime {
         );
       }
 
-      const result = await this.browserClient.sendChatPrompt({
-        provider,
-        tabId: session.tabId,
-        prompt,
-        timeoutMs: 30_000,
-        freshSession: promptInput.shouldStartFresh,
-        signal: input.signal,
-      });
+      const repairIssues: string[][] = [];
+      let latestAutomationDebug: ProviderRequestDebugRecord["automation"] = null;
+      const sendPrompt = async (nextPrompt: string, freshSession: boolean) => {
+        const result = await this.browserClient.sendChatPrompt({
+          provider,
+          tabId: session.tabId,
+          prompt: nextPrompt,
+          timeoutMs: 30_000,
+          freshSession,
+          signal: input.signal,
+        });
+        latestAutomationDebug = result.debug ?? null;
+        return toProviderResponse(result);
+      };
 
-      const response = toProviderResponse(result);
+      let response = await sendPrompt(prompt, promptInput.shouldStartFresh);
+      let repairDecision = getProviderResponseRepairDecision(response);
+      let repairAttemptCount = 0;
+
+      while (
+        repairDecision.shouldRepair &&
+        repairAttemptCount < MAX_PROVIDER_RESPONSE_REPAIR_ATTEMPTS
+      ) {
+        repairAttemptCount += 1;
+        repairIssues.push(repairDecision.issues);
+        response = await sendPrompt(
+          buildProviderResponseRepairPrompt({
+            issues: repairDecision.issues,
+            rawOutput: repairDecision.rawOutput,
+            attempt: repairAttemptCount,
+          }),
+          false,
+        );
+        repairDecision = getProviderResponseRepairDecision(response);
+      }
+
+      if (repairDecision.shouldRepair) {
+        repairIssues.push(repairDecision.issues);
+        repairSummary = {
+          attemptCount: repairAttemptCount,
+          issues: repairIssues,
+          success: false,
+        };
+        throw new HelperError(
+          "INVALID_PROVIDER_RESPONSE",
+          `Provider returned an invalid structured response after ${MAX_PROVIDER_RESPONSE_REPAIR_ATTEMPTS} repair attempts`,
+          latestAutomationDebug,
+        );
+      }
+
+      response = repairDecision.response;
+      repairSummary =
+        repairAttemptCount > 0
+          ? {
+              attemptCount: repairAttemptCount,
+              issues: repairIssues,
+              success: true,
+            }
+          : null;
       const latestTabUrl =
         this.browserClient.getProviderTabUrl
           ? await this.browserClient.getProviderTabUrl({
@@ -364,7 +420,8 @@ export class HelperRuntime {
         completedAt: new Date().toISOString(),
         status: "completed",
         response,
-        automation: result.debug ?? null,
+        automation: latestAutomationDebug,
+        repair: repairSummary,
       });
 
       if (input.body.sessionInit?.prompt) {
@@ -409,6 +466,7 @@ export class HelperRuntime {
           completedAt: new Date().toISOString(),
           status: "failed",
           automation: helperError.automationDebug,
+          repair: repairSummary,
           error: {
             code: helperError.code,
             message: helperError.message,

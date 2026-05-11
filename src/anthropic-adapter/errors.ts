@@ -43,6 +43,7 @@ export function mapHelperError(payload: { error?: string; message?: string }) {
       );
     case "AUTOMATION_DESYNC":
     case "PAGE_UNAVAILABLE":
+    case "INVALID_PROVIDER_RESPONSE":
       return new AnthropicAdapterError(
         502,
         "api_error",

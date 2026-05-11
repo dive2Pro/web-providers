@@ -10,10 +10,9 @@ type FetchImpl = typeof fetch;
 
 const RESPONSE_ENVELOPE_INSTRUCTION = [
   "Your entire assistant reply must be exactly one JSON object.",
-  // "Return exactly one final action object per reply: either a message or a tool_call, never both.",
-  // "If you need multiple tool calls, return only the first tool_call and wait for the next turn.",
   'For normal replies use: {"type":"message","content":"your response text"}',
   'For tool calls use: {"type":"tool_call","name":"tool_name","arguments":{"key":"value"}}',
+  'For multiple tool calls use: {"type":"tool_calls","calls":[{"name":"tool_name","arguments":{"key":"value"}}]}',
   "Do not add any prose before or after it.",
   "Do not wrap it in markdown or code fences.",
 ].join(" ");
@@ -41,6 +40,10 @@ function buildToolCatalogPrompt(tools: NormalizedRequest["tools"]) {
 function buildToolChoicePrompt(toolChoice: NormalizedRequest["toolChoice"]) {
   if (toolChoice === "none") {
     return "Do not call any tool. Return a normal reply JSON object.";
+  }
+
+  if (toolChoice === "required") {
+    return "You must call at least one tool and return a tool_call or tool_calls JSON object.";
   }
 
   if (toolChoice === "auto") {

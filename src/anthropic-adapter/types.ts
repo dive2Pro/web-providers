@@ -13,6 +13,7 @@ export type NormalizedTool = {
 
 export type NormalizedToolChoice =
   | "auto"
+  | "required"
   | "none"
   | { type: "function"; name: string };
 

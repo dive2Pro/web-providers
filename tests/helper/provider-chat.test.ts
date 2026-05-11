@@ -596,6 +596,84 @@ describe("provider chat route", () => {
     });
   });
 
+  it("repairs an invalid structured response within the same provider chat", async () => {
+    const prompts: string[] = [];
+    let freshChatCount = 0;
+
+    const app = buildApp({
+      token: "test-token",
+      browserClient: {
+        getConnectionStatus: async () => "connected",
+        bindDeepSeekTab: async () => ({
+          tabId: "tab-1",
+          url: "https://chat.deepseek.com/",
+          loginState: "logged_in",
+          bridgeInjected: true,
+          pageState: {
+            inputReady: true,
+            busy: false,
+            latestAssistantPreview: null,
+            assistantCount: 0,
+          },
+        }),
+        resetPageBridge: async () => undefined,
+        startNewChat: async () => {
+          freshChatCount += 1;
+        },
+        sendChatPrompt: async ({ prompt }: { prompt: string }) => {
+          prompts.push(prompt);
+          if (prompts.length === 1) {
+            return {
+              mode: "json_fallback",
+              toolCalls: [],
+              modelLabel: "DeepSeek Web",
+            };
+          }
+
+          return {
+            mode: "text",
+            outputText: "{\"type\":\"message\",\"content\":\"fixed answer\"}",
+            modelLabel: "DeepSeek Web",
+          };
+        },
+      } as never,
+    });
+
+    await app.inject({
+      method: "POST",
+      url: "/v1/bind",
+      headers: { authorization: "Bearer test-token" },
+    });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/provider/chat",
+      headers: {
+        authorization: "Bearer test-token",
+      },
+      payload: {
+        model: "deepseek-web-chat",
+        messages: [{ role: "user", content: "hello" }],
+        sessionInit: {
+          prompt: "You are terse.",
+        },
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({
+      mode: "text",
+      outputText: "fixed answer",
+      finishReason: "stop",
+      modelLabel: "DeepSeek Web",
+    });
+    expect(freshChatCount).toBe(1);
+    expect(prompts[0]).toBe("You are terse.\n\nhello");
+    expect(prompts[1]).toContain("The previous reply did not match the required response format.");
+    expect(prompts[1]).toContain("Return exactly one JSON object and nothing else.");
+    expect(prompts[1]).toContain("toolCalls must be a non-empty array");
+  });
+
   it("forwards only the latest user turn because DeepSeek web keeps its own chat history", async () => {
     let capturedPrompt = "";
 
@@ -1248,6 +1326,65 @@ describe("provider chat route", () => {
         message: "The page did not finish streaming in time",
       },
     });
+  });
+
+  it("fails after three invalid structured repair attempts", async () => {
+    const prompts: string[] = [];
+
+    const app = buildApp({
+      token: "test-token",
+      browserClient: {
+        getConnectionStatus: async () => "connected",
+        bindDeepSeekTab: async () => ({
+          tabId: "tab-1",
+          url: "https://chat.deepseek.com/",
+          loginState: "logged_in",
+          bridgeInjected: true,
+          pageState: {
+            inputReady: true,
+            busy: false,
+            latestAssistantPreview: null,
+            assistantCount: 0,
+          },
+        }),
+        resetPageBridge: async () => undefined,
+        startNewChat: async () => undefined,
+        sendChatPrompt: async ({ prompt }: { prompt: string }) => {
+          prompts.push(prompt);
+          return {
+            mode: "json_fallback",
+            toolCalls: [],
+            modelLabel: "DeepSeek Web",
+          };
+        },
+      } as never,
+    });
+
+    await app.inject({
+      method: "POST",
+      url: "/v1/bind",
+      headers: { authorization: "Bearer test-token" },
+    });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/provider/chat",
+      headers: { authorization: "Bearer test-token" },
+      payload: {
+        model: "deepseek-web-chat",
+        messages: [{ role: "user", content: "hello" }],
+      },
+    });
+
+    expect(response.statusCode).toBe(409);
+    expect(response.json()).toEqual({
+      error: "INVALID_PROVIDER_RESPONSE",
+      message: "Provider returned an invalid structured response after 3 repair attempts",
+    });
+    expect(prompts).toHaveLength(4);
+    expect(prompts[1]).toContain("Repair attempt: 1.");
+    expect(prompts[2]).toContain("Repair attempt: 2.");
+    expect(prompts[3]).toContain("Repair attempt: 3.");
   });
 
   it("aborts the current provider request when the client aborts the HTTP request", async () => {

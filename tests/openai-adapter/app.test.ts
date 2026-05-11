@@ -184,7 +184,7 @@ describe("openai adapter helper client", () => {
       "http://127.0.0.1:4318/v1/provider/chat",
       expect.objectContaining({
         body: expect.stringContaining(
-          "Return exactly one final action object per reply: either a message or a tool_call, never both.",
+          "Your entire assistant reply must be exactly one JSON object.",
         ),
       }),
     );
@@ -661,6 +661,41 @@ describe("openai adapter app", () => {
       error: {
         code: "provider_not_bound",
         message: "Bind a deepseek-web tab before provider chat",
+      },
+    });
+  });
+
+  it("maps invalid provider responses to upstream failures", async () => {
+    const app = buildOpenAiAdapterApp({
+      token: "adapter-token",
+      helperBaseUrl: "http://127.0.0.1:4318",
+      helperToken: "helper-token",
+      fetchImpl: vi.fn().mockResolvedValue({
+        ok: false,
+        json: async () => ({
+          error: "INVALID_PROVIDER_RESPONSE",
+          message: "Provider returned an invalid structured response after 3 repair attempts",
+        }),
+      }),
+    });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/chat/completions",
+      headers: {
+        authorization: "Bearer adapter-token",
+      },
+      payload: {
+        model: "deepseek-web-chat",
+        messages: [{ role: "user", content: "hello" }],
+      },
+    });
+
+    expect(response.statusCode).toBe(502);
+    expect(response.json()).toEqual({
+      error: {
+        code: "upstream_failure",
+        message: "Provider returned an invalid structured response after 3 repair attempts",
       },
     });
   });

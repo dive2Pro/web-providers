@@ -94,6 +94,29 @@ describe("anthropic adapter normalization", () => {
     expect(normalized.messages[2]?.content).toContain("tool_result");
     expect(normalized.messages[2]?.content).toContain("Summarize it.");
   });
+
+  it("rejects tool_result blocks that do not immediately follow assistant tool_use blocks", () => {
+    expect(() =>
+      normalizeMessagesRequest(
+        {
+          model: "deepseek-web-tools",
+          messages: [
+            {
+              role: "user",
+              content: [
+                {
+                  type: "tool_result",
+                  tool_use_id: "toolu_missing",
+                  content: "oops",
+                },
+              ],
+            },
+          ],
+        },
+        getAnthropicPublicModel("deepseek-web-tools")!,
+      ),
+    ).toThrow(/tool_result blocks must immediately follow an assistant tool_use message/);
+  });
 });
 
 describe("anthropic adapter helper client", () => {
@@ -133,6 +156,61 @@ describe("anthropic adapter helper client", () => {
       outputText: "{\"title\":\"Fix login button on mobile\"}",
       finishReason: "stop",
     });
+  });
+
+  it("injects tool and json protocol instructions into session init when tools are present", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        mode: "text",
+        outputText: "hello",
+        finishReason: "stop",
+      }),
+    });
+    const client = createHelperClient({
+      helperBaseUrl: "http://127.0.0.1:4318",
+      helperToken: "helper-token",
+      fetchImpl: fetchMock,
+    });
+
+    await client.run({
+      publicModel: "anthropic-deepseek-web-tools",
+      provider: "deepseek-web",
+      responseFormat: "anthropic_messages",
+      messages: [
+        { role: "system", content: "Be terse." },
+        { role: "user", content: "Read README." },
+      ],
+      tools: [
+        {
+          name: "read_file",
+          description: "Read a file",
+          parametersJson: "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}}}",
+        },
+      ],
+      toolChoice: "required",
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://127.0.0.1:4318/v1/provider/chat",
+      expect.objectContaining({
+        body: expect.stringContaining("Your entire assistant reply must be exactly one JSON object."),
+      }),
+    );
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://127.0.0.1:4318/v1/provider/chat",
+      expect.objectContaining({
+        body: expect.stringContaining("Tool name: read_file"),
+      }),
+    );
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://127.0.0.1:4318/v1/provider/chat",
+      expect.objectContaining({
+        body: expect.stringContaining(
+          "You must call at least one tool and return a tool_call or tool_calls JSON object.",
+        ),
+      }),
+    );
   });
 });
 
@@ -428,6 +506,129 @@ describe("anthropic adapter app", () => {
           },
         },
       ],
+    });
+  });
+
+  it("rejects messages that use a system role instead of the top-level system field", async () => {
+    const app = buildAnthropicAdapterApp({
+      token: "adapter-token",
+      helperBaseUrl: "http://127.0.0.1:4318",
+      helperToken: "helper-token",
+      fetchImpl: vi.fn(),
+    });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/messages",
+      headers: {
+        "x-api-key": "adapter-token",
+      },
+      payload: {
+        model: "anthropic-deepseek-web-chat",
+        messages: [
+          { role: "system", content: "Be terse." },
+          { role: "user", content: "hello" },
+        ],
+      },
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json()).toEqual({
+      type: "error",
+      error: {
+        type: "invalid_request_error",
+        message: 'messages[0].role must be "user" or "assistant"',
+      },
+    });
+  });
+
+  it("rejects tool_result blocks that appear after text in the same user message", async () => {
+    const app = buildAnthropicAdapterApp({
+      token: "adapter-token",
+      helperBaseUrl: "http://127.0.0.1:4318",
+      helperToken: "helper-token",
+      fetchImpl: vi.fn(),
+    });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/messages",
+      headers: {
+        "x-api-key": "adapter-token",
+      },
+      payload: {
+        model: "anthropic-deepseek-web-tools",
+        messages: [
+          {
+            role: "assistant",
+            content: [
+              {
+                type: "tool_use",
+                id: "toolu_1",
+                name: "read_file",
+                input: { path: "README.md" },
+              },
+            ],
+          },
+          {
+            role: "user",
+            content: [
+              { type: "text", text: "here you go" },
+              {
+                type: "tool_result",
+                tool_use_id: "toolu_1",
+                content: "README",
+              },
+            ],
+          },
+        ],
+      },
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json()).toEqual({
+      type: "error",
+      error: {
+        type: "invalid_request_error",
+        message:
+          "messages[1].content tool_result blocks must come before all other content blocks",
+      },
+    });
+  });
+
+  it("maps helper invalid structured response errors to anthropic api errors", async () => {
+    const app = buildAnthropicAdapterApp({
+      token: "adapter-token",
+      helperBaseUrl: "http://127.0.0.1:4318",
+      helperToken: "helper-token",
+      fetchImpl: vi.fn().mockResolvedValue({
+        ok: false,
+        json: async () => ({
+          error: "INVALID_PROVIDER_RESPONSE",
+          message: "Provider returned an invalid structured response after 3 repair attempts",
+        }),
+      }),
+    });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/messages",
+      headers: {
+        "x-api-key": "adapter-token",
+      },
+      payload: {
+        model: "anthropic-deepseek-web-chat",
+        messages: [{ role: "user", content: "hello" }],
+      },
+    });
+
+    expect(response.statusCode).toBe(502);
+    expect(response.json()).toEqual({
+      type: "error",
+      error: {
+        type: "api_error",
+        message: "Provider returned an invalid structured response after 3 repair attempts",
+      },
     });
   });
 

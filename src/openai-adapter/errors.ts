@@ -35,6 +35,7 @@ export function mapHelperError(payload: { error?: string; message?: string }) {
       );
     case "AUTOMATION_DESYNC":
     case "PAGE_UNAVAILABLE":
+    case "INVALID_PROVIDER_RESPONSE":
       return new AdapterError(
         502,
         "upstream_failure",

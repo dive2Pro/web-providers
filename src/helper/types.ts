@@ -67,6 +67,13 @@ export interface ProviderRequestDebugRecord {
   status: "running" | "completed" | "failed";
   response: ProviderChatResponse | null;
   automation: SendChatAutomationDebug | null;
+  repair:
+    | {
+        attemptCount: number;
+        issues: string[][];
+        success: boolean;
+      }
+    | null;
   error: {
     code: string;
     message: string;
