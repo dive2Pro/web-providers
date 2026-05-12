@@ -25,6 +25,7 @@ export interface ProviderToolCallTurn {
   toolCalls: ProviderToolCall[];
   thinkingText?: string;
   outputText?: string;
+  rawOutputText?: string;
   modelLabel?: string;
 }
 
@@ -32,6 +33,7 @@ export interface ProviderTextTurn {
   mode: "text";
   thinkingText?: string;
   outputText: string;
+  rawOutputText?: string;
   modelLabel?: string;
 }
 

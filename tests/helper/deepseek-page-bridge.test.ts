@@ -444,6 +444,7 @@ describe("deepseek page bridge", () => {
     ).toEqual({
       mode: "text",
       outputText: "hello from deepseek",
+      rawOutputText: "{\"type\":\"message\",\"content\":\"hello from deepseek\"}",
     });
   });
 
@@ -1201,6 +1202,7 @@ describe("deepseek page bridge", () => {
         mode: "text",
         thinkingText: "We need",
         outputText: "Hey!",
+        rawOutputText: "{\"type\":\"message\",\"content\":\"Hey!\"}",
       },
       meta: {
         source: "bridge_stream",

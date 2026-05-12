@@ -1619,6 +1619,96 @@ describe("BbBrowserClient", () => {
     });
   });
 
+  it("preserves raw protocol text from bridge-streamed DeepSeek message envelopes", async () => {
+    let progressPollCount = 0;
+
+    const client = new BbBrowserClient({
+      getConnectionStatus: async () => "connected",
+      findDeepSeekTab: async () => ({
+        id: "tab-1",
+        url: "https://chat.deepseek.com/",
+      }),
+      openDeepSeek: async () => undefined,
+      submitPrompt: async () => {
+        throw new Error("transport.submitPrompt should not be used when the bridge handles submission");
+      },
+      evaluate: async <T>(_tabId: string, script: string) => {
+        if (script.includes("window.__piDeepSeekBridge.startPrompt(")) {
+          return {
+            ok: true,
+            baselineState: {
+              inputReady: true,
+              busy: false,
+              latestAssistantPreview: "old reply",
+              assistantCount: 1,
+            },
+          } as T;
+        }
+
+        if (script.includes("getCompletionState()") && script.includes("getPageState()")) {
+          progressPollCount += 1;
+
+          if (progressPollCount === 1) {
+            return {
+              pageState: {
+                inputReady: true,
+                busy: true,
+                latestAssistantPreview: null,
+                assistantCount: 1,
+              },
+              completionState: {
+                observed: true,
+                status: "streaming",
+                closed: false,
+                terminalAt: null,
+                turn: null,
+              },
+            } as T;
+          }
+
+          return {
+            pageState: {
+              inputReady: true,
+              busy: false,
+              latestAssistantPreview: "new reply",
+              assistantCount: 2,
+            },
+            completionState: {
+              observed: true,
+              status: "finished",
+              closed: true,
+              terminalAt: Date.now(),
+              turn: {
+                mode: "text",
+                outputText: "new reply",
+                rawOutputText: "{\"type\":\"message\",\"content\":\"new reply\"}",
+              },
+            },
+          } as T;
+        }
+
+        return undefined as T;
+      },
+    });
+
+    await expect(
+      client.sendChatPrompt({
+        tabId: "tab-1",
+        prompt: "hello again",
+        timeoutMs: 3000,
+      }),
+    ).resolves.toMatchObject({
+      mode: "text",
+      outputText: "new reply",
+      rawOutputText: "{\"type\":\"message\",\"content\":\"new reply\"}",
+      debug: {
+        source: "bridge_stream",
+        freshSession: false,
+      },
+      modelLabel: "DeepSeek Web",
+    });
+  });
+
   it("falls back to trusted transport submission when bridge start does not trigger a response", async () => {
     let submittedPrompt: string | null = null;
     let progressPollCount = 0;

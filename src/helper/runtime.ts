@@ -111,6 +111,7 @@ function toProviderResponse(result: {
   mode: "text" | "native_tool_call" | "json_fallback";
   thinkingText?: string;
   outputText?: string;
+  rawOutputText?: string;
   modelLabel?: string;
   toolCalls?: ProviderToolCall[];
 }): ProviderChatResponse {
@@ -120,7 +121,7 @@ function toProviderResponse(result: {
       ...(typeof result.thinkingText === "string"
         ? { thinkingText: result.thinkingText }
         : {}),
-      outputText: result.outputText ?? "",
+      outputText: result.rawOutputText ?? result.outputText ?? "",
       finishReason: "stop",
       modelLabel: result.modelLabel,
     };

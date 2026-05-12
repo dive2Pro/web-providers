@@ -54,9 +54,13 @@ describe("merged helper openai routes", () => {
           };
         },
         startNewChat: async () => undefined,
-        sendChatPrompt: async ({ prompt }: { prompt: string }) => ({
+        sendChatPrompt: async () => ({
           mode: "text",
-          outputText: `reply:${prompt}`,
+          outputText: "reply:hello",
+          rawOutputText: JSON.stringify({
+            type: "message",
+            content: "reply:hello",
+          }),
           modelLabel: "DeepSeek Web",
         }),
       } as never,
@@ -117,9 +121,13 @@ describe("merged helper openai routes", () => {
           };
         },
         startNewChat: async () => undefined,
-        sendChatPrompt: async ({ prompt }: { prompt: string }) => ({
+        sendChatPrompt: async () => ({
           mode: "text",
-          outputText: `reply:${prompt}`,
+          outputText: "reply:hello",
+          rawOutputText: JSON.stringify({
+            type: "message",
+            content: "reply:hello",
+          }),
           modelLabel: "DeepSeek Web",
         }),
       } as never,
@@ -303,6 +311,10 @@ describe("merged helper openai routes", () => {
         sendChatPrompt: async ({ prompt }: { prompt: string }) => ({
           mode: "text",
           outputText: `reply:${prompt}`,
+          rawOutputText: JSON.stringify({
+            type: "message",
+            content: `reply:${prompt}`,
+          }),
           modelLabel: "DeepSeek Web",
         }),
       } as never,
@@ -380,6 +392,10 @@ describe("merged helper openai routes", () => {
         sendChatPrompt: async ({ prompt }: { prompt: string }) => ({
           mode: "text",
           outputText: `reply:${prompt}`,
+          rawOutputText: JSON.stringify({
+            type: "message",
+            content: `reply:${prompt}`,
+          }),
           modelLabel: "DeepSeek Web",
         }),
       } as never,
@@ -452,6 +468,10 @@ describe("merged helper openai routes", () => {
         sendChatPrompt: async ({ prompt }: { prompt: string }) => ({
           mode: "text",
           outputText: `reply:${prompt}`,
+          rawOutputText: JSON.stringify({
+            type: "message",
+            content: `reply:${prompt}`,
+          }),
           modelLabel: "DeepSeek Web",
         }),
       } as never,

@@ -377,6 +377,7 @@ export function classifyCompletionTurn(input: {
       mode: "text",
       ...(thinkingText.length > 0 ? { thinkingText } : {}),
       outputText: jsonEnvelope.content,
+      rawOutputText: outputText,
     };
   }
 
@@ -390,7 +391,7 @@ export function classifyCompletionTurn(input: {
 export const INJECTED_BRIDGE_SOURCE = `
 (() => {
   const KEY = "__piDeepSeekBridge";
-  const VERSION = 14;
+  const VERSION = 15;
   const __name = (target, _value) => target;
   const detectNativeToolCalls = ${detectNativeToolCalls.toString()};
   const detectJsonEnvelope = ${detectJsonEnvelope.toString()};

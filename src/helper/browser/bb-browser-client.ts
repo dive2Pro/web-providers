@@ -889,7 +889,9 @@ export class BbBrowserClient implements BrowserAutomationClient {
               : null,
           completionTurnPreview:
             completionState?.turn?.mode === "text"
-              ? previewDebugText(completionState.turn.outputText)
+              ? previewDebugText(
+                  completionState.turn.rawOutputText ?? completionState.turn.outputText,
+                )
               : completionState?.turn?.outputText
                 ? previewDebugText(completionState.turn.outputText)
                 : null,
@@ -968,7 +970,9 @@ export class BbBrowserClient implements BrowserAutomationClient {
                 : false,
             completionObserved,
             completionTurnMode: streamedTurn.mode,
-            completionTurnPreview: previewDebugText(streamedTurn.outputText),
+            completionTurnPreview: previewDebugText(
+              streamedTurn.rawOutputText ?? streamedTurn.outputText,
+            ),
           });
           return {
             mode: "text",
@@ -976,6 +980,9 @@ export class BbBrowserClient implements BrowserAutomationClient {
               ? { thinkingText: streamedTurn.thinkingText }
               : {}),
             outputText: streamedTurn.outputText,
+            ...(typeof streamedTurn.rawOutputText === "string"
+              ? { rawOutputText: streamedTurn.rawOutputText }
+              : {}),
             debug: buildAutomationDebug({
               source: "bridge_stream",
               freshSession: input.freshSession === true,
