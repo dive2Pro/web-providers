@@ -8,12 +8,12 @@ describe("openai adapter model registry", () => {
   it("lists stable public models", () => {
     expect(listPublicModels()).toEqual([
       expect.objectContaining({
-        id: "deepseek-web-chat",
+        id: "deepseek-web-pro",
         provider: "deepseek-web",
-        supportsTools: false,
+        supportsTools: true,
       }),
       expect.objectContaining({
-        id: "deepseek-web-tools",
+        id: "deepseek-web-flash",
         provider: "deepseek-web",
         supportsTools: true,
       }),
@@ -31,6 +31,12 @@ describe("openai adapter model registry", () => {
   });
 
   it("returns a model by public id", () => {
+    expect(getPublicModel("deepseek-web-chat")).toMatchObject({
+      id: "deepseek-web-chat",
+      provider: "deepseek-web",
+      supportsTools: true,
+      listed: false,
+    });
     expect(getPublicModel("qwen-web-tools")).toMatchObject({
       id: "qwen-web-tools",
       provider: "qwen-web",

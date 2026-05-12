@@ -36,7 +36,7 @@ describe("chat completions serializer", () => {
       serializeChatCompletions({
         id: "resp-2",
         created: 1710000000,
-        model: "deepseek-web-tools",
+        model: "qwen-web-tools",
         result: {
           mode: "native_tool_call",
           toolCalls: [

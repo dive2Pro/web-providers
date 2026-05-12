@@ -78,7 +78,7 @@ function buildSessionInit(request: NormalizedRequest) {
   };
 }
 
-function toProviderChatRequest(request: NormalizedRequest): ProviderChatRequest {
+export function toProviderChatRequest(request: NormalizedRequest): ProviderChatRequest {
   const sessionInit = buildSessionInit(request);
   return {
     provider: request.provider,

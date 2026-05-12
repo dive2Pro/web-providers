@@ -143,7 +143,7 @@ describe("provider chat route", () => {
     }
 
     expect(bindCalls).toEqual([
-      expect.objectContaining({ provider: "deepseek-web", passive: true }),
+      expect.objectContaining({ provider: "deepseek-web", openNew: true }),
       expect.objectContaining({ provider: "deepseek-web", tabId: "tab-1" }),
     ]);
   });
@@ -228,12 +228,12 @@ describe("provider chat route", () => {
       message: "DeepSeek tab is still loading. Wait for the page to finish loading and retry.",
     });
     expect(bindCalls).toEqual([
-      expect.objectContaining({ provider: "deepseek-web", passive: true }),
+      expect.objectContaining({ provider: "deepseek-web", openNew: true }),
       expect.objectContaining({ provider: "deepseek-web", tabId: "tab-1" }),
     ]);
   });
 
-  it("rebinds by remembered url before opening a new tab when the tab id changes", async () => {
+  it("opens a new tab with the remembered url when the tab id changes", async () => {
     const bindCalls: Array<Record<string, unknown>> = [];
 
     const app = buildApp({
@@ -310,10 +310,11 @@ describe("provider chat route", () => {
     }
 
     expect(bindCalls).toEqual([
-      expect.objectContaining({ provider: "deepseek-web", passive: true }),
+      expect.objectContaining({ provider: "deepseek-web", openNew: true }),
       expect.objectContaining({ provider: "deepseek-web", tabId: "tab-1" }),
       expect.objectContaining({
         provider: "deepseek-web",
+        openNew: true,
         openUrl: "https://chat.deepseek.com/a/chat/s/session-1",
       }),
     ]);
@@ -401,8 +402,8 @@ describe("provider chat route", () => {
     }
 
     expect(bindCalls).toEqual([
-      expect.objectContaining({ provider: "deepseek-web", passive: true }),
-      expect.objectContaining({ provider: "deepseek-web", passive: true }),
+      expect.objectContaining({ provider: "deepseek-web", openNew: true }),
+      expect.objectContaining({ provider: "deepseek-web", openNew: true }),
       expect.objectContaining({ provider: "deepseek-web", tabId: "tab-1" }),
     ]);
   });
@@ -562,10 +563,11 @@ describe("provider chat route", () => {
     }
 
     expect(bindCalls).toEqual([
-      expect.objectContaining({ provider: "deepseek-web", passive: true }),
+      expect.objectContaining({ provider: "deepseek-web", openNew: true }),
       expect.objectContaining({ provider: "deepseek-web", tabId: "tab-1" }),
       expect.objectContaining({
         provider: "deepseek-web",
+        openNew: true,
         openUrl: "https://chat.deepseek.com/a/chat/s/session-1",
       }),
     ]);
@@ -589,6 +591,7 @@ describe("provider chat route", () => {
           },
         }),
         resetPageBridge: async () => undefined,
+        startNewChat: async () => undefined,
         sendChatPrompt: async ({ prompt }: { prompt: string }) => ({
           mode: "text",
           outputText: `reply:${prompt}`,
@@ -650,6 +653,7 @@ describe("provider chat route", () => {
           },
         }),
         resetPageBridge: async () => undefined,
+        startNewChat: async () => undefined,
         sendChatPrompt: async () => ({
           mode: "text",
           thinkingText: "think step",
@@ -705,6 +709,7 @@ describe("provider chat route", () => {
           },
         }),
         resetPageBridge: async () => undefined,
+        startNewChat: async () => undefined,
         sendChatPrompt: async () => ({
           mode: "json_fallback",
           toolCalls: [
@@ -848,6 +853,7 @@ describe("provider chat route", () => {
           },
         }),
         resetPageBridge: async () => undefined,
+        startNewChat: async () => undefined,
         sendChatPrompt: async ({ prompt }: { prompt: string }) => {
           capturedPrompt = prompt;
           return {
@@ -939,6 +945,72 @@ describe("provider chat route", () => {
 
     expect(freshChatCount).toBe(1);
     expect(capturedPrompt).toBe("You are terse.\n\nhello");
+  });
+
+  it("starts a fresh DeepSeek pro chat on the first turn even without sessionInit", async () => {
+    let capturedPrompt = "";
+    const startNewChatCalls: Array<{ provider: string; tabId: string; modelId?: string }> = [];
+
+    const app = buildApp({
+      token: "test-token",
+      browserClient: {
+        getConnectionStatus: async () => "connected",
+        bindDeepSeekTab: async () => ({
+          tabId: "tab-1",
+          url: "https://chat.deepseek.com/",
+          loginState: "logged_in",
+          bridgeInjected: true,
+          pageState: {
+            inputReady: true,
+            busy: false,
+            latestAssistantPreview: null,
+            assistantCount: 0,
+          },
+        }),
+        resetPageBridge: async () => undefined,
+        startNewChat: async (input: {
+          provider: string;
+          tabId: string;
+          modelId?: string;
+        }) => {
+          startNewChatCalls.push(input);
+        },
+        sendChatPrompt: async ({
+          prompt,
+          freshSession,
+        }: {
+          prompt: string;
+          freshSession?: boolean;
+        }) => {
+          capturedPrompt = prompt;
+          expect(freshSession).toBe(true);
+          return {
+            mode: "text",
+            outputText: "ok",
+            modelLabel: "DeepSeek Web",
+          };
+        },
+      } as never,
+    });
+
+    await app.inject({
+      method: "POST",
+      url: "/v1/bind",
+      headers: { authorization: "Bearer test-token" },
+    });
+
+    await app.inject({
+      method: "POST",
+      url: "/v1/provider/chat",
+      headers: { authorization: "Bearer test-token" },
+      payload: {
+        model: "deepseek-web-pro",
+        messages: [{ role: "user", content: "hello" }],
+      },
+    });
+
+    expect(startNewChatCalls).toEqual(["tab-1"]);
+    expect(capturedPrompt).toBe("hello");
   });
 
   it("reuses the current provider chat on repeated initialized requests", async () => {
@@ -1262,6 +1334,7 @@ describe("provider chat route", () => {
           },
         }),
         resetPageBridge: async () => undefined,
+        startNewChat: async () => undefined,
         sendChatPrompt: async ({ prompt }: { prompt: string }) => ({
           mode: "text",
           outputText: `reply:${prompt}`,
@@ -1355,6 +1428,7 @@ describe("provider chat route", () => {
           },
         }),
         resetPageBridge: async () => undefined,
+        startNewChat: async () => undefined,
         sendChatPrompt: async () => {
           throw new Error("boom");
         },
@@ -1418,6 +1492,7 @@ describe("provider chat route", () => {
           },
         }),
         resetPageBridge: async () => undefined,
+        startNewChat: async () => undefined,
         sendChatPrompt: async () => {
           throw new HelperError("TIMEOUT", "The page did not finish streaming in time", {
             source: "client_error",
@@ -1562,6 +1637,7 @@ describe("provider chat route", () => {
           },
         }),
         resetPageBridge: async () => undefined,
+        startNewChat: async () => undefined,
         sendChatPrompt: async ({ signal }: { signal?: AbortSignal }) => {
           requestCount += 1;
           if (requestCount > 1) {

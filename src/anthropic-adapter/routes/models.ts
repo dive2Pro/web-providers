@@ -46,8 +46,8 @@ export function registerAnthropicModelsRoute(app: FastifyInstance) {
 
     return {
       type: "model",
-      id: modelId,
-      display_name: modelId,
+      id: upstreamModel.id,
+      display_name: upstreamModel.id,
       created_at: "2026-05-11T00:00:00Z",
     };
   });

@@ -390,7 +390,7 @@ export function classifyCompletionTurn(input: {
 export const INJECTED_BRIDGE_SOURCE = `
 (() => {
   const KEY = "__piDeepSeekBridge";
-  const VERSION = 13;
+  const VERSION = 14;
   const __name = (target, _value) => target;
   const detectNativeToolCalls = ${detectNativeToolCalls.toString()};
   const detectJsonEnvelope = ${detectJsonEnvelope.toString()};
@@ -916,6 +916,270 @@ export const INJECTED_BRIDGE_SOURCE = `
     }) || null;
   }
 
+  function getNodeLabel(node) {
+    const parts = [];
+    const textContent =
+      node && typeof node.textContent === "string" ? node.textContent : "";
+    if (textContent.length > 0) {
+      parts.push(textContent);
+    }
+    if (typeof node?.getAttribute === "function") {
+      const ariaLabel = node.getAttribute("aria-label");
+      const title = node.getAttribute("title");
+      const dataTestId = node.getAttribute("data-testid");
+      if (typeof ariaLabel === "string" && ariaLabel.length > 0) {
+        parts.push(ariaLabel);
+      }
+      if (typeof title === "string" && title.length > 0) {
+        parts.push(title);
+      }
+      if (typeof dataTestId === "string" && dataTestId.length > 0) {
+        parts.push(dataTestId);
+      }
+    }
+
+    return parts.join(" ").trim().toLowerCase();
+  }
+
+  function isClickableNodeDisabled(node) {
+    if (!node) {
+      return true;
+    }
+
+    const className = (node.className || "").toString().toLowerCase();
+    return (
+      node.getAttribute?.("aria-disabled") === "true" ||
+      node.getAttribute?.("disabled") === "true" ||
+      node.disabled === true ||
+      className.includes("disabled")
+    );
+  }
+
+  function isModeNodeSelected(node) {
+    if (!node || typeof node.getAttribute !== "function") {
+      return false;
+    }
+
+    const className = (node.className || "").toString().toLowerCase();
+    return (
+      node.getAttribute("aria-checked") === "true" ||
+      node.getAttribute("aria-pressed") === "true" ||
+      node.getAttribute("aria-selected") === "true" ||
+      node.getAttribute("aria-current") === "true" ||
+      node.checked === true ||
+      node.getAttribute("data-state") === "active" ||
+      className.includes("active") ||
+      className.includes("selected") ||
+      className.includes("current")
+    );
+  }
+
+  function matchesDeepSeekModeLabel(node, targetModelType) {
+    const label = getNodeLabel(node);
+    if (label.length === 0) {
+      return false;
+    }
+
+    if (targetModelType === "expert") {
+      return (
+        label.includes("expert") ||
+        label.includes("专家") ||
+        label.includes("pro") ||
+        label.includes("deepthink") ||
+        label.includes("深度思考")
+      );
+    }
+
+    return (
+      label.includes("flash") ||
+      label.includes("instant") ||
+      label.includes("default") ||
+      label.includes("快速模式") ||
+      label.includes("普通模式") ||
+      label.includes("标准") ||
+      label.includes("默认")
+    );
+  }
+
+  function isDeepSeekConversationPath(pathname) {
+    return ((pathname || "").toLowerCase()).startsWith("/a/chat/s/");
+  }
+
+  function getModeControlNodes() {
+    return Array.from(
+      document.querySelectorAll(
+        "button, a, div[role='button'], [role='radio'], input[type='radio']"
+      )
+    );
+  }
+
+  function isRadioModeNode(node) {
+    if (!node || typeof node.getAttribute !== "function") {
+      return false;
+    }
+
+    return node.getAttribute("role") === "radio" || node.tagName === "INPUT";
+  }
+
+  function groupSiblingModeNodes(nodes) {
+    const groups = [];
+    const groupIndexes = new Map();
+
+    for (const node of nodes) {
+      const container = node.parentElement || node;
+      const existingIndex = groupIndexes.get(container);
+      if (typeof existingIndex === "number") {
+        groups[existingIndex].push(node);
+        continue;
+      }
+
+      groupIndexes.set(container, groups.length);
+      groups.push([node]);
+    }
+
+    return groups;
+  }
+
+  function findRadioModeButton(targetModelType) {
+    const radioNodes = getModeControlNodes().filter((node) =>
+      isRadioModeNode(node) && !isClickableNodeDisabled(node)
+    );
+    if (radioNodes.length < 2) {
+      return null;
+    }
+
+    const radioGroups = groupSiblingModeNodes(radioNodes)
+      .filter((group) => group.length >= 2);
+    if (radioGroups.length === 0) {
+      return null;
+    }
+
+    const composer = findComposer();
+    const preferredGroup =
+      radioGroups.find((group) => {
+        const container = group[0]?.parentElement;
+        return (
+          composer &&
+          container &&
+          typeof container.compareDocumentPosition === "function" &&
+          (container.compareDocumentPosition(composer) & 4) === 4
+        );
+      }) ||
+      radioGroups[0] ||
+      null;
+    if (!preferredGroup) {
+      return null;
+    }
+
+    return targetModelType === "expert"
+      ? preferredGroup[1] || preferredGroup.at(-1) || null
+      : preferredGroup[0] || null;
+  }
+
+  function findModeButton(targetModelType) {
+    const structuralMatch = findRadioModeButton(targetModelType);
+    if (structuralMatch) {
+      return structuralMatch;
+    }
+
+    const candidates = getModeControlNodes().filter((node) =>
+      matchesDeepSeekModeLabel(node, targetModelType) &&
+      !isClickableNodeDisabled(node)
+    );
+
+    if (candidates.length === 0) {
+      return null;
+    }
+
+    return candidates.find((node) => isModeNodeSelected(node)) || candidates[0] || null;
+  }
+
+  async function ensureModelType(targetModelType) {
+    if (targetModelType !== "expert" && targetModelType !== "default") {
+      return { ok: true };
+    }
+
+    const timeoutMs = 4_000;
+    const pollMs = 100;
+    const startedAt = Date.now();
+    let sawModeButton = false;
+
+    while (Date.now() - startedAt <= timeoutMs) {
+      const modeButton = findModeButton(targetModelType);
+      if (!(modeButton instanceof HTMLElement)) {
+        await sleep(pollMs);
+        continue;
+      }
+
+      sawModeButton = true;
+      if (isModeNodeSelected(modeButton)) {
+        return { ok: true };
+      }
+
+      modeButton.click();
+      await sleep(250);
+
+      const updatedModeButton = findModeButton(targetModelType);
+      if (
+        updatedModeButton instanceof HTMLElement &&
+        isModeNodeSelected(updatedModeButton)
+      ) {
+        return { ok: true };
+      }
+
+      await sleep(pollMs);
+    }
+
+    return {
+      ok: false,
+      error: "AUTOMATION_DESYNC",
+      message: sawModeButton
+        ? "DeepSeek " + targetModelType + " mode switch did not stick"
+        : "DeepSeek " + targetModelType + " mode control not found",
+    };
+  }
+
+  async function waitForFreshChat(previousUrl) {
+    const timeoutMs = 4_000;
+    const pollMs = 100;
+    const previousPathname = (() => {
+      try {
+        return new URL(previousUrl, window.location.origin).pathname;
+      } catch {
+        return "";
+      }
+    })();
+    const shouldRequireRouteChange = isDeepSeekConversationPath(previousPathname);
+    const startedAt = Date.now();
+
+    while (Date.now() - startedAt <= timeoutMs) {
+      const pageState = window[KEY].getPageState();
+      if (pageState.blockingMessage) {
+        return {
+          ok: false,
+          error: "PAGE_UNAVAILABLE",
+          message: pageState.blockingMessage,
+        };
+      }
+
+      const currentPathname = (window.location?.pathname || "").toLowerCase();
+      const routeChanged =
+        !shouldRequireRouteChange || currentPathname !== previousPathname.toLowerCase();
+
+      if (pageState.inputReady && !pageState.busy && routeChanged) {
+        return { ok: true };
+      }
+
+      await sleep(pollMs);
+    }
+
+    return {
+      ok: false,
+      error: "AUTOMATION_DESYNC",
+      message: "DeepSeek new chat did not finish resetting the page",
+    };
+  }
+
   function setComposerValue(composer, nextValue) {
     const prototype = Object.getPrototypeOf(composer);
     const valueDescriptor =
@@ -1186,7 +1450,8 @@ export const INJECTED_BRIDGE_SOURCE = `
         baselineState,
       };
     },
-    async startNewChat() {
+    async startNewChat(input = {}) {
+      const previousUrl = window.location?.href || "";
       const newChatButton = findNewChatButton();
 
       if (newChatButton instanceof HTMLElement) {
@@ -1197,8 +1462,20 @@ export const INJECTED_BRIDGE_SOURCE = `
         await sleep(1_500);
       }
 
+      const readyResult = await waitForFreshChat(previousUrl);
+      if (!readyResult.ok) {
+        return readyResult;
+      }
+
       resetCompletionState();
+      const modeResult = await ensureModelType(input.targetModelType);
+      if (!modeResult.ok) {
+        return modeResult;
+      }
       return { ok: true };
+    },
+    async setModelType(input = {}) {
+      return ensureModelType(input.targetModelType);
     },
     async sendPrompt({ prompt, timeoutMs }) {
       const started = await window[KEY].startPrompt({ prompt });

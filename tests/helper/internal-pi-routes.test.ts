@@ -86,7 +86,7 @@ describe("internal pi routes", () => {
       message: "Another request is already in progress",
     });
     expect(bindCalls).toEqual([
-      expect.objectContaining({ provider: "deepseek-web", passive: true }),
+      expect.objectContaining({ provider: "deepseek-web", openNew: true }),
     ]);
 
     resolvePrompt?.();
@@ -189,9 +189,9 @@ describe("internal pi routes", () => {
     expect(second.statusCode).toBe(200);
     expect(otherSession.statusCode).toBe(200);
     expect(bindCalls).toEqual([
-      expect.objectContaining({ provider: "deepseek-web", passive: true }),
+      expect.objectContaining({ provider: "deepseek-web", openNew: true }),
       expect.objectContaining({ provider: "deepseek-web", tabId: "tab-1" }),
-      expect.objectContaining({ provider: "deepseek-web", passive: true }),
+      expect.objectContaining({ provider: "deepseek-web", openNew: true }),
     ]);
   });
 

@@ -1331,7 +1331,7 @@ async function spawnDefaultHelper(input: {
   token: string;
   port: number;
 }): Promise<ManagedHelper> {
-  const child = spawn("npm", ["run", "dev:helper"], {
+  const child = spawn("npm", ["run", "dev"], {
     cwd: projectRoot,
     env: {
       ...process.env,

@@ -1,4 +1,5 @@
 import type { PublicModel } from "./models";
+import { unsupportedFeatureError } from "./errors";
 import type {
   NormalizedMessage,
   NormalizedRequest,
@@ -174,6 +175,25 @@ function normalizeResponsesToolChoice(input: unknown): NormalizedToolChoice {
   return "none";
 }
 
+function assertToolSupport(input: {
+  model: PublicModel;
+  tools: NormalizedTool[];
+  toolChoice: NormalizedToolChoice;
+}) {
+  if (input.model.supportsTools) {
+    return;
+  }
+
+  if (
+    input.tools.length === 0 &&
+    (input.toolChoice === "none" || input.toolChoice === "auto")
+  ) {
+    return;
+  }
+
+  throw unsupportedFeatureError(`${input.model.id} does not support tools`);
+}
+
 function assertStreamingSupport(stream: unknown, mode: NormalizeMode) {
   if (stream === true && mode !== "buffered_streaming") {
     throw new Error("Streaming is not supported");
@@ -195,14 +215,21 @@ export function normalizeChatCompletionsRequest(
 ): NormalizedRequest {
   const mode = options.mode ?? "json";
   assertStreamingSupport(body.stream, mode);
+  const normalizedTools = normalizeChatTools(body.tools);
+  const normalizedToolChoice = normalizeChatToolChoice(body.tool_choice);
+  assertToolSupport({
+    model,
+    tools: normalizedTools,
+    toolChoice: normalizedToolChoice,
+  });
 
   return {
     publicModel: model.id,
     provider: model.provider,
     responseFormat: "chat_completions",
     messages: normalizeMessages(body.messages),
-    tools: normalizeChatTools(body.tools),
-    toolChoice: normalizeChatToolChoice(body.tool_choice),
+    tools: normalizedTools,
+    toolChoice: normalizedToolChoice,
     ...(typeof body.temperature === "number"
       ? { temperature: body.temperature }
       : {}),
@@ -227,14 +254,21 @@ export function normalizeResponsesRequest(
 ): NormalizedRequest {
   const mode = options.mode ?? "json";
   assertStreamingSupport(body.stream, mode);
+  const normalizedTools = normalizeResponsesTools(body.tools);
+  const normalizedToolChoice = normalizeResponsesToolChoice(body.tool_choice);
+  assertToolSupport({
+    model,
+    tools: normalizedTools,
+    toolChoice: normalizedToolChoice,
+  });
 
   return {
     publicModel: model.id,
     provider: model.provider,
     responseFormat: "responses",
     messages: normalizeResponsesInput(body.input),
-    tools: normalizeResponsesTools(body.tools),
-    toolChoice: normalizeResponsesToolChoice(body.tool_choice),
+    tools: normalizedTools,
+    toolChoice: normalizedToolChoice,
     ...(typeof body.temperature === "number"
       ? { temperature: body.temperature }
       : {}),

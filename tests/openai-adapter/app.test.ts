@@ -144,8 +144,8 @@ describe("openai adapter helper client", () => {
     });
 
     await client.run({
-      publicModel: "deepseek-web-tools",
-      provider: "deepseek-web",
+      publicModel: "qwen-web-tools",
+      provider: "qwen-web",
       responseFormat: "chat_completions",
       messages: [
         { role: "system", content: "Always answer with JSON." },
@@ -207,8 +207,8 @@ describe("openai adapter helper client", () => {
     });
 
     await client.run({
-      publicModel: "deepseek-web-tools",
-      provider: "deepseek-web",
+      publicModel: "qwen-web-tools",
+      provider: "qwen-web",
       responseFormat: "chat_completions",
       messages: [{ role: "user", content: "Call read." }],
       tools: [
@@ -461,7 +461,8 @@ describe("openai adapter app", () => {
     expect(response.statusCode).toBe(200);
     expect(response.json().data).toEqual(
       expect.arrayContaining([
-        expect.objectContaining({ id: "deepseek-web-chat", object: "model" }),
+        expect.objectContaining({ id: "deepseek-web-pro", object: "model" }),
+        expect.objectContaining({ id: "deepseek-web-flash", object: "model" }),
       ]),
     );
   });
@@ -483,7 +484,8 @@ describe("openai adapter app", () => {
     expect(response.statusCode).toBe(200);
     expect(response.json().data).toEqual(
       expect.arrayContaining([
-        expect.objectContaining({ id: "deepseek-web-chat", object: "model" }),
+        expect.objectContaining({ id: "deepseek-web-pro", object: "model" }),
+        expect.objectContaining({ id: "deepseek-web-flash", object: "model" }),
         expect.objectContaining({ id: "qwen-web-tools", object: "model" }),
       ]),
     );
@@ -558,7 +560,7 @@ describe("openai adapter app", () => {
         authorization: "Bearer adapter-token",
       },
       payload: {
-        model: "deepseek-web-tools",
+        model: "qwen-web-tools",
         input: [
           {
             role: "user",
@@ -579,7 +581,7 @@ describe("openai adapter app", () => {
     expect(response.statusCode).toBe(200);
     expect(response.json()).toMatchObject({
       object: "response",
-      model: "deepseek-web-tools",
+      model: "qwen-web-tools",
       output: [
         {
           type: "function_call",
@@ -819,7 +821,7 @@ describe("openai adapter app", () => {
         authorization: "Bearer adapter-token",
       },
       payload: {
-        model: "deepseek-web-tools",
+        model: "qwen-web-tools",
         stream: true,
         messages: [{ role: "user", content: "read helper main" }],
         tools: [
@@ -982,7 +984,7 @@ describe("openai adapter app", () => {
         authorization: "Bearer adapter-token",
       },
       payload: {
-        model: "deepseek-web-tools",
+        model: "qwen-web-tools",
         stream: true,
         input: [
           {

@@ -6,13 +6,13 @@ import {
 import { getPublicModel } from "../../src/openai-adapter/models";
 
 describe("openai adapter normalization", () => {
-  const toolModel = getPublicModel("deepseek-web-tools");
+  const toolModel = getPublicModel("qwen-web-tools");
   const chatModel = getPublicModel("qwen-web-chat");
 
   it("normalizes a chat completions request with tools", () => {
     const normalized = normalizeChatCompletionsRequest(
       {
-        model: "deepseek-web-tools",
+        model: "qwen-web-tools",
         messages: [{ role: "user", content: "list files" }],
         tools: [
           {
@@ -32,8 +32,8 @@ describe("openai adapter normalization", () => {
     );
 
     expect(normalized).toMatchObject({
-      publicModel: "deepseek-web-tools",
-      provider: "deepseek-web",
+      publicModel: "qwen-web-tools",
+      provider: "qwen-web",
       responseFormat: "chat_completions",
       toolChoice: "auto",
       temperature: 0.2,
@@ -51,7 +51,7 @@ describe("openai adapter normalization", () => {
   it("normalizes tool schemas from input_schema when parameters is absent", () => {
     const normalized = normalizeChatCompletionsRequest(
       {
-        model: "deepseek-web-tools",
+        model: "qwen-web-tools",
         messages: [{ role: "user", content: "list files" }],
         tools: [
           {
@@ -144,7 +144,7 @@ describe("openai adapter normalization", () => {
   it("normalizes responses tool schema from input_schema", () => {
     const normalized = normalizeResponsesRequest(
       {
-        model: "qwen-web-chat",
+        model: "qwen-web-tools",
         input: [{ role: "user", content: [{ type: "input_text", text: "hello" }] }],
         tools: [
           {
@@ -166,7 +166,7 @@ describe("openai adapter normalization", () => {
           },
         ],
       },
-      chatModel!,
+      toolModel!,
     );
 
     expect(normalized.tools[0]?.parametersJson).toBe(
@@ -191,5 +191,36 @@ describe("openai adapter normalization", () => {
         getPublicModel("deepseek-web-chat")!,
       ),
     ).toThrowError("Streaming is not supported");
+  });
+
+  it("accepts DeepSeek tool requests for pro mode", () => {
+    const normalized = normalizeChatCompletionsRequest(
+      {
+        model: "deepseek-web-pro",
+        messages: [{ role: "user", content: "list files" }],
+        tools: [
+          {
+            type: "function",
+            function: {
+              name: "list_files",
+              parameters: { type: "object", properties: {} },
+            },
+          },
+        ],
+        tool_choice: "auto",
+      },
+      getPublicModel("deepseek-web-pro")!,
+    );
+
+    expect(normalized).toMatchObject({
+      publicModel: "deepseek-web-pro",
+      provider: "deepseek-web",
+      toolChoice: "auto",
+      tools: [
+        {
+          name: "list_files",
+        },
+      ],
+    });
   });
 });

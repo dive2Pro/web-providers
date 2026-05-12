@@ -293,28 +293,12 @@ export class HelperRuntime {
       fallback.modelId === null;
 
     if (!fallback) {
-      try {
-        return await this.bindProvider({
-          sessionId: input.sessionId,
-          provider: input.provider,
-          modelId,
-          passive: true,
-        });
-      } catch (error) {
-        if (
-          !(error instanceof HelperError && error.code === "NOT_BOUND") &&
-          !isRecoverableTabLookupError(error)
-        ) {
-          throw error;
-        }
-
-        return this.bindProvider({
-          sessionId: input.sessionId,
-          provider: input.provider,
-          modelId,
-          openNew: true,
-        });
-      }
+      return this.bindProvider({
+        sessionId: input.sessionId,
+        provider: input.provider,
+        modelId,
+        openNew: true,
+      });
     }
 
     const finalizePromotedBinding = async (session: BoundSession) => {
@@ -340,31 +324,14 @@ export class HelperRuntime {
         throw error;
       }
 
-      try {
-        return await finalizePromotedBinding(await this.bindProvider({
-          sessionId: input.sessionId,
-          provider: input.provider,
-          modelId,
-          openUrl: fallback.tabUrl,
-          previousSession: fallback,
-        }));
-      } catch (recoveryError) {
-        if (
-          !isRecoverableTabLookupError(recoveryError) &&
-          !(recoveryError instanceof HelperError && recoveryError.code === "NOT_BOUND")
-        ) {
-          throw recoveryError;
-        }
-
-        return this.bindProvider({
-          sessionId: input.sessionId,
-          provider: input.provider,
-          modelId,
-          openNew: true,
-          openUrl: fallback.tabUrl,
-          previousSession: fallback,
-        });
-      }
+      return finalizePromotedBinding(await this.bindProvider({
+        sessionId: input.sessionId,
+        provider: input.provider,
+        modelId,
+        openNew: true,
+        openUrl: fallback.tabUrl,
+        previousSession: fallback,
+      }));
     }
   }
 
@@ -397,6 +364,10 @@ export class HelperRuntime {
         sessionInit: input.body.sessionInit,
         providerInitialized: session.providerInitialized,
       });
+      const shouldInitializeDeepSeekSession =
+        provider === "deepseek-web" && !session.providerInitialized;
+      const shouldStartFreshSession =
+        promptInput.shouldStartFresh || shouldInitializeDeepSeekSession;
       const prompt = promptInput.prompt;
       const debugSeed = createBaseDebugRecord(
         sessionId,
@@ -416,10 +387,10 @@ export class HelperRuntime {
         finalErrorCode: null,
       });
 
-      if (promptInput.shouldStartFresh) {
+      if (shouldStartFreshSession) {
         await this.browserClient.startNewChat(
           this.browserClient.bindProviderTab
-            ? { provider, tabId: session.tabId }
+            ? { provider, tabId: session.tabId, modelId }
             : session.tabId,
         );
       }
@@ -439,7 +410,7 @@ export class HelperRuntime {
         return toProviderResponse(result);
       };
 
-      let response = await sendPrompt(prompt, promptInput.shouldStartFresh);
+      let response = await sendPrompt(prompt, shouldStartFreshSession);
       let repairDecision = getProviderResponseRepairDecision(response);
       let repairAttemptCount = 0;
 
@@ -512,7 +483,7 @@ export class HelperRuntime {
         repair: repairSummary,
       });
 
-      if (input.body.sessionInit?.prompt) {
+      if (input.body.sessionInit?.prompt || shouldInitializeDeepSeekSession) {
         const updatedSession =
           this.state.getSessionBoundSession(sessionId, provider, modelId) ??
           currentBoundSession;
@@ -522,7 +493,7 @@ export class HelperRuntime {
             : `conv-${provider}-${updatedSession.tabId}-${Date.now()}`;
         const nextSession: BoundSession = {
           ...updatedSession,
-          conversationId: promptInput.shouldStartFresh
+          conversationId: shouldStartFreshSession
             ? nextConversationId
             : updatedSession.conversationId,
           providerInitialized: true,

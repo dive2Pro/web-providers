@@ -32,7 +32,7 @@ describe("responses serializer", () => {
       serializeResponses({
         id: "resp-4",
         created: 1710000001,
-        model: "deepseek-web-tools",
+        model: "qwen-web-tools",
         result: {
           mode: "json_fallback",
           toolCalls: [
@@ -51,7 +51,7 @@ describe("responses serializer", () => {
     ).toMatchObject({
       id: "resp-4",
       object: "response",
-      model: "deepseek-web-tools",
+      model: "qwen-web-tools",
       parallel_tool_calls: true,
       output: [
         {

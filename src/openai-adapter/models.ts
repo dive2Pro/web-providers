@@ -1,4 +1,5 @@
 export type ProviderId = "deepseek-web" | "qwen-web";
+export type DeepSeekPageMode = "expert" | "default";
 
 export type PublicModel = {
   id: string;
@@ -7,16 +8,40 @@ export type PublicModel = {
   defaultTimeoutMs: number;
   allowThinkingText: boolean;
   sessionMode: "reuse-bound-session";
+  listed: boolean;
+  deepSeekPageMode?: DeepSeekPageMode;
 };
 
 const PUBLIC_MODELS: PublicModel[] = [
   {
-    id: "deepseek-web-chat",
+    id: "deepseek-web-pro",
     provider: "deepseek-web",
-    supportsTools: false,
+    supportsTools: true,
     defaultTimeoutMs: 30000,
     allowThinkingText: true,
     sessionMode: "reuse-bound-session",
+    listed: true,
+    deepSeekPageMode: "expert",
+  },
+  {
+    id: "deepseek-web-flash",
+    provider: "deepseek-web",
+    supportsTools: true,
+    defaultTimeoutMs: 30000,
+    allowThinkingText: true,
+    sessionMode: "reuse-bound-session",
+    listed: true,
+    deepSeekPageMode: "default",
+  },
+  {
+    id: "deepseek-web-chat",
+    provider: "deepseek-web",
+    supportsTools: true,
+    defaultTimeoutMs: 30000,
+    allowThinkingText: true,
+    sessionMode: "reuse-bound-session",
+    listed: false,
+    deepSeekPageMode: "expert",
   },
   {
     id: "deepseek-web-tools",
@@ -25,6 +50,8 @@ const PUBLIC_MODELS: PublicModel[] = [
     defaultTimeoutMs: 30000,
     allowThinkingText: true,
     sessionMode: "reuse-bound-session",
+    listed: false,
+    deepSeekPageMode: "expert",
   },
   {
     id: "qwen-web-chat",
@@ -33,6 +60,7 @@ const PUBLIC_MODELS: PublicModel[] = [
     defaultTimeoutMs: 30000,
     allowThinkingText: true,
     sessionMode: "reuse-bound-session",
+    listed: true,
   },
   {
     id: "qwen-web-tools",
@@ -41,11 +69,12 @@ const PUBLIC_MODELS: PublicModel[] = [
     defaultTimeoutMs: 30000,
     allowThinkingText: true,
     sessionMode: "reuse-bound-session",
+    listed: true,
   },
 ];
 
 export function listPublicModels() {
-  return [...PUBLIC_MODELS];
+  return PUBLIC_MODELS.filter((model) => model.listed);
 }
 
 export function getPublicModel(modelId: string) {

@@ -384,7 +384,7 @@ describe("helper app", () => {
               conversationId: "conv-tab-1",
               loginState: "logged_in",
               bridgeInjected: true,
-              providerInitialized: false,
+              providerInitialized: true,
             },
           ],
           providers: {
@@ -515,7 +515,7 @@ describe("helper app", () => {
       },
       {
         provider: "deepseek-web",
-        openNew: undefined,
+        openNew: true,
         openUrl: "https://chat.deepseek.com/a/chat/s/persisted-session",
         tabId: undefined,
       },

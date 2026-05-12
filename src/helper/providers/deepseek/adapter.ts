@@ -37,13 +37,6 @@ export function createDeepSeekAdapter(
       }
     }
 
-    if (input?.openUrl && transport.findTabByUrl) {
-      const tab = await transport.findTabByUrl(input.openUrl);
-      if (tab) {
-        return tab;
-      }
-    }
-
     if (input?.openNew) {
       const opened = await transport.openDeepSeek(
         input.openUrl ?? "https://chat.deepseek.com",
@@ -56,6 +49,13 @@ export function createDeepSeekAdapter(
         "NOT_BOUND",
         "Opened DeepSeek in bb-browser. Finish login in that page and retry.",
       );
+    }
+
+    if (input?.openUrl && transport.findTabByUrl) {
+      const tab = await transport.findTabByUrl(input.openUrl);
+      if (tab) {
+        return tab;
+      }
     }
 
     return transport.findDeepSeekTab();

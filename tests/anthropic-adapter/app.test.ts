@@ -25,7 +25,7 @@ describe("anthropic adapter normalization", () => {
   it("normalizes system, text, tool_use, and tool_result blocks", () => {
     const normalized = normalizeMessagesRequest(
       {
-        model: "deepseek-web-tools",
+        model: "qwen-web-tools",
         system: [{ type: "text", text: "Be terse." }],
         messages: [
           {
@@ -67,12 +67,12 @@ describe("anthropic adapter normalization", () => {
         },
         max_tokens: 256,
       },
-      getAnthropicPublicModel("deepseek-web-tools")!,
+      getAnthropicPublicModel("qwen-web-tools")!,
     );
 
     expect(normalized).toMatchObject({
-      publicModel: "deepseek-web-tools",
-      provider: "deepseek-web",
+      publicModel: "qwen-web-tools",
+      provider: "qwen-web",
       responseFormat: "anthropic_messages",
       toolChoice: {
         type: "function",
@@ -99,7 +99,7 @@ describe("anthropic adapter normalization", () => {
     expect(() =>
       normalizeMessagesRequest(
         {
-          model: "deepseek-web-tools",
+          model: "qwen-web-tools",
           messages: [
             {
               role: "user",
@@ -113,9 +113,37 @@ describe("anthropic adapter normalization", () => {
             },
           ],
         },
-        getAnthropicPublicModel("deepseek-web-tools")!,
+        getAnthropicPublicModel("qwen-web-tools")!,
       ),
     ).toThrow(/tool_result blocks must immediately follow an assistant tool_use message/);
+  });
+
+  it("accepts DeepSeek tool requests", () => {
+    const normalized = normalizeMessagesRequest(
+      {
+        model: "deepseek-web-pro",
+        messages: [{ role: "user", content: "read README" }],
+        tools: [
+          {
+            name: "read_file",
+            input_schema: { type: "object", properties: { path: { type: "string" } } },
+          },
+        ],
+        tool_choice: { type: "any" },
+      },
+      getAnthropicPublicModel("deepseek-web-pro")!,
+    );
+
+    expect(normalized).toMatchObject({
+      publicModel: "deepseek-web-pro",
+      provider: "deepseek-web",
+      toolChoice: "required",
+      tools: [
+        expect.objectContaining({
+          name: "read_file",
+        }),
+      ],
+    });
   });
 });
 
@@ -129,7 +157,7 @@ describe("anthropic adapter helper client", () => {
     });
 
     const result = await client.run({
-      publicModel: "anthropic-deepseek-web-chat",
+      publicModel: "deepseek-web-chat",
       provider: "deepseek-web",
       responseFormat: "anthropic_messages",
       messages: [
@@ -174,8 +202,8 @@ describe("anthropic adapter helper client", () => {
     });
 
     await client.run({
-      publicModel: "anthropic-deepseek-web-tools",
-      provider: "deepseek-web",
+      publicModel: "qwen-web-tools",
+      provider: "qwen-web",
       responseFormat: "anthropic_messages",
       messages: [
         { role: "system", content: "Be terse." },
@@ -249,7 +277,7 @@ describe("anthropic adapter app", () => {
         "x-request-source": "anthropic-test",
       },
       payload: {
-        model: "anthropic-deepseek-web-chat",
+        model: "deepseek-web-chat",
         max_tokens: 64,
         messages: [{ role: "user", content: "hello" }],
       },
@@ -268,7 +296,7 @@ describe("anthropic adapter app", () => {
           "x-request-source": "anthropic-test",
         }),
         body: {
-          model: "anthropic-deepseek-web-chat",
+          model: "deepseek-web-chat",
           max_tokens: 64,
           messages: [{ role: "user", content: "hello" }],
         },
@@ -305,7 +333,7 @@ describe("anthropic adapter app", () => {
         "x-request-source": "anthropic-api-test",
       },
       payload: {
-        model: "anthropic-deepseek-web-chat",
+        model: "deepseek-web-chat",
         max_tokens: 64,
         messages: [{ role: "user", content: "hello" }],
       },
@@ -335,7 +363,7 @@ describe("anthropic adapter app", () => {
             "x-request-source": "anthropic-api-test",
           }),
           body: {
-            model: "anthropic-deepseek-web-chat",
+            model: "deepseek-web-chat",
             max_tokens: 64,
             messages: [{ role: "user", content: "hello" }],
           },
@@ -364,11 +392,53 @@ describe("anthropic adapter app", () => {
     expect(response.json().data).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
-          id: "anthropic-deepseek-web-chat",
+          id: "deepseek-web-pro",
+          type: "model",
+        }),
+        expect.objectContaining({
+          id: "deepseek-web-flash",
           type: "model",
         }),
       ]),
     );
+    expect(response.json().data).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: expect.stringMatching(/^anthropic-/),
+        }),
+      ]),
+    );
+  });
+
+  it("rejects removed anthropic-prefixed model aliases", async () => {
+    const app = buildAnthropicAdapterApp({
+      token: "adapter-token",
+      helperBaseUrl: "http://127.0.0.1:4318",
+      helperToken: "helper-token",
+      fetchImpl: vi.fn(),
+    });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/messages",
+      headers: {
+        "x-api-key": "adapter-token",
+      },
+      payload: {
+        model: "anthropic-deepseek-web-chat",
+        max_tokens: 64,
+        messages: [{ role: "user", content: "hello" }],
+      },
+    });
+
+    expect(response.statusCode).toBe(404);
+    expect(response.json()).toEqual({
+      type: "error",
+      error: {
+        type: "not_found_error",
+        message: "Unknown model: anthropic-deepseek-web-chat",
+      },
+    });
   });
 
   it("forwards Claude Code session ids to helper", async () => {
@@ -396,7 +466,7 @@ describe("anthropic adapter app", () => {
         "x-claude-code-session-id": "claude-session-1",
       },
       payload: {
-        model: "anthropic-qwen-web-chat",
+        model: "qwen-web-chat",
         max_tokens: 256,
         messages: [{ role: "user", content: "hello" }],
       },
@@ -436,7 +506,7 @@ describe("anthropic adapter app", () => {
         "x-api-key": "adapter-token",
       },
       payload: {
-        model: "anthropic-deepseek-web-chat",
+        model: "deepseek-web-chat",
         max_tokens: 256,
         messages: [{ role: "user", content: "hello" }],
       },
@@ -446,7 +516,7 @@ describe("anthropic adapter app", () => {
     expect(response.json()).toMatchObject({
       type: "message",
       role: "assistant",
-      model: "anthropic-deepseek-web-chat",
+      model: "deepseek-web-chat",
       stop_reason: "end_turn",
       content: [{ type: "text", text: "hello from helper" }],
     });
@@ -479,7 +549,7 @@ describe("anthropic adapter app", () => {
         "x-api-key": "adapter-token",
       },
       payload: {
-        model: "anthropic-deepseek-web-tools",
+        model: "qwen-web-tools",
         max_tokens: 256,
         messages: [{ role: "user", content: "read README" }],
         tools: [
@@ -524,7 +594,7 @@ describe("anthropic adapter app", () => {
         "x-api-key": "adapter-token",
       },
       payload: {
-        model: "anthropic-deepseek-web-chat",
+        model: "deepseek-web-chat",
         messages: [
           { role: "system", content: "Be terse." },
           { role: "user", content: "hello" },
@@ -557,7 +627,7 @@ describe("anthropic adapter app", () => {
         "x-api-key": "adapter-token",
       },
       payload: {
-        model: "anthropic-deepseek-web-tools",
+        model: "qwen-web-tools",
         messages: [
           {
             role: "assistant",
@@ -617,7 +687,7 @@ describe("anthropic adapter app", () => {
         "x-api-key": "adapter-token",
       },
       payload: {
-        model: "anthropic-deepseek-web-chat",
+        model: "deepseek-web-chat",
         messages: [{ role: "user", content: "hello" }],
       },
     });
@@ -663,7 +733,7 @@ describe("anthropic adapter app", () => {
         "x-api-key": "adapter-token",
       },
       payload: {
-        model: "anthropic-deepseek-web-tools",
+        model: "qwen-web-tools",
         max_tokens: 256,
         messages: [{ role: "user", content: "inspect the project" }],
       },
@@ -734,7 +804,7 @@ describe("anthropic adapter app", () => {
         "x-api-key": "adapter-token",
       },
       payload: {
-        model: "anthropic-deepseek-web-chat",
+        model: "deepseek-web-chat",
         max_tokens: 256,
         stream: true,
         messages: [{ role: "user", content: "hello" }],
@@ -777,7 +847,7 @@ describe("anthropic adapter app", () => {
         "x-api-key": "adapter-token",
       },
       payload: {
-        model: "anthropic-deepseek-web-tools",
+        model: "qwen-web-tools",
         max_tokens: 256,
         stream: true,
         messages: [{ role: "user", content: "read README" }],

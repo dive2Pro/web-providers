@@ -1,5 +1,5 @@
 import type { PublicModel } from "../openai-adapter/models";
-import { invalidRequestError } from "./errors";
+import { invalidRequestError, unsupportedFeatureError } from "./errors";
 import type {
   NormalizedMessage,
   NormalizedRequest,
@@ -215,6 +215,25 @@ function normalizeToolChoice(toolChoice: AnthropicToolChoice): NormalizedToolCho
   return "auto";
 }
 
+function assertToolSupport(input: {
+  model: PublicModel;
+  tools: NormalizedTool[];
+  toolChoice: NormalizedToolChoice;
+}) {
+  if (input.model.supportsTools) {
+    return;
+  }
+
+  if (
+    input.tools.length === 0 &&
+    (input.toolChoice === "none" || input.toolChoice === "auto")
+  ) {
+    return;
+  }
+
+  throw unsupportedFeatureError(`${input.model.id} does not support tools`);
+}
+
 function normalizeToolResultTextArray(
   content: Array<{ type?: string; text?: string }>,
   path: string,
@@ -404,6 +423,13 @@ export function normalizeMessagesRequest(
   validateMessages(body.messages);
   const normalizedMessages = normalizeMessages(body.messages);
   const systemPrompt = normalizeSystem(body.system);
+  const normalizedTools = normalizeTools(body.tools);
+  const normalizedToolChoice = normalizeToolChoice(body.tool_choice);
+  assertToolSupport({
+    model,
+    tools: normalizedTools,
+    toolChoice: normalizedToolChoice,
+  });
 
   return {
     publicModel: model.id,
@@ -415,8 +441,8 @@ export function normalizeMessagesRequest(
         : []),
       ...normalizedMessages,
     ],
-    tools: normalizeTools(body.tools),
-    toolChoice: normalizeToolChoice(body.tool_choice),
+    tools: normalizedTools,
+    toolChoice: normalizedToolChoice,
     ...(typeof body.temperature === "number"
       ? { temperature: body.temperature }
       : {}),

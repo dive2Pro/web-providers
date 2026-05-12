@@ -265,12 +265,19 @@ describe("gateway app", () => {
     expect(openAiResponse.json().data).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
-          id: "deepseek-web-chat",
+          id: "deepseek-web-pro",
           object: "model",
         }),
         expect.objectContaining({
-          id: "anthropic-deepseek-web-chat",
-          type: "model",
+          id: "deepseek-web-flash",
+          object: "model",
+        }),
+      ]),
+    );
+    expect(openAiResponse.json().data).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: expect.stringMatching(/^anthropic-/),
         }),
       ]),
     );
@@ -342,7 +349,7 @@ describe("gateway app", () => {
         "x-api-key": "anthropic-token",
       },
       payload: {
-        model: "anthropic-deepseek-web-chat",
+        model: "deepseek-web-chat",
         max_tokens: 64,
         messages: [{ role: "user", content: "hello" }],
       },
@@ -352,7 +359,7 @@ describe("gateway app", () => {
     expect(response.json()).toMatchObject({
       type: "message",
       role: "assistant",
-      model: "anthropic-deepseek-web-chat",
+      model: "deepseek-web-chat",
       content: [{ type: "text", text: "hello from helper" }],
     });
   });
@@ -379,7 +386,7 @@ describe("gateway app", () => {
         "x-api-key": "anthropic-token",
       },
       payload: {
-        model: "anthropic-deepseek-web-chat",
+        model: "deepseek-web-chat",
         max_tokens: 64,
         messages: [{ role: "user", content: "hello" }],
       },
@@ -421,7 +428,7 @@ describe("gateway app", () => {
         "x-claude-code-session-id": "claude-session-1",
       },
       payload: {
-        model: "anthropic-deepseek-web-chat",
+        model: "deepseek-web-chat",
         max_tokens: 64,
         messages: [{ role: "user", content: "hello" }],
       },

@@ -15,12 +15,6 @@ export interface RequestLogEntry {
 
 export type RequestLogger = (entry: RequestLogEntry) => void;
 
-export function createConsoleRequestLogger(): RequestLogger {
-  return (entry) => {
-    console.info(JSON.stringify(entry));
-  };
-}
-
 export function registerRequestLogging(
   app: FastifyInstance,
   input: {
@@ -29,7 +23,7 @@ export function registerRequestLogging(
     store?: RequestLogStore;
   },
 ) {
-  const requestLogger = input.logger ?? createConsoleRequestLogger();
+  const requestLogger = input.logger;
   const startedAtByRequest = new WeakMap<FastifyRequest, number>();
 
   app.addHook("onRequest", async (request) => {
@@ -53,7 +47,7 @@ export function registerRequestLogging(
       body: request.body,
     } satisfies RequestLogEntry;
 
-    requestLogger(entry);
+    requestLogger?.(entry);
 
     if (input.store) {
       await input.store.append(entry);

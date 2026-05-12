@@ -35,13 +35,6 @@ export function createQwenAdapter(
       }
     }
 
-    if (input?.openUrl && qwenTransport.findTabByUrl) {
-      const tab = await qwenTransport.findTabByUrl(input.openUrl);
-      if (tab) {
-        return tab;
-      }
-    }
-
     if (input?.openNew) {
       const opened = await qwenTransport.openQwen?.(
         input.openUrl ?? "https://chat.qwen.ai/",
@@ -54,6 +47,13 @@ export function createQwenAdapter(
         "NOT_BOUND",
         "Opened Qwen in bb-browser. Finish login in that page and retry.",
       );
+    }
+
+    if (input?.openUrl && qwenTransport.findTabByUrl) {
+      const tab = await qwenTransport.findTabByUrl(input.openUrl);
+      if (tab) {
+        return tab;
+      }
     }
 
     if (!qwenTransport.findQwenTab) {

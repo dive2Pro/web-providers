@@ -21,7 +21,8 @@ describe("merged helper openai routes", () => {
     expect(response.json()).toMatchObject({
       object: "list",
       data: expect.arrayContaining([
-        expect.objectContaining({ id: "deepseek-web-chat", object: "model" }),
+        expect.objectContaining({ id: "deepseek-web-pro", object: "model" }),
+        expect.objectContaining({ id: "deepseek-web-flash", object: "model" }),
       ]),
     });
   });
@@ -85,7 +86,7 @@ describe("merged helper openai routes", () => {
       ],
     });
     expect(bindCalls).toEqual([
-      expect.objectContaining({ provider: "deepseek-web", passive: true }),
+      expect.objectContaining({ provider: "deepseek-web", openNew: true }),
     ]);
   });
 
@@ -148,7 +149,7 @@ describe("merged helper openai routes", () => {
       ],
     });
     expect(bindCalls).toEqual([
-      expect.objectContaining({ provider: "deepseek-web", passive: true }),
+      expect.objectContaining({ provider: "deepseek-web", openNew: true }),
     ]);
   });
 
@@ -322,8 +323,8 @@ describe("merged helper openai routes", () => {
     }
 
     expect(bindCalls).toEqual([
-      expect.objectContaining({ provider: "deepseek-web", passive: true }),
-      expect.objectContaining({ provider: "deepseek-web", passive: true }),
+      expect.objectContaining({ provider: "deepseek-web", openNew: true }),
+      expect.objectContaining({ provider: "deepseek-web", openNew: true }),
     ]);
   });
 
@@ -406,7 +407,7 @@ describe("merged helper openai routes", () => {
     }
 
     expect(bindCalls).toEqual([
-      expect.objectContaining({ provider: "deepseek-web", passive: true }),
+      expect.objectContaining({ provider: "deepseek-web", openNew: true }),
       expect.objectContaining({ provider: "deepseek-web", tabId: "tab-1" }),
     ]);
   });
@@ -474,12 +475,8 @@ describe("merged helper openai routes", () => {
     }
 
     expect(bindCalls).toEqual([
-      expect.objectContaining({ provider: "deepseek-web", passive: true }),
+      expect.objectContaining({ provider: "deepseek-web", openNew: true }),
       expect.objectContaining({ provider: "deepseek-web", tabId: "tab-1" }),
-      expect.objectContaining({
-        provider: "deepseek-web",
-        openUrl: "https://chat.deepseek.com/a/chat/s/original-session",
-      }),
       expect.objectContaining({
         provider: "deepseek-web",
         openNew: true,

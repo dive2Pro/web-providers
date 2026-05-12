@@ -28,6 +28,7 @@ npm run dev
 - Helper 原生路由：`/v1/health`、`/v1/chat`、`/v1/provider/chat`、`/v1/bind`、`/v1/reset`
 - OpenAI 兼容路由：`/v1/models`、`/v1/chat/completions`、`/v1/responses`
 - Anthropic 兼容路由：`/v1/messages`、`/v1/messages/count_tokens`
+- 当前公开模型：`deepseek-web-pro`、`deepseek-web-flash`、`qwen-web-chat`、`qwen-web-tools`
 
 ## ✨ 特性
 

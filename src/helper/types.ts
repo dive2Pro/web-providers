@@ -18,6 +18,23 @@ export function normalizeBoundModelId(
   return normalized.length > 0 ? normalized : null;
 }
 
+export function resolveDeepSeekPageMode(modelId?: string | null) {
+  const normalized = modelId?.trim() ?? "";
+  if (normalized === "deepseek-web-flash") {
+    return "default" as const;
+  }
+
+  if (
+    normalized === "deepseek-web-pro" ||
+    normalized === "deepseek-web-chat" ||
+    normalized === "deepseek-web-tools"
+  ) {
+    return "expert" as const;
+  }
+
+  return null;
+}
+
 export function getBoundSessionKey(input: {
   provider: ProviderId;
   modelId?: string | null;

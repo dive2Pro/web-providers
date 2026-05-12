@@ -223,6 +223,54 @@ describe("BbBrowserClient", () => {
     expect(evaluations[0]?.tabId).toBe("tab-deepseek");
   });
 
+  it("opens a fresh DeepSeek tab instead of reusing an existing tab with the same url", async () => {
+    const opened: string[] = [];
+
+    const client = new BbBrowserClient({
+      getConnectionStatus: async () => "connected",
+      findTabByUrl: async () => ({
+        id: "tab-existing",
+        url: "https://chat.deepseek.com/a/chat/s/existing-session",
+      }),
+      findDeepSeekTab: async () => ({
+        id: "tab-fallback",
+        url: "https://chat.deepseek.com/",
+      }),
+      openDeepSeek: async (url: string) => {
+        opened.push(url);
+        return {
+          id: "tab-fresh",
+          url,
+        };
+      },
+      submitPrompt: async () => undefined,
+      evaluate: async <T>(_tabId: string, script: string) => {
+        if (script.includes("getPageState()")) {
+          return {
+            inputReady: true,
+            busy: false,
+            latestAssistantPreview: null,
+            assistantCount: 0,
+            blockingMessage: null,
+          } as T;
+        }
+
+        return undefined as T;
+      },
+    });
+
+    const result = await client.bindProviderTab({
+      provider: "deepseek-web",
+      openNew: true,
+      openUrl: "https://chat.deepseek.com/a/chat/s/existing-session",
+    });
+
+    expect(result.tabId).toBe("tab-fresh");
+    expect(opened).toEqual([
+      "https://chat.deepseek.com/a/chat/s/existing-session",
+    ]);
+  });
+
   it("returns logged_out when the DeepSeek tab is still loading", async () => {
     const client = new BbBrowserClient({
       getConnectionStatus: async () => "connected",
@@ -514,6 +562,71 @@ describe("BbBrowserClient", () => {
     ).resolves.toBeUndefined();
     expect(evaluations[0]?.tabId).toBe("tab-qwen");
     expect(evaluations[0]?.script).toContain("New Chat");
+  });
+
+  it("passes the DeepSeek target mode when starting a pro chat", async () => {
+    const evaluations: Array<{ tabId: string; script: string }> = [];
+
+    const client = new BbBrowserClient({
+      getConnectionStatus: async () => "connected",
+      findDeepSeekTab: async () => ({
+        id: "tab-1",
+        url: "https://chat.deepseek.com/",
+      }),
+      openDeepSeek: async () => undefined,
+      submitPrompt: async () => undefined,
+      evaluate: async <T>(tabId: string, script: string) => {
+        evaluations.push({ tabId, script });
+        return { ok: true } as T;
+      },
+    });
+
+    await expect(
+      client.startNewChat({
+        provider: "deepseek-web",
+        tabId: "tab-1",
+        modelId: "deepseek-web-pro",
+      }),
+    ).resolves.toBeUndefined();
+    expect(evaluations[0]?.script).toContain('"targetModelType":"expert"');
+  });
+
+  it("reapplies the DeepSeek target mode after expected new-chat navigation", async () => {
+    const evaluations: Array<{ tabId: string; script: string }> = [];
+    let callCount = 0;
+
+    const client = new BbBrowserClient({
+      getConnectionStatus: async () => "connected",
+      findDeepSeekTab: async () => ({
+        id: "tab-1",
+        url: "https://chat.deepseek.com/",
+      }),
+      openDeepSeek: async () => undefined,
+      submitPrompt: async () => undefined,
+      evaluate: async <T>(tabId: string, script: string) => {
+        evaluations.push({ tabId, script });
+        callCount += 1;
+
+        if (callCount === 1) {
+          throw new Error("Runtime.evaluate: Inspected target navigated or closed");
+        }
+
+        return { ok: true } as T;
+      },
+    });
+
+    await expect(
+      client.startNewChat({
+        provider: "deepseek-web",
+        tabId: "tab-1",
+        modelId: "deepseek-web-pro",
+      }),
+    ).resolves.toBeUndefined();
+
+    expect(evaluations).toHaveLength(3);
+    expect(evaluations[0]?.script).toContain('startNewChat({"targetModelType":"expert"})');
+    expect(evaluations[1]?.script).toContain("__piDeepSeekBridge");
+    expect(evaluations[2]?.script).toContain('setModelType({"targetModelType":"expert"})');
   });
 
   it("translates page timeout responses into HelperError", async () => {

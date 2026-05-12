@@ -19,6 +19,7 @@ import {
   QWEN_RESET_COMPLETION_SCRIPT,
   QWEN_START_NEW_CHAT_SCRIPT,
 } from "../providers/qwen/page-bridge";
+import { resolveDeepSeekPageMode } from "../types";
 
 const require = createRequire(import.meta.url);
 
@@ -599,6 +600,7 @@ export class BbBrowserClient implements BrowserAutomationClient {
       | {
           provider: "deepseek-web" | "qwen-web";
           tabId: string;
+          modelId?: string;
         },
   ): Promise<void> {
     if (typeof input !== "string" && input.provider === "qwen-web") {
@@ -609,11 +611,27 @@ export class BbBrowserClient implements BrowserAutomationClient {
     }
 
     const tabId = typeof input === "string" ? input : input.tabId;
+    const targetModelType =
+      typeof input === "string" ? null : resolveDeepSeekPageMode(input.modelId);
+    const startNewChatScript =
+      targetModelType
+        ? `${INJECTED_BRIDGE_SOURCE}; window.__piDeepSeekBridge.startNewChat(${JSON.stringify({ targetModelType })})`
+        : `${INJECTED_BRIDGE_SOURCE}; window.__piDeepSeekBridge.startNewChat()`;
     try {
-      await this.transport.evaluate(
+      const result = await this.transport.evaluate<{
+        ok?: boolean;
+        error?: string;
+        message?: string;
+      }>(
         tabId,
-        `${INJECTED_BRIDGE_SOURCE}; window.__piDeepSeekBridge.startNewChat()`,
+        startNewChatScript,
       );
+      if (result?.ok === false) {
+        throw new HelperError(
+          result.error === "PAGE_UNAVAILABLE" ? "PAGE_UNAVAILABLE" : "AUTOMATION_DESYNC",
+          result.message ?? result.error ?? "Failed to start a new DeepSeek chat",
+        );
+      }
       return;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -628,6 +646,22 @@ export class BbBrowserClient implements BrowserAutomationClient {
 
     await new Promise((resolve) => setTimeout(resolve, 1_000));
     await this.transport.evaluate(tabId, INJECTED_BRIDGE_SOURCE);
+    if (targetModelType) {
+      const result = await this.transport.evaluate<{
+        ok?: boolean;
+        error?: string;
+        message?: string;
+      }>(
+        tabId,
+        `${INJECTED_BRIDGE_SOURCE}; window.__piDeepSeekBridge.setModelType(${JSON.stringify({ targetModelType })})`,
+      );
+      if (result?.ok === false) {
+        throw new HelperError(
+          result.error === "PAGE_UNAVAILABLE" ? "PAGE_UNAVAILABLE" : "AUTOMATION_DESYNC",
+          result.message ?? result.error ?? "Failed to switch the DeepSeek mode",
+        );
+      }
+    }
   }
 
   async sendChatPrompt(input: {

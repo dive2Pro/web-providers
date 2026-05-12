@@ -94,6 +94,7 @@ export interface BrowserAutomationClient {
       | {
           provider: ProviderId;
           tabId: string;
+          modelId?: string;
         },
   ): Promise<void>;
   sendChatPrompt(input: {
