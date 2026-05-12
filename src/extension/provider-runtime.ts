@@ -7,6 +7,19 @@ import type {
   ProviderChatRequest,
   ProviderChatResponse,
 } from "../shared/contracts";
+import {
+  CODE_AGENT_SYSTEM_PROMPT,
+  JSON_PROTOCOL_MINIMAL_EXPLAIN_RULE,
+  JSON_PROTOCOL_MINIMAL_MARKDOWN_RULE,
+  JSON_PROTOCOL_MINIMAL_REPEAT_RULE,
+  JSON_PROTOCOL_PROMPT_PREFIXES,
+  JSON_PROTOCOL_REPAIR_ACTION_RULE,
+  JSON_PROTOCOL_REPAIR_HEADER,
+  JSON_PROTOCOL_REPAIR_REQUIREMENT,
+  RESPONSE_MESSAGE_EXAMPLE,
+  RESPONSE_TOOL_CALLS_EXAMPLE,
+  RESPONSE_TOOL_CALL_EXAMPLE,
+} from "../shared/code-agent-prompt";
 import { logServiceStarted } from "../shared/startup-log";
 
 interface ManagedHelper {
@@ -334,16 +347,6 @@ const PROVIDER_DESCRIPTORS = [
     modelName: "Qwen Web Chat",
   },
 ] as const;
-const RESPONSE_ENVELOPE_INSTRUCTION = [
-  "Your entire assistant reply must be exactly one JSON object.",
-  "Return exactly one final action object per reply: either a message, a tool_call, or a tool_calls object.",
-  'For normal replies use: {"type":"message","content":"your response text"}',
-  'For tool calls use: {"type":"tool_call","name":"tool_name","arguments":{"key":"value"}}',
-  'For multiple tool calls use: {"type":"tool_calls","calls":[{"name":"tool_name","arguments":{"key":"value"}}]}',
-  "Do not add any prose before or after it.",
-  "Do not wrap it in markdown or code fences.",
-].join(" ");
-
 function buildToolCatalogPrompt(tools: ToolDefinition[] | undefined) {
   const safeTools = sanitizeTools(tools);
 
@@ -352,13 +355,13 @@ function buildToolCatalogPrompt(tools: ToolDefinition[] | undefined) {
   }
 
   return [
-    "When using JSON fallback tool calls, you must use one of these exact tool definitions.",
-    "Use the exact tool name and argument keys from the schema.",
+    "当你通过 JSON 回退协议调用工具时，只能使用下面这些精确定义。",
+    "必须严格使用 schema 中给出的工具名与参数键，参数值必须满足对应的 JSON schema。",
     ...safeTools.map((tool) =>
       [
-        `Tool name: ${tool.name}`,
-        tool.description ? `Description: ${tool.description}` : "",
-        `Arguments JSON schema: ${JSON.stringify(getToolSchema(tool))}`,
+        `工具名：${tool.name}`,
+        tool.description ? `描述：${tool.description}` : "",
+        `参数 JSON Schema：${JSON.stringify(getToolSchema(tool))}`,
       ]
         .filter((part) => part.length > 0)
         .join("\n"),
@@ -543,10 +546,7 @@ function parseStrictProtocolEnvelope(text: string): {
         const prefix = source
           .slice(Math.max(0, entry.startIndex - 80), entry.startIndex)
           .toLowerCase();
-        if (
-          prefix.includes("for normal replies use:") ||
-          prefix.includes("for tool calls use:")
-        ) {
+        if (JSON_PROTOCOL_PROMPT_PREFIXES.some((marker) => prefix.includes(marker))) {
           return null;
         }
 
@@ -912,44 +912,42 @@ function buildProtocolRepairPrompt(input: {
   tools: ToolDefinition[] | undefined;
 }) {
   return [
-    "The previous reply violated the required JSON response protocol.",
-    "Return exactly one JSON object and nothing else.",
-    "Return exactly one final action object per reply: either a message, a tool_call, or a tool_calls object.",
-    'For normal replies use: {"type":"message","content":"your response text"}',
-    'For tool calls use: {"type":"tool_call","name":"tool_name","arguments":{"key":"value"}}',
-    'For multiple tool calls use: {"type":"tool_calls","calls":[{"name":"tool_name","arguments":{"key":"value"}}]}',
-    "Problems to fix:",
+    JSON_PROTOCOL_REPAIR_HEADER,
+    JSON_PROTOCOL_REPAIR_REQUIREMENT,
+    JSON_PROTOCOL_REPAIR_ACTION_RULE,
+    `普通回复使用：${RESPONSE_MESSAGE_EXAMPLE}`,
+    `工具调用使用：${RESPONSE_TOOL_CALL_EXAMPLE}`,
+    `多工具并行调用使用：${RESPONSE_TOOL_CALLS_EXAMPLE}`,
+    "需要修复的问题：",
     ...input.issues.map((issue) => `- ${issue}`),
-    "Previous invalid reply:",
+    "上一条无效回复：",
     input.rawOutput,
     ...(sanitizeTools(input.tools).length > 0
-      ? ["Allowed tool definitions:", buildToolCatalogPrompt(input.tools)]
+      ? ["允许使用的工具定义：", buildToolCatalogPrompt(input.tools)]
       : []),
   ].join("\n");
 }
 
 function buildMinimalProtocolRepairPrompt(tools: ToolDefinition[] | undefined) {
   return [
-    "Return exactly one JSON object and nothing else.",
-    "Return exactly one final action object per reply: either a message, a tool_call, or a tool_calls object.",
-    'For normal replies use: {"type":"message","content":"your response text"}',
-    'For tool calls use: {"type":"tool_call","name":"tool_name","arguments":{"key":"value"}}',
-    'For multiple tool calls use: {"type":"tool_calls","calls":[{"name":"tool_name","arguments":{"key":"value"}}]}',
-    "Do not repeat these instructions.",
-    "Do not explain your answer.",
-    "Do not wrap the JSON in markdown.",
+    JSON_PROTOCOL_REPAIR_REQUIREMENT,
+    JSON_PROTOCOL_REPAIR_ACTION_RULE,
+    `普通回复使用：${RESPONSE_MESSAGE_EXAMPLE}`,
+    `工具调用使用：${RESPONSE_TOOL_CALL_EXAMPLE}`,
+    `多工具并行调用使用：${RESPONSE_TOOL_CALLS_EXAMPLE}`,
+    JSON_PROTOCOL_MINIMAL_REPEAT_RULE,
+    JSON_PROTOCOL_MINIMAL_EXPLAIN_RULE,
+    JSON_PROTOCOL_MINIMAL_MARKDOWN_RULE,
     ...(sanitizeTools(tools).length > 0
       ? [
-          `Allowed tool names: ${sanitizeTools(tools).map((tool) => tool.name).join(", ")}`,
+          `允许使用的工具名：${sanitizeTools(tools).map((tool) => tool.name).join(", ")}`,
         ]
       : []),
   ].join("\n");
 }
 
 function looksLikeProtocolRepairEcho(text: string) {
-  return text.includes(
-    "The previous reply violated the required JSON response protocol.",
-  );
+  return text.includes(JSON_PROTOCOL_REPAIR_HEADER);
 }
 
 function recoverPlainTextFromProtocolFailure(text: string) {
@@ -959,28 +957,28 @@ function recoverPlainTextFromProtocolFailure(text: string) {
   }
 
   const boilerplatePatterns = [
-    /^The previous reply violated the required JSON response protocol\.\n?/g,
-    /^Return exactly one JSON object and nothing else\.\n?/g,
-    /^Return exactly one final action object per reply: either a message, a tool_call, or a tool_calls object\.\n?/g,
-    /^For normal replies use: .*?\n?/gm,
-    /^For tool calls use: .*?\n?/gm,
-    /^For multiple tool calls use: .*?\n?/gm,
+    /^上一条回复违反了要求的 JSON 响应协议。\n?/g,
+    /^你现在必须只返回一个 JSON 对象，且不能输出任何其他文本。\n?/g,
+    /^每次回复只能返回一种最终动作：message、tool_call 或 tool_calls。\n?/g,
+    /^普通回复使用：.*?\n?/gm,
+    /^工具调用使用：.*?\n?/gm,
+    /^多工具并行调用使用：.*?\n?/gm,
     /^\{"type":"message","content":"your response text"\}\n?/gm,
     /^\{"type":"tool_call","name":"tool_name","arguments":\{"key":"value"\}\}\n?/gm,
     /^\{"type":"tool_calls","calls":\[.*\]\}\n?/gm,
-    /^Problems to fix:\n?/gm,
+    /^需要修复的问题：\n?/gm,
     /^- .*?\n?/gm,
-    /^Previous invalid reply:\n?/gm,
-    /^Allowed tool definitions:\n?/gm,
-    /^When using JSON fallback tool calls, you must use one of these exact tool definitions\.\n?/gm,
-    /^Use the exact tool name and argument keys from the schema\.\n?/gm,
-    /^Tool name: .*?\n?/gm,
-    /^Description: .*?\n?/gm,
-    /^Arguments JSON schema: .*?\n?/gm,
-    /^Do not repeat these instructions\.\n?/gm,
-    /^Do not explain your answer\.\n?/gm,
-    /^Do not wrap the JSON in markdown\.\n?/gm,
-    /^Allowed tool names: .*?\n?/gm,
+    /^上一条无效回复：\n?/gm,
+    /^允许使用的工具定义：\n?/gm,
+    /^当你通过 JSON 回退协议调用工具时，只能使用下面这些精确定义。\n?/gm,
+    /^必须严格使用 schema 中给出的工具名与参数键，参数值必须满足对应的 JSON schema。\n?/gm,
+    /^工具名：.*?\n?/gm,
+    /^描述：.*?\n?/gm,
+    /^参数 JSON Schema：.*?\n?/gm,
+    /^不要重复这些指令。\n?/gm,
+    /^不要解释你的答案。\n?/gm,
+    /^不要用 Markdown 或代码块包裹 JSON。\n?/gm,
+    /^允许使用的工具名：.*?\n?/gm,
   ];
 
   let recovered = normalized;
@@ -1162,11 +1160,11 @@ function pushProviderMessage(
 function buildSessionInitPrompt(context: ProviderContext) {
   const parts: string[] = [];
 
+  parts.push(CODE_AGENT_SYSTEM_PROMPT);
+
   if (context.systemPrompt?.trim()) {
     parts.push(context.systemPrompt.trim());
   }
-
-  parts.push(RESPONSE_ENVELOPE_INSTRUCTION);
 
   if (sanitizeTools(context.tools).length > 0) {
     parts.push(buildToolCatalogPrompt(context.tools));

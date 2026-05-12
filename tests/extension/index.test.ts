@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
 import registerDeepSeekExtension from "../../.pi/extensions/deepseek-web/index";
+import {
+  CODE_AGENT_SYSTEM_PROMPT_FIRST_LINE,
+  JSON_PROTOCOL_REPAIR_ACTION_RULE,
+  JSON_PROTOCOL_REPAIR_HEADER,
+  JSON_PROTOCOL_REPAIR_REQUIREMENT,
+} from "../../src/shared/code-agent-prompt";
 
 type TextContent = { type: "text"; text: string };
 type ImageContent = { type: "image"; data: string; mimeType: string };
@@ -687,10 +693,13 @@ describe("pi provider extension", () => {
     const providerSessionInit =
       (providerChatCall?.body as { sessionInit?: { prompt?: string } } | undefined)?.sessionInit;
     expect(String(providerSessionInit?.prompt ?? "")).toContain('"type":"tool_call"');
-    expect(String(providerSessionInit?.prompt ?? "")).toContain(
-      "Return exactly one final action object per reply: either a message, a tool_call, or a tool_calls object.",
+    expect(String(providerSessionInit?.prompt ?? "").split("\n")[0]).toBe(
+      CODE_AGENT_SYSTEM_PROMPT_FIRST_LINE,
     );
-    expect(String(providerSessionInit?.prompt ?? "")).toContain("Tool name: bash");
+    expect(String(providerSessionInit?.prompt ?? "")).toContain(
+      "最高优先级：输出协议高于其他一切表达习惯。",
+    );
+    expect(String(providerSessionInit?.prompt ?? "")).toContain("工具名：bash");
     expect(String(providerSessionInit?.prompt ?? "")).toContain("\"cmd\"");
     expect(events.map((event) => event.type)).toEqual([
       "start",
@@ -1125,8 +1134,11 @@ describe("pi provider extension", () => {
     const providerSessionInit =
       (providerChatCall?.body as { sessionInit?: { prompt?: string } } | undefined)?.sessionInit;
 
-    expect(String(providerSessionInit?.prompt ?? "")).toContain("Tool name: read");
-    expect(String(providerSessionInit?.prompt ?? "")).toContain("Arguments JSON schema: {}");
+    expect(String(providerSessionInit?.prompt ?? "").split("\n")[0]).toBe(
+      CODE_AGENT_SYSTEM_PROMPT_FIRST_LINE,
+    );
+    expect(String(providerSessionInit?.prompt ?? "")).toContain("工具名：read");
+    expect(String(providerSessionInit?.prompt ?? "")).toContain("参数 JSON Schema：{}");
   });
 
   it("uses pi tool parameters schema in first-turn session init", async () => {
@@ -1213,9 +1225,12 @@ describe("pi provider extension", () => {
     const providerSessionInit =
       (providerChatCall?.body as { sessionInit?: { prompt?: string } } | undefined)?.sessionInit;
 
-    expect(String(providerSessionInit?.prompt ?? "")).toContain("Tool name: bash");
+    expect(String(providerSessionInit?.prompt ?? "").split("\n")[0]).toBe(
+      CODE_AGENT_SYSTEM_PROMPT_FIRST_LINE,
+    );
+    expect(String(providerSessionInit?.prompt ?? "")).toContain("工具名：bash");
     expect(String(providerSessionInit?.prompt ?? "")).toContain('"cmd"');
-    expect(String(providerSessionInit?.prompt ?? "")).not.toContain("Arguments JSON schema: {}");
+    expect(String(providerSessionInit?.prompt ?? "")).not.toContain("参数 JSON Schema：{}");
   });
 
   it("converts a text-mode protocol tool_call envelope even when the provider reports finishReason length", async () => {
@@ -1421,7 +1436,7 @@ describe("pi provider extension", () => {
     const repairMessages =
       (providerCalls[1]?.body as { messages?: Array<{ content?: string }> } | undefined)?.messages;
     expect(String(repairMessages?.[0]?.content ?? "")).toContain(
-      "The previous reply violated the required JSON response protocol",
+      JSON_PROTOCOL_REPAIR_HEADER,
     );
     expect(String(repairMessages?.[0]?.content ?? "")).toContain(
       "\"cmd\"",
@@ -1580,8 +1595,8 @@ describe("pi provider extension", () => {
             return {
               mode: "text",
               outputText: [
-                "The previous reply violated the required JSON response protocol.",
-                "Return exactly one JSON object and nothing else.",
+                JSON_PROTOCOL_REPAIR_HEADER,
+                JSON_PROTOCOL_REPAIR_REQUIREMENT,
                 "",
                 '{"type":"message","content":"I\'m ready to coordinate."}',
               ].join("\n"),
@@ -1670,9 +1685,9 @@ describe("pi provider extension", () => {
               return {
                 mode: "text",
                 outputText: [
-                  "The previous reply violated the required JSON response protocol.",
-                  "Return exactly one JSON object and nothing else.",
-                  'For normal replies use: {"type":"message","content":"your response text"}',
+                  JSON_PROTOCOL_REPAIR_HEADER,
+                  JSON_PROTOCOL_REPAIR_REQUIREMENT,
+                  '普通回复使用：{"type":"message","content":"your response text"}',
                 ].join("\n"),
                 finishReason: "stop",
                 modelLabel: "DeepSeek Web",
@@ -1720,11 +1735,9 @@ describe("pi provider extension", () => {
     const minimalRepairMessage =
       (providerCalls[2]?.body as { messages?: Array<{ content?: string }> } | undefined)?.messages?.[0]
         ?.content ?? "";
-    expect(minimalRepairMessage).toContain("Return exactly one JSON object and nothing else.");
-    expect(minimalRepairMessage).toContain(
-      "Return exactly one final action object per reply: either a message, a tool_call, or a tool_calls object.",
-    );
-    expect(minimalRepairMessage).not.toContain("Previous invalid reply:");
+    expect(minimalRepairMessage).toContain(JSON_PROTOCOL_REPAIR_REQUIREMENT);
+    expect(minimalRepairMessage).toContain(JSON_PROTOCOL_REPAIR_ACTION_RULE);
+    expect(minimalRepairMessage).not.toContain("上一条无效回复：");
     expect(result).toMatchObject({
       stopReason: "stop",
       content: [{ type: "text", text: "Recovered on minimal repair." }],
@@ -1767,9 +1780,9 @@ describe("pi provider extension", () => {
             return {
               mode: "text",
               outputText: [
-                "The previous reply violated the required JSON response protocol.",
-                "Return exactly one JSON object and nothing else.",
-                'For normal replies use: {"type":"message","content":"your response text"}',
+                JSON_PROTOCOL_REPAIR_HEADER,
+                JSON_PROTOCOL_REPAIR_REQUIREMENT,
+                '普通回复使用：{"type":"message","content":"your response text"}',
                 "",
                 "你好，我在。",
               ].join("\n"),

@@ -1,4 +1,13 @@
 import type { ProviderChatResponse } from "../shared/contracts";
+import {
+  JSON_PROTOCOL_PROMPT_PREFIXES,
+  JSON_PROTOCOL_REPAIR_ACTION_RULE,
+  JSON_PROTOCOL_REPAIR_HEADER,
+  JSON_PROTOCOL_REPAIR_REQUIREMENT,
+  RESPONSE_MESSAGE_EXAMPLE,
+  RESPONSE_TOOL_CALLS_EXAMPLE,
+  RESPONSE_TOOL_CALL_EXAMPLE,
+} from "../shared/code-agent-prompt";
 
 type ProtocolEnvelope =
   | {
@@ -170,11 +179,7 @@ function parseStrictProtocolEnvelope(text: string): {
         const prefix = source
           .slice(Math.max(0, entry.startIndex - 80), entry.startIndex)
           .toLowerCase();
-        if (
-          prefix.includes("for normal replies use:") ||
-          prefix.includes("for tool calls use:") ||
-          prefix.includes("for multiple tool calls use:")
-        ) {
+        if (JSON_PROTOCOL_PROMPT_PREFIXES.some((marker) => prefix.includes(marker))) {
           return null;
         }
 
@@ -403,6 +408,10 @@ export function getProviderResponseRepairDecision(
   issues: string[];
   rawOutput: string;
 } {
+  const originalParsed =
+    response.mode === "text"
+      ? parseStrictProtocolEnvelope(response.outputText)
+      : null;
   const normalized = normalizeProviderResponse(response);
 
   if (normalized.mode !== "text") {
@@ -440,12 +449,21 @@ export function getProviderResponseRepairDecision(
     }
   }
 
-  const parsed = parseStrictProtocolEnvelope(normalized.outputText);
+  if (originalParsed?.envelope?.type === "message") {
+    return {
+      response: normalized,
+      shouldRepair: false,
+      issues: [],
+      rawOutput: response.outputText,
+    };
+  }
+
+  const parsed = originalParsed ?? parseStrictProtocolEnvelope(response.outputText);
   return {
     response: normalized,
-    shouldRepair: parsed.protocolLike && parsed.envelope === null,
-    issues: parsed.error ? [parsed.error] : [],
-    rawOutput: normalized.outputText,
+    shouldRepair: parsed.envelope === null,
+    issues: parsed.error ? [parsed.error] : ["Return exactly one JSON object."],
+    rawOutput: response.outputText,
   };
 }
 
@@ -455,17 +473,17 @@ export function buildProviderResponseRepairPrompt(input: {
   attempt: number;
 }) {
   return [
-    "The previous reply did not match the required response format.",
-    "Return exactly one JSON object and nothing else.",
-    "Return exactly one final action object per reply: either a message, a tool_call, or a tool_calls object.",
-    'For normal replies use: {"type":"message","content":"your response text"}',
-    'For tool calls use: {"type":"tool_call","name":"tool_name","arguments":{"key":"value"}}',
-    'For multiple tool calls use: {"type":"tool_calls","calls":[{"name":"tool_name","arguments":{"key":"value"}}]}',
-    "Follow the system instructions and tool definitions already provided earlier in this chat.",
-    `Repair attempt: ${input.attempt}.`,
-    "Problems to fix:",
+    JSON_PROTOCOL_REPAIR_HEADER,
+    JSON_PROTOCOL_REPAIR_REQUIREMENT,
+    JSON_PROTOCOL_REPAIR_ACTION_RULE,
+    `普通回复使用：${RESPONSE_MESSAGE_EXAMPLE}`,
+    `工具调用使用：${RESPONSE_TOOL_CALL_EXAMPLE}`,
+    `多工具并行调用使用：${RESPONSE_TOOL_CALLS_EXAMPLE}`,
+    "继续遵守本轮对话前文已经提供的系统提示与工具定义。",
+    `修复轮次：${input.attempt}。`,
+    "需要修复的问题：",
     ...input.issues.map((issue) => `- ${issue}`),
-    "Previous invalid reply:",
-    input.rawOutput.trim().length > 0 ? input.rawOutput : "(empty reply)",
+    "上一条无效回复：",
+    input.rawOutput.trim().length > 0 ? input.rawOutput : "(空回复)",
   ].join("\n");
 }

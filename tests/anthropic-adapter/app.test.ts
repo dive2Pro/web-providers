@@ -2,6 +2,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { CODE_AGENT_SYSTEM_PROMPT_FIRST_LINE } from "../../src/shared/code-agent-prompt";
 import { buildAnthropicAdapterApp } from "../../src/anthropic-adapter/app";
 import { loadAnthropicAdapterConfig } from "../../src/anthropic-adapter/config";
 import { createHelperClient } from "../../src/anthropic-adapter/helper-client";
@@ -219,25 +220,91 @@ describe("anthropic adapter helper client", () => {
       toolChoice: "required",
     });
 
+    const requestBody = JSON.parse(
+      String(fetchMock.mock.calls[0]?.[1]?.body ?? "{}"),
+    ) as { sessionInit?: { prompt?: string } };
+    const sessionInitPrompt = String(requestBody.sessionInit?.prompt ?? "");
+
     expect(fetchMock).toHaveBeenCalledWith(
       "http://127.0.0.1:4318/v1/provider/chat",
       expect.objectContaining({
-        body: expect.stringContaining("Your entire assistant reply must be exactly one JSON object."),
+        body: expect.stringContaining("你是一个 code agent API，不是面向终端用户的闲聊助手。"),
       }),
     );
     expect(fetchMock).toHaveBeenCalledWith(
       "http://127.0.0.1:4318/v1/provider/chat",
       expect.objectContaining({
-        body: expect.stringContaining("Tool name: read_file"),
+        body: expect.stringContaining("工具名：read_file"),
       }),
     );
     expect(fetchMock).toHaveBeenCalledWith(
       "http://127.0.0.1:4318/v1/provider/chat",
       expect.objectContaining({
         body: expect.stringContaining(
-          "You must call at least one tool and return a tool_call or tool_calls JSON object.",
+          "本轮必须至少调用一个工具。你必须返回 tool_call 或 tool_calls 类型的 JSON 对象。",
         ),
       }),
+    );
+    expect(sessionInitPrompt.split("\n")[0]).toBe(CODE_AGENT_SYSTEM_PROMPT_FIRST_LINE);
+    expect(sessionInitPrompt).toContain(
+      "最高优先级：输出协议高于其他一切表达习惯。",
+    );
+  });
+
+  it("injects json envelope instructions even when no tools are present", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        mode: "text",
+        outputText: "hello",
+        finishReason: "stop",
+      }),
+    });
+    const client = createHelperClient({
+      helperBaseUrl: "http://127.0.0.1:4318",
+      helperToken: "helper-token",
+      fetchImpl: fetchMock,
+    });
+
+    await client.run({
+      publicModel: "deepseek-web-pro",
+      provider: "deepseek-web",
+      responseFormat: "anthropic_messages",
+      messages: [{ role: "user", content: "Say hi." }],
+      tools: [],
+      toolChoice: "none",
+    });
+
+    const requestBody = JSON.parse(
+      String(fetchMock.mock.calls[0]?.[1]?.body ?? "{}"),
+    ) as { sessionInit?: { prompt?: string } };
+    const sessionInitPrompt = String(requestBody.sessionInit?.prompt ?? "");
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://127.0.0.1:4318/v1/provider/chat",
+      expect.objectContaining({
+        body: expect.stringContaining("\"sessionInit\""),
+      }),
+    );
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://127.0.0.1:4318/v1/provider/chat",
+      expect.objectContaining({
+        body: expect.stringContaining(
+          "你是一个 code agent API，不是面向终端用户的闲聊助手。",
+        ),
+      }),
+    );
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://127.0.0.1:4318/v1/provider/chat",
+      expect.objectContaining({
+        body: expect.stringContaining(
+          "本轮禁止调用任何工具。你必须返回 message 类型的 JSON 对象。",
+        ),
+      }),
+    );
+    expect(sessionInitPrompt.split("\n")[0]).toBe(CODE_AGENT_SYSTEM_PROMPT_FIRST_LINE);
+    expect(sessionInitPrompt).toContain(
+      "最高优先级：输出协议高于其他一切表达习惯。",
     );
   });
 });

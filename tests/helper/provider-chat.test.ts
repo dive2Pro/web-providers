@@ -1,6 +1,30 @@
 import { describe, expect, it } from "vitest";
 import { buildApp } from "../../src/helper/app";
 import { HelperError } from "../../src/helper/errors";
+import {
+  JSON_PROTOCOL_REPAIR_ACTION_RULE,
+  JSON_PROTOCOL_REPAIR_HEADER,
+  JSON_PROTOCOL_REPAIR_REQUIREMENT,
+} from "../../src/shared/code-agent-prompt";
+
+function messageResponse(
+  content: string,
+  input?: {
+    modelLabel?: string;
+    thinkingText?: string;
+    debug?: Record<string, unknown>;
+  },
+) {
+  return {
+    mode: "text" as const,
+    outputText: JSON.stringify({ type: "message", content }),
+    modelLabel: input?.modelLabel ?? "DeepSeek Web",
+    ...(typeof input?.thinkingText === "string"
+      ? { thinkingText: input.thinkingText }
+      : {}),
+    ...(input?.debug ? { debug: input.debug } : {}),
+  };
+}
 
 describe("provider chat route", () => {
   it("reuses a manually bound DeepSeek tab before creating a model-scoped binding", async () => {
@@ -31,11 +55,8 @@ describe("provider chat route", () => {
         },
         resetProvider: async () => undefined,
         startNewChat: async () => undefined,
-        sendChatPrompt: async ({ prompt }: { prompt: string }) => ({
-          mode: "text",
-          outputText: `reply:${prompt}`,
-          modelLabel: "DeepSeek Web",
-        }),
+        sendChatPrompt: async ({ prompt }: { prompt: string }) =>
+          messageResponse(`reply:${prompt}`),
       } as never,
     });
 
@@ -116,11 +137,8 @@ describe("provider chat route", () => {
         },
         resetProvider: async () => undefined,
         startNewChat: async () => undefined,
-        sendChatPrompt: async ({ prompt }: { prompt: string }) => ({
-          mode: "text",
-          outputText: `reply:${prompt}`,
-          modelLabel: "DeepSeek Web",
-        }),
+        sendChatPrompt: async ({ prompt }: { prompt: string }) =>
+          messageResponse(`reply:${prompt}`),
       } as never,
     });
 
@@ -185,11 +203,8 @@ describe("provider chat route", () => {
         },
         resetProvider: async () => undefined,
         startNewChat: async () => undefined,
-        sendChatPrompt: async ({ prompt }: { prompt: string }) => ({
-          mode: "text",
-          outputText: `reply:${prompt}`,
-          modelLabel: "DeepSeek Web",
-        }),
+        sendChatPrompt: async ({ prompt }: { prompt: string }) =>
+          messageResponse(`reply:${prompt}`),
       } as never,
     });
 
@@ -283,11 +298,8 @@ describe("provider chat route", () => {
         },
         resetProvider: async () => undefined,
         startNewChat: async () => undefined,
-        sendChatPrompt: async ({ prompt }: { prompt: string }) => ({
-          mode: "text",
-          outputText: `reply:${prompt}`,
-          modelLabel: "DeepSeek Web",
-        }),
+        sendChatPrompt: async ({ prompt }: { prompt: string }) =>
+          messageResponse(`reply:${prompt}`),
       } as never,
     });
 
@@ -371,11 +383,8 @@ describe("provider chat route", () => {
         },
         resetProvider: async () => undefined,
         startNewChat: async () => undefined,
-        sendChatPrompt: async ({ prompt }: { prompt: string }) => ({
-          mode: "text",
-          outputText: `reply:${prompt}`,
-          modelLabel: "DeepSeek Web",
-        }),
+        sendChatPrompt: async ({ prompt }: { prompt: string }) =>
+          messageResponse(`reply:${prompt}`),
       } as never,
     });
 
@@ -427,11 +436,10 @@ describe("provider chat route", () => {
         }),
         resetProvider: async () => undefined,
         startNewChat: async () => undefined,
-        sendChatPrompt: async () => ({
-          mode: "text",
-          outputText: "qwen:hello",
-          modelLabel: "Qwen Web",
-        }),
+        sendChatPrompt: async () =>
+          messageResponse("qwen:hello", {
+            modelLabel: "Qwen Web",
+          }),
       } as never,
     });
 
@@ -536,11 +544,8 @@ describe("provider chat route", () => {
         },
         resetProvider: async () => undefined,
         startNewChat: async () => undefined,
-        sendChatPrompt: async ({ prompt }: { prompt: string }) => ({
-          mode: "text",
-          outputText: `reply:${prompt}`,
-          modelLabel: "DeepSeek Web",
-        }),
+        sendChatPrompt: async ({ prompt }: { prompt: string }) =>
+          messageResponse(`reply:${prompt}`),
       } as never,
     });
 
@@ -592,16 +597,14 @@ describe("provider chat route", () => {
         }),
         resetPageBridge: async () => undefined,
         startNewChat: async () => undefined,
-        sendChatPrompt: async ({ prompt }: { prompt: string }) => ({
-          mode: "text",
-          outputText: `reply:${prompt}`,
-          debug: {
-            source: "bridge_dom_fallback",
-            freshSession: false,
-            completionObserved: false,
-          },
-          modelLabel: "DeepSeek Web",
-        }),
+        sendChatPrompt: async ({ prompt }: { prompt: string }) =>
+          messageResponse(`reply:${prompt}`, {
+            debug: {
+              source: "bridge_dom_fallback",
+              freshSession: false,
+              completionObserved: false,
+            },
+          }),
       } as never,
     });
 
@@ -654,12 +657,10 @@ describe("provider chat route", () => {
         }),
         resetPageBridge: async () => undefined,
         startNewChat: async () => undefined,
-        sendChatPrompt: async () => ({
-          mode: "text",
-          thinkingText: "think step",
-          outputText: "final answer",
-          modelLabel: "DeepSeek Web",
-        }),
+        sendChatPrompt: async () =>
+          messageResponse("final answer", {
+            thinkingText: "think step",
+          }),
       } as never,
     });
 
@@ -828,9 +829,85 @@ describe("provider chat route", () => {
     });
     expect(freshChatCount).toBe(1);
     expect(prompts[0]).toBe("You are terse.\n\nhello");
-    expect(prompts[1]).toContain("The previous reply did not match the required response format.");
-    expect(prompts[1]).toContain("Return exactly one JSON object and nothing else.");
+    expect(prompts[1]).toContain(JSON_PROTOCOL_REPAIR_HEADER);
+    expect(prompts[1]).toContain(JSON_PROTOCOL_REPAIR_REQUIREMENT);
+    expect(prompts[1]).toContain(JSON_PROTOCOL_REPAIR_ACTION_RULE);
     expect(prompts[1]).toContain("toolCalls must be a non-empty array");
+  });
+
+  it("repairs plain-text provider replies into the required json envelope even without tools", async () => {
+    const prompts: string[] = [];
+
+    const app = buildApp({
+      token: "test-token",
+      browserClient: {
+        getConnectionStatus: async () => "connected",
+        bindDeepSeekTab: async () => ({
+          tabId: "tab-1",
+          url: "https://chat.deepseek.com/",
+          loginState: "logged_in",
+          bridgeInjected: true,
+          pageState: {
+            inputReady: true,
+            busy: false,
+            latestAssistantPreview: null,
+            assistantCount: 0,
+          },
+        }),
+        resetPageBridge: async () => undefined,
+        startNewChat: async () => undefined,
+        sendChatPrompt: async ({ prompt }: { prompt: string }) => {
+          prompts.push(prompt);
+          if (prompts.length === 1) {
+            return {
+              mode: "text",
+              outputText: "hello",
+              modelLabel: "DeepSeek Web",
+            };
+          }
+
+          return {
+            mode: "text",
+            outputText: "{\"type\":\"message\",\"content\":\"fixed answer\"}",
+            modelLabel: "DeepSeek Web",
+          };
+        },
+      } as never,
+    });
+
+    await app.inject({
+      method: "POST",
+      url: "/v1/bind",
+      headers: { authorization: "Bearer test-token" },
+    });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/provider/chat",
+      headers: {
+        authorization: "Bearer test-token",
+      },
+      payload: {
+        model: "deepseek-web-pro",
+        messages: [{ role: "user", content: "hello" }],
+        sessionInit: {
+          prompt: "You must answer with one JSON object.",
+        },
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({
+      mode: "text",
+      outputText: "fixed answer",
+      finishReason: "stop",
+      modelLabel: "DeepSeek Web",
+    });
+    expect(prompts[1]).toContain(JSON_PROTOCOL_REPAIR_HEADER);
+    expect(prompts[1]).toContain(JSON_PROTOCOL_REPAIR_REQUIREMENT);
+    expect(prompts[1]).toContain(JSON_PROTOCOL_REPAIR_ACTION_RULE);
+    expect(prompts[1]).toContain("上一条无效回复：");
+    expect(prompts[1]).toContain("hello");
   });
 
   it("forwards only the latest user turn because DeepSeek web keeps its own chat history", async () => {
@@ -856,11 +933,7 @@ describe("provider chat route", () => {
         startNewChat: async () => undefined,
         sendChatPrompt: async ({ prompt }: { prompt: string }) => {
           capturedPrompt = prompt;
-          return {
-            mode: "text",
-            outputText: "ok",
-            modelLabel: "DeepSeek Web",
-          };
+          return messageResponse("ok");
         },
       } as never,
     });
@@ -915,11 +988,7 @@ describe("provider chat route", () => {
         },
         sendChatPrompt: async ({ prompt }: { prompt: string }) => {
           capturedPrompt = prompt;
-          return {
-            mode: "text",
-            outputText: "ok",
-            modelLabel: "DeepSeek Web",
-          };
+          return messageResponse("ok");
         },
       } as never,
     });
@@ -984,11 +1053,7 @@ describe("provider chat route", () => {
         }) => {
           capturedPrompt = prompt;
           expect(freshSession).toBe(true);
-          return {
-            mode: "text",
-            outputText: "ok",
-            modelLabel: "DeepSeek Web",
-          };
+          return messageResponse("ok");
         },
       } as never,
     });
@@ -1039,11 +1104,7 @@ describe("provider chat route", () => {
         },
         sendChatPrompt: async ({ prompt }: { prompt: string }) => {
           prompts.push(prompt);
-          return {
-            mode: "text",
-            outputText: "ok",
-            modelLabel: "DeepSeek Web",
-          };
+          return messageResponse("ok");
         },
       } as never,
     });
@@ -1110,11 +1171,7 @@ describe("provider chat route", () => {
         },
         sendChatPrompt: async ({ prompt }: { prompt: string }) => {
           prompts.push(prompt);
-          return {
-            mode: "text",
-            outputText: "ok",
-            modelLabel: "DeepSeek Web",
-          };
+          return messageResponse("ok");
         },
       } as never,
     });
@@ -1181,11 +1238,7 @@ describe("provider chat route", () => {
         },
         sendChatPrompt: async ({ prompt }: { prompt: string }) => {
           prompts.push(prompt);
-          return {
-            mode: "text",
-            outputText: "ok",
-            modelLabel: "DeepSeek Web",
-          };
+          return messageResponse("ok");
         },
       } as never,
     });
@@ -1265,11 +1318,7 @@ describe("provider chat route", () => {
         },
         sendChatPrompt: async ({ prompt }: { prompt: string }) => {
           prompts.push(prompt);
-          return {
-            mode: "text",
-            outputText: "ok",
-            modelLabel: "DeepSeek Web",
-          };
+          return messageResponse("ok");
         },
       } as never,
     });
@@ -1335,16 +1384,14 @@ describe("provider chat route", () => {
         }),
         resetPageBridge: async () => undefined,
         startNewChat: async () => undefined,
-        sendChatPrompt: async ({ prompt }: { prompt: string }) => ({
-          mode: "text",
-          outputText: `reply:${prompt}`,
-          debug: {
-            source: "bridge_dom_fallback",
-            freshSession: false,
-            completionObserved: false,
-          },
-          modelLabel: "DeepSeek Web",
-        }),
+        sendChatPrompt: async ({ prompt }: { prompt: string }) =>
+          messageResponse(`reply:${prompt}`, {
+            debug: {
+              source: "bridge_dom_fallback",
+              freshSession: false,
+              completionObserved: false,
+            },
+          }),
       } as never,
     });
 
@@ -1471,6 +1518,60 @@ describe("provider chat route", () => {
         code: "AUTOMATION_DESYNC",
         message: "Unexpected automation failure: boom",
       },
+    });
+  });
+
+  it("accepts DeepSeek message envelopes preserved via rawOutputText", async () => {
+    const app = buildApp({
+      token: "test-token",
+      browserClient: {
+        getConnectionStatus: async () => "connected",
+        bindDeepSeekTab: async () => ({
+          tabId: "tab-1",
+          url: "https://chat.deepseek.com/",
+          loginState: "logged_in",
+          bridgeInjected: true,
+          pageState: {
+            inputReady: true,
+            busy: false,
+            latestAssistantPreview: null,
+            assistantCount: 0,
+          },
+        }),
+        resetPageBridge: async () => undefined,
+        startNewChat: async () => undefined,
+        sendChatPrompt: async () => ({
+          mode: "text" as const,
+          outputText: "Hey! What are you working on?",
+          rawOutputText:
+            "{\"type\":\"message\",\"content\":\"Hey! What are you working on?\"}",
+          modelLabel: "DeepSeek Web",
+        }),
+      } as never,
+    });
+
+    await app.inject({
+      method: "POST",
+      url: "/v1/bind",
+      headers: { authorization: "Bearer test-token" },
+    });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/provider/chat",
+      headers: { authorization: "Bearer test-token" },
+      payload: {
+        model: "deepseek-web-chat",
+        messages: [{ role: "user", content: "hey" }],
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({
+      mode: "text",
+      outputText: "Hey! What are you working on?",
+      finishReason: "stop",
+      modelLabel: "DeepSeek Web",
     });
   });
 
@@ -1611,9 +1712,9 @@ describe("provider chat route", () => {
       message: "Provider returned an invalid structured response after 3 repair attempts",
     });
     expect(prompts).toHaveLength(4);
-    expect(prompts[1]).toContain("Repair attempt: 1.");
-    expect(prompts[2]).toContain("Repair attempt: 2.");
-    expect(prompts[3]).toContain("Repair attempt: 3.");
+    expect(prompts[1]).toContain("修复轮次：1。");
+    expect(prompts[2]).toContain("修复轮次：2。");
+    expect(prompts[3]).toContain("修复轮次：3。");
   });
 
   it("aborts the current provider request when the client aborts the HTTP request", async () => {
@@ -1641,11 +1742,7 @@ describe("provider chat route", () => {
         sendChatPrompt: async ({ signal }: { signal?: AbortSignal }) => {
           requestCount += 1;
           if (requestCount > 1) {
-            return {
-              mode: "text",
-              outputText: "second request ok",
-              modelLabel: "DeepSeek Web",
-            };
+            return messageResponse("second request ok");
           }
 
           if (signal?.aborted) {

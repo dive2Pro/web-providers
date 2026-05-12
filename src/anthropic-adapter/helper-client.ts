@@ -3,19 +3,13 @@ import {
   buildSessionTitleResponse,
   isSessionTitleRequest,
 } from "../shared/session-title";
+import {
+  CODE_AGENT_SYSTEM_PROMPT,
+} from "../shared/code-agent-prompt";
 import { mapHelperError } from "./errors";
 import type { NormalizedRequest } from "./types";
 
 type FetchImpl = typeof fetch;
-
-const RESPONSE_ENVELOPE_INSTRUCTION = [
-  "Your entire assistant reply must be exactly one JSON object.",
-  'For normal replies use: {"type":"message","content":"your response text"}',
-  'For tool calls use: {"type":"tool_call","name":"tool_name","arguments":{"key":"value"}}',
-  'For multiple tool calls use: {"type":"tool_calls","calls":[{"name":"tool_name","arguments":{"key":"value"}}]}',
-  "Do not add any prose before or after it.",
-  "Do not wrap it in markdown or code fences.",
-].join(" ");
 
 function buildToolCatalogPrompt(tools: NormalizedRequest["tools"]) {
   if (tools.length === 0) {
@@ -23,13 +17,13 @@ function buildToolCatalogPrompt(tools: NormalizedRequest["tools"]) {
   }
 
   return [
-    "When using JSON fallback tool calls, you must use one of these exact tool definitions.",
-    "Use the exact tool name and argument keys from the schema.",
+    "当你通过 JSON 回退协议调用工具时，只能使用下面这些精确定义。",
+    "必须严格使用 schema 中给出的工具名与参数键，参数值必须满足对应的 JSON schema。",
     ...tools.map((tool) =>
       [
-        `Tool name: ${tool.name}`,
-        tool.description ? `Description: ${tool.description}` : "",
-        `Arguments JSON schema: ${tool.parametersJson}`,
+        `工具名：${tool.name}`,
+        tool.description ? `描述：${tool.description}` : "",
+        `参数 JSON Schema：${tool.parametersJson}`,
       ]
         .filter((part) => part.length > 0)
         .join("\n"),
@@ -39,18 +33,18 @@ function buildToolCatalogPrompt(tools: NormalizedRequest["tools"]) {
 
 function buildToolChoicePrompt(toolChoice: NormalizedRequest["toolChoice"]) {
   if (toolChoice === "none") {
-    return "Do not call any tool. Return a normal reply JSON object.";
+    return "本轮禁止调用任何工具。你必须返回 message 类型的 JSON 对象。";
   }
 
   if (toolChoice === "required") {
-    return "You must call at least one tool and return a tool_call or tool_calls JSON object.";
+    return "本轮必须至少调用一个工具。你必须返回 tool_call 或 tool_calls 类型的 JSON 对象。";
   }
 
   if (toolChoice === "auto") {
-    return "Call a tool only when it is necessary to answer correctly.";
+    return "只有在使用工具是正确完成任务的必要条件时，才调用工具。";
   }
 
-  return `You must call the tool named "${toolChoice.name}" and return a tool_call JSON object.`;
+  return `本轮必须调用名为“${toolChoice.name}”的工具，并返回 tool_call 类型的 JSON 对象。`;
 }
 
 function buildSessionInit(request: NormalizedRequest) {
@@ -59,12 +53,11 @@ function buildSessionInit(request: NormalizedRequest) {
     .map((message) => message.content.trim())
     .filter((content) => content.length > 0);
 
-  const hasTooling = request.tools.length > 0;
   const parts = [
+    CODE_AGENT_SYSTEM_PROMPT,
     ...systemPrompts,
-    ...(hasTooling ? [RESPONSE_ENVELOPE_INSTRUCTION] : []),
-    ...(hasTooling ? [buildToolCatalogPrompt(request.tools)] : []),
-    ...(hasTooling ? [buildToolChoicePrompt(request.toolChoice)] : []),
+    buildToolCatalogPrompt(request.tools),
+    buildToolChoicePrompt(request.toolChoice),
   ]
     .map((part) => part.trim())
     .filter((part) => part.length > 0);

@@ -2,6 +2,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { CODE_AGENT_SYSTEM_PROMPT_FIRST_LINE } from "../../src/shared/code-agent-prompt";
 import { buildOpenAiAdapterApp } from "../../src/openai-adapter/app";
 import { loadOpenAiAdapterConfig } from "../../src/openai-adapter/config";
 import { createHelperClient } from "../../src/openai-adapter/helper-client";
@@ -41,11 +42,15 @@ describe("openai adapter helper client", () => {
         headers: expect.objectContaining({
           authorization: "Bearer helper-token",
         }),
-        body: JSON.stringify({
-          provider: "qwen-web",
-          model: "qwen-web-chat",
-          messages: [{ role: "user", content: "hello" }],
-        }),
+        body: expect.stringContaining("\"sessionInit\""),
+      }),
+    );
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://127.0.0.1:4318/v1/provider/chat",
+      expect.objectContaining({
+        body: expect.stringContaining(
+          "本轮禁止调用任何工具。你必须返回 message 类型的 JSON 对象。",
+        ),
       }),
     );
     expect(result).toMatchObject({
@@ -162,6 +167,11 @@ describe("openai adapter helper client", () => {
       toolChoice: "auto",
     });
 
+    const requestBody = JSON.parse(
+      String(fetchMock.mock.calls[0]?.[1]?.body ?? "{}"),
+    ) as { sessionInit?: { prompt?: string } };
+    const sessionInitPrompt = String(requestBody.sessionInit?.prompt ?? "");
+
     expect(fetchMock).toHaveBeenCalledWith(
       "http://127.0.0.1:4318/v1/provider/chat",
       expect.objectContaining({
@@ -171,7 +181,7 @@ describe("openai adapter helper client", () => {
     expect(fetchMock).toHaveBeenCalledWith(
       "http://127.0.0.1:4318/v1/provider/chat",
       expect.objectContaining({
-        body: expect.stringContaining("Tool name: ping"),
+        body: expect.stringContaining("工具名：ping"),
       }),
     );
     expect(fetchMock).toHaveBeenCalledWith(
@@ -184,9 +194,71 @@ describe("openai adapter helper client", () => {
       "http://127.0.0.1:4318/v1/provider/chat",
       expect.objectContaining({
         body: expect.stringContaining(
-          "Your entire assistant reply must be exactly one JSON object.",
+          "你是一个 code agent API，不是面向终端用户的闲聊助手。",
         ),
       }),
+    );
+    expect(sessionInitPrompt.split("\n")[0]).toBe(CODE_AGENT_SYSTEM_PROMPT_FIRST_LINE);
+    expect(sessionInitPrompt).toContain(
+      "最高优先级：输出协议高于其他一切表达习惯。",
+    );
+  });
+
+  it("injects json envelope instructions even when no tools are present", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        mode: "text",
+        outputText: "hello",
+        finishReason: "stop",
+      }),
+    });
+
+    const client = createHelperClient({
+      helperBaseUrl: "http://127.0.0.1:4318",
+      helperToken: "helper-token",
+      fetchImpl: fetchMock,
+    });
+
+    await client.run({
+      publicModel: "deepseek-web-pro",
+      provider: "deepseek-web",
+      responseFormat: "chat_completions",
+      messages: [{ role: "user", content: "Say hi." }],
+      tools: [],
+      toolChoice: "none",
+    });
+
+    const requestBody = JSON.parse(
+      String(fetchMock.mock.calls[0]?.[1]?.body ?? "{}"),
+    ) as { sessionInit?: { prompt?: string } };
+    const sessionInitPrompt = String(requestBody.sessionInit?.prompt ?? "");
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://127.0.0.1:4318/v1/provider/chat",
+      expect.objectContaining({
+        body: expect.stringContaining("\"sessionInit\""),
+      }),
+    );
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://127.0.0.1:4318/v1/provider/chat",
+      expect.objectContaining({
+        body: expect.stringContaining(
+          "你是一个 code agent API，不是面向终端用户的闲聊助手。",
+        ),
+      }),
+    );
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://127.0.0.1:4318/v1/provider/chat",
+      expect.objectContaining({
+        body: expect.stringContaining(
+          "本轮禁止调用任何工具。你必须返回 message 类型的 JSON 对象。",
+        ),
+      }),
+    );
+    expect(sessionInitPrompt.split("\n")[0]).toBe(CODE_AGENT_SYSTEM_PROMPT_FIRST_LINE);
+    expect(sessionInitPrompt).toContain(
+      "最高优先级：输出协议高于其他一切表达习惯。",
     );
   });
 
@@ -224,7 +296,7 @@ describe("openai adapter helper client", () => {
     expect(fetchMock).toHaveBeenCalledWith(
       "http://127.0.0.1:4318/v1/provider/chat",
       expect.objectContaining({
-        body: expect.stringContaining("Arguments JSON schema: {}"),
+        body: expect.stringContaining("参数 JSON Schema：{}"),
       }),
     );
   });
