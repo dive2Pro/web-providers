@@ -7,6 +7,7 @@ import type {
   ProviderChatRequest,
   ProviderChatResponse,
 } from "../shared/contracts";
+import { logServiceStarted } from "../shared/startup-log";
 
 interface ManagedHelper {
   baseUrl: string;
@@ -1442,6 +1443,7 @@ export default function registerDeepSeekExtension(
         const token = deps.randomToken();
         const port = deps.pickPort ? await deps.pickPort() : 4318;
         const started = await deps.spawnHelper({ token, port });
+        logServiceStarted("helper", started.baseUrl);
         helper = started;
         return started;
       })().catch((error) => {

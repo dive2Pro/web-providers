@@ -1,6 +1,7 @@
 import { buildAnthropicAdapterApp } from "./app";
 import { loadAnthropicAdapterConfig } from "./config";
 import { getDefaultRequestLogDir } from "../shared/request-log-store";
+import { logServiceStarted } from "../shared/startup-log";
 
 const config = loadAnthropicAdapterConfig();
 
@@ -16,7 +17,4 @@ const address = await app.listen({
   port: config.port,
 });
 
-console.log(`[anthropic-adapter] listening on ${address}`);
-console.log(
-  `[anthropic-adapter] endpoints: ${address}/v1/models ${address}/v1/messages ${address}/v1/messages/count_tokens`,
-);
+logServiceStarted("anthropic-adapter", address);

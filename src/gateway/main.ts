@@ -1,6 +1,7 @@
 import { buildGatewayApp } from "./app";
 import { loadGatewayConfig } from "./config";
 import { getDefaultRequestLogDir } from "../shared/request-log-store";
+import { logServiceStarted } from "../shared/startup-log";
 
 const config = loadGatewayConfig();
 
@@ -17,7 +18,4 @@ const address = await app.listen({
   port: config.port,
 });
 
-console.log(`[gateway] listening on ${address}`);
-console.log(
-  `[gateway] endpoints: ${address}/v1/models ${address}/v1/chat/completions ${address}/v1/responses ${address}/v1/messages`,
-);
+logServiceStarted("gateway", address);

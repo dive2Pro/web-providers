@@ -1,6 +1,7 @@
 import { buildOpenAiAdapterApp } from "./app";
 import { loadOpenAiAdapterConfig } from "./config";
 import { getDefaultRequestLogDir } from "../shared/request-log-store";
+import { logServiceStarted } from "../shared/startup-log";
 
 const config = loadOpenAiAdapterConfig();
 
@@ -16,7 +17,4 @@ const address = await app.listen({
   port: config.port,
 });
 
-console.log(`[openai-adapter] listening on ${address}`);
-console.log(
-  `[openai-adapter] endpoints: ${address}/v1/models ${address}/v1/chat/completions ${address}/v1/responses`,
-);
+logServiceStarted("openai-adapter", address);
