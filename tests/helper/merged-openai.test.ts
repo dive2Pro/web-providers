@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { buildApp } from "../../src/helper/app";
 import { HelperError } from "../../src/helper/errors";
 
@@ -85,8 +85,156 @@ describe("merged helper openai routes", () => {
       ],
     });
     expect(bindCalls).toEqual([
-      { provider: "deepseek-web", openNew: true, tabId: undefined },
+      expect.objectContaining({ provider: "deepseek-web", passive: true }),
     ]);
+  });
+
+  it("runs anthropic messages through the merged runtime", async () => {
+    const bindCalls: Array<Record<string, unknown>> = [];
+
+    const app = buildApp({
+      token: "test-token",
+      browserClient: {
+        getConnectionStatus: async () => "connected",
+        bindProviderTab: async (input: {
+          provider: string;
+          tabId?: string;
+          openNew?: boolean;
+        }) => {
+          bindCalls.push(input);
+          return {
+            tabId: input.tabId ?? "tab-anthropic",
+            url: "https://chat.deepseek.com/",
+            loginState: "logged_in",
+            bridgeInjected: true,
+            pageState: {
+              inputReady: true,
+              busy: false,
+              latestAssistantPreview: null,
+              assistantCount: 0,
+            },
+          };
+        },
+        startNewChat: async () => undefined,
+        sendChatPrompt: async ({ prompt }: { prompt: string }) => ({
+          mode: "text",
+          outputText: `reply:${prompt}`,
+          modelLabel: "DeepSeek Web",
+        }),
+      } as never,
+    });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/messages?beta=true",
+      headers: { authorization: "Bearer test-token" },
+      payload: {
+        model: "deepseek-web-chat",
+        max_tokens: 64,
+        messages: [{ role: "user", content: "hello" }],
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      type: "message",
+      role: "assistant",
+      model: "deepseek-web-chat",
+      content: [
+        expect.objectContaining({
+          type: "text",
+          text: "reply:hello",
+        }),
+      ],
+    });
+    expect(bindCalls).toEqual([
+      expect.objectContaining({ provider: "deepseek-web", passive: true }),
+    ]);
+  });
+
+  it("handles anthropic session title generation locally in the merged runtime", async () => {
+    const bindProviderTab = vi.fn();
+    const sendChatPrompt = vi.fn();
+    const app = buildApp({
+      token: "test-token",
+      browserClient: {
+        getConnectionStatus: async () => "connected",
+        bindProviderTab,
+        sendChatPrompt,
+      } as never,
+    });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/messages?beta=true",
+      headers: { "x-api-key": "test-token" },
+      payload: {
+        model: "deepseek-web-chat",
+        max_tokens: 64,
+        messages: [{ role: "user", content: "fix login button on mobile" }],
+        system: [
+          {
+            type: "text",
+            text: [
+              "You are Claude Code, Anthropic's official CLI for Claude.",
+              "Generate a concise, sentence-case title (3-7 words) that captures the main topic or goal of this coding session.",
+              'Return JSON with a single "title" field.',
+            ].join("\n"),
+          },
+        ],
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      type: "message",
+      role: "assistant",
+      model: "deepseek-web-chat",
+      content: [
+        expect.objectContaining({
+          type: "text",
+          text: "{\"title\":\"Fix login button on mobile\"}",
+        }),
+      ],
+    });
+    expect(bindProviderTab).not.toHaveBeenCalled();
+    expect(sendChatPrompt).not.toHaveBeenCalled();
+  });
+
+  it("maps helper runtime errors to anthropic api errors in the merged runtime", async () => {
+    const app = buildApp({
+      token: "test-token",
+      browserClient: {
+        getConnectionStatus: async () => "connected",
+        bindProviderTab: async () => {
+          throw new HelperError(
+            "MODEL_BUSY",
+            "Another request is already in progress",
+          );
+        },
+      } as never,
+    });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/messages?beta=true",
+      headers: { "x-api-key": "test-token" },
+      payload: {
+        model: "deepseek-web-chat",
+        max_tokens: 64,
+        stream: true,
+        messages: [{ role: "user", content: "hello" }],
+      },
+    });
+
+    expect(response.statusCode).toBe(429);
+    expect(response.json()).toEqual({
+      type: "error",
+      error: {
+        type: "rate_limit_error",
+        message: "Another request is already in progress",
+      },
+    });
   });
 
   it("maps helper runtime errors to stable public openai errors", async () => {
@@ -174,8 +322,8 @@ describe("merged helper openai routes", () => {
     }
 
     expect(bindCalls).toEqual([
-      { provider: "deepseek-web", openNew: true, tabId: undefined },
-      { provider: "deepseek-web", openNew: true, tabId: undefined },
+      expect.objectContaining({ provider: "deepseek-web", passive: true }),
+      expect.objectContaining({ provider: "deepseek-web", passive: true }),
     ]);
   });
 
@@ -258,8 +406,8 @@ describe("merged helper openai routes", () => {
     }
 
     expect(bindCalls).toEqual([
-      { provider: "deepseek-web", openNew: true, tabId: undefined },
-      { provider: "deepseek-web", openNew: undefined, tabId: "tab-1" },
+      expect.objectContaining({ provider: "deepseek-web", passive: true }),
+      expect.objectContaining({ provider: "deepseek-web", tabId: "tab-1" }),
     ]);
   });
 
@@ -278,12 +426,13 @@ describe("merged helper openai routes", () => {
           tabId?: string;
           openNew?: boolean;
           openUrl?: string;
+          passive?: boolean;
         }) => {
           bindCalls.push(input);
 
-          if (input.openNew) {
+          if (input.openNew || input.passive) {
             return {
-              tabId: bindCalls.length === 1 ? "tab-1" : "tab-2",
+              tabId: bindCalls.length <= 1 ? "tab-1" : "tab-2",
               url: input.openUrl ?? "https://chat.deepseek.com/",
               loginState: "logged_in",
               bridgeInjected: true,
@@ -325,20 +474,17 @@ describe("merged helper openai routes", () => {
     }
 
     expect(bindCalls).toEqual([
-      { provider: "deepseek-web", openNew: true, tabId: undefined },
-      { provider: "deepseek-web", openNew: undefined, tabId: "tab-1" },
-      {
+      expect.objectContaining({ provider: "deepseek-web", passive: true }),
+      expect.objectContaining({ provider: "deepseek-web", tabId: "tab-1" }),
+      expect.objectContaining({
         provider: "deepseek-web",
-        openNew: undefined,
         openUrl: "https://chat.deepseek.com/a/chat/s/original-session",
-        tabId: undefined,
-      },
-      {
+      }),
+      expect.objectContaining({
         provider: "deepseek-web",
         openNew: true,
         openUrl: "https://chat.deepseek.com/a/chat/s/original-session",
-        tabId: undefined,
-      },
+      }),
     ]);
   });
 

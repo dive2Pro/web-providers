@@ -1,9 +1,18 @@
 import Fastify from "fastify";
 import type { BrowserAutomationClient } from "./browser/types";
+import { registerCountTokensRoute } from "../anthropic-adapter/routes/count-tokens";
+import {
+  authenticationError,
+  mapHelperError as mapAnthropicHelperError,
+} from "../anthropic-adapter/errors";
+import { toProviderChatRequest as toAnthropicProviderChatRequest } from "../anthropic-adapter/helper-client";
+import { registerMessagesRoute } from "../anthropic-adapter/routes/messages";
+import type { ExecutionClient as AnthropicExecutionClient } from "../anthropic-adapter/app";
+import { registerGatewayModelsRoutes } from "../gateway/routes/models";
 import { toProviderChatRequest } from "../openai-adapter/helper-client";
 import { registerChatCompletionsRoute } from "../openai-adapter/routes/chat-completions";
-import { registerModelsRoute } from "../openai-adapter/routes/models";
 import { registerResponsesRoute } from "../openai-adapter/routes/responses";
+import { HelperError } from "./errors";
 import { registerBindRoute } from "./routes/bind";
 import { registerChatRoute } from "./routes/chat";
 import { registerDebugProviderLastRoute } from "./routes/debug-provider-last";
@@ -28,6 +37,10 @@ import {
   type RequestLogStore,
 } from "../shared/request-log-store";
 import { registerRequestLogRoutes } from "../shared/request-log-routes";
+import {
+  buildSessionTitleResponse,
+  isSessionTitleRequest,
+} from "../shared/session-title";
 
 export interface AppDeps {
   token?: string;
@@ -43,6 +56,28 @@ export interface AppContext {
   browserClient: BrowserAutomationClient;
   state: HelperState;
   runtime: HelperRuntime;
+}
+
+function isBearerAuthorized(headers: Record<string, unknown>, token: string) {
+  return headers.authorization === `Bearer ${token}`;
+}
+
+function isAnthropicAuthorized(headers: Record<string, unknown>, token: string) {
+  return (
+    headers.authorization === `Bearer ${token}` || headers["x-api-key"] === token
+  );
+}
+
+function isPublicModelsPath(pathname: string) {
+  return pathname === "/v1/models" || pathname.startsWith("/v1/models/");
+}
+
+function isOpenAiPath(pathname: string) {
+  return pathname === "/v1/chat/completions" || pathname === "/v1/responses";
+}
+
+function isAnthropicPath(pathname: string) {
+  return pathname === "/v1/messages" || pathname === "/v1/messages/count_tokens";
 }
 
 export function buildApp(deps: AppDeps) {
@@ -80,11 +115,6 @@ export function buildApp(deps: AppDeps) {
     runtime,
   };
   const unauthenticatedPaths = new Set(["/v1/debug/provider-last"]);
-  const openAiPublicPaths = new Set([
-    "/v1/models",
-    "/v1/chat/completions",
-    "/v1/responses",
-  ]);
 
   app.addHook("onRequest", async (request, reply) => {
     const pathname = request.url.split("?")[0] ?? request.url;
@@ -92,8 +122,37 @@ export function buildApp(deps: AppDeps) {
       return;
     }
 
-    if (deps.token && request.headers.authorization !== `Bearer ${deps.token}`) {
-      if (openAiPublicPaths.has(pathname)) {
+    if (deps.token) {
+      const headers = request.headers as Record<string, unknown>;
+
+      if (isPublicModelsPath(pathname)) {
+        if (
+          !isBearerAuthorized(headers, deps.token) &&
+          !isAnthropicAuthorized(headers, deps.token)
+        ) {
+          if ("x-api-key" in headers) {
+            const error = authenticationError("Unauthorized");
+            return reply.code(error.statusCode).send({
+              type: "error",
+              error: {
+                type: error.type,
+                message: error.message,
+              },
+            });
+          }
+
+          return reply.code(401).send({
+            error: {
+              code: "unauthorized",
+              message: "Unauthorized",
+            },
+          });
+        }
+
+        return;
+      }
+
+      if (isOpenAiPath(pathname) && !isBearerAuthorized(headers, deps.token)) {
         return reply.code(401).send({
           error: {
             code: "unauthorized",
@@ -101,7 +160,25 @@ export function buildApp(deps: AppDeps) {
           },
         });
       }
-      return reply.code(401).send({ error: "UNAUTHORIZED" });
+
+      if (isAnthropicPath(pathname) && !isAnthropicAuthorized(headers, deps.token)) {
+        const error = authenticationError("Unauthorized");
+        return reply.code(error.statusCode).send({
+          type: "error",
+          error: {
+            type: error.type,
+            message: error.message,
+          },
+        });
+      }
+
+      if (
+        !isOpenAiPath(pathname) &&
+        !isAnthropicPath(pathname) &&
+        !isBearerAuthorized(headers, deps.token)
+      ) {
+        return reply.code(401).send({ error: "UNAUTHORIZED" });
+      }
     }
   });
 
@@ -129,19 +206,48 @@ export function buildApp(deps: AppDeps) {
       store: requestLogStore,
     });
   }
-  registerModelsRoute(app);
+  registerGatewayModelsRoutes(app);
+  const runProviderRequest = async (input: {
+    sessionId?: string;
+    request: Parameters<typeof toProviderChatRequest>[0];
+  }) =>
+    ctx.runtime.executeProviderChat({
+      sessionId: input.sessionId,
+      body: toProviderChatRequest(input.request),
+    });
   const executionClient = {
     run: async (
       request: Parameters<typeof toProviderChatRequest>[0],
       options?: { sessionId?: string },
-    ) =>
-      ctx.runtime.executeProviderChat({
-        sessionId: options?.sessionId,
-        body: toProviderChatRequest(request),
-      }),
+    ) => runProviderRequest({ request, sessionId: options?.sessionId }),
+  };
+  const anthropicExecutionClient: AnthropicExecutionClient = {
+    run: async (request, options) => {
+      try {
+        if (isSessionTitleRequest(request.messages)) {
+          return buildSessionTitleResponse(request.messages);
+        }
+
+        return await ctx.runtime.executeProviderChat({
+          sessionId: options?.sessionId,
+          body: toAnthropicProviderChatRequest(request),
+        });
+      } catch (error) {
+        if (error instanceof HelperError) {
+          throw mapAnthropicHelperError({
+            error: error.code,
+            message: error.message,
+          });
+        }
+
+        throw error;
+      }
+    },
   };
   registerChatCompletionsRoute(app, executionClient);
   registerResponsesRoute(app, executionClient);
+  registerMessagesRoute(app, anthropicExecutionClient);
+  registerCountTokensRoute(app);
 
   return app;
 }

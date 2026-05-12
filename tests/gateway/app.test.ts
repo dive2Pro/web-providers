@@ -357,6 +357,44 @@ describe("gateway app", () => {
     });
   });
 
+  it("maps helper MODEL_BUSY to anthropic rate_limit_error", async () => {
+    const app = buildGatewayApp({
+      openAiToken: "openai-token",
+      anthropicToken: "anthropic-token",
+      helperBaseUrl: "http://127.0.0.1:4318",
+      helperToken: "helper-token",
+      fetchImpl: vi.fn().mockResolvedValue({
+        ok: false,
+        json: async () => ({
+          error: "MODEL_BUSY",
+          message: "Another request is already in progress",
+        }),
+      }),
+    });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/messages",
+      headers: {
+        "x-api-key": "anthropic-token",
+      },
+      payload: {
+        model: "anthropic-deepseek-web-chat",
+        max_tokens: 64,
+        messages: [{ role: "user", content: "hello" }],
+      },
+    });
+
+    expect(response.statusCode).toBe(429);
+    expect(response.json()).toEqual({
+      type: "error",
+      error: {
+        type: "rate_limit_error",
+        message: "Another request is already in progress",
+      },
+    });
+  });
+
   it("forwards x-claude-code-session-id through gateway anthropic routes", async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,

@@ -1,11 +1,12 @@
 import Fastify from "fastify";
-import { createHelperClient } from "../openai-adapter/helper-client";
+import { createHelperClient as createAnthropicHelperClient } from "../anthropic-adapter/helper-client";
 import { registerChatCompletionsRoute } from "../openai-adapter/routes/chat-completions";
 import { registerResponsesRoute } from "../openai-adapter/routes/responses";
 import { registerMessagesRoute } from "../anthropic-adapter/routes/messages";
 import { registerCountTokensRoute } from "../anthropic-adapter/routes/count-tokens";
 import { authenticationError } from "../anthropic-adapter/errors";
 import { registerGatewayModelsRoutes } from "./routes/models";
+import { createHelperClient as createOpenAiHelperClient } from "../openai-adapter/helper-client";
 import type { ExecutionClient as OpenAiExecutionClient } from "../openai-adapter/app";
 import type { ExecutionClient as AnthropicExecutionClient } from "../anthropic-adapter/app";
 import {
@@ -84,7 +85,13 @@ export function buildGatewayApp(input: {
     logger: input.requestLogger,
     store: requestLogStore ?? undefined,
   });
-  const executionClient = createHelperClient({
+  const openAiExecutionClient: OpenAiExecutionClient = createOpenAiHelperClient({
+    helperBaseUrl: input.helperBaseUrl,
+    helperToken: input.helperToken,
+    fetchImpl: input.fetchImpl,
+  });
+  const anthropicExecutionClient: AnthropicExecutionClient =
+    createAnthropicHelperClient({
     helperBaseUrl: input.helperBaseUrl,
     helperToken: input.helperToken,
     fetchImpl: input.fetchImpl,
@@ -191,15 +198,15 @@ export function buildGatewayApp(input: {
   });
   registerChatCompletionsRoute(
     app,
-    executionClient as unknown as OpenAiExecutionClient,
+    openAiExecutionClient,
   );
   registerResponsesRoute(
     app,
-    executionClient as unknown as OpenAiExecutionClient,
+    openAiExecutionClient,
   );
   registerMessagesRoute(
     app,
-    executionClient as unknown as AnthropicExecutionClient,
+    anthropicExecutionClient,
   );
   registerCountTokensRoute(app);
 
