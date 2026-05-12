@@ -5,6 +5,8 @@ import {
   extractDeepSeekTextboxRefFromSnapshot,
   extractTabsFromTabList,
   findOpenedTabFromSnapshots,
+  normalizeBbBrowserEvalScript,
+  resolveBbBrowserInvocation,
   unwrapEvalResult,
 } from "../../src/helper/browser/bb-browser-client";
 
@@ -101,6 +103,41 @@ describe("BbBrowserClient", () => {
       id: "tab-deepseek",
       url: "https://chat.deepseek.com/",
     });
+  });
+
+  it("resolves the project-local bb-browser cli when the package is installed", () => {
+    expect(
+      resolveBbBrowserInvocation({
+        resolvePackageJson: () => "/tmp/project/node_modules/bb-browser/package.json",
+        loadPackageJson: () => ({
+          bin: {
+            "bb-browser": "dist/cli.js",
+          },
+        }),
+      }),
+    ).toEqual({
+      command: process.execPath,
+      argsPrefix: ["/tmp/project/node_modules/bb-browser/dist/cli.js"],
+    });
+  });
+
+  it("falls back to the global bb-browser command when the local package is unavailable", () => {
+    expect(
+      resolveBbBrowserInvocation({
+        resolvePackageJson: () => {
+          throw new Error("module not found");
+        },
+      }),
+    ).toEqual({
+      command: "bb-browser",
+      argsPrefix: [],
+    });
+  });
+
+  it("flattens multiline eval scripts before sending them to bb-browser", () => {
+    expect(
+      normalizeBbBrowserEvalScript('\n(() => {\n  const value = "x";\n  return value;\n})()\n'),
+    ).toBe('(() => {   const value = "x";   return value; })()');
   });
 
   it("binds a DeepSeek tab and injects the page bridge", async () => {

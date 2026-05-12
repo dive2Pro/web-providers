@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
-import { promisify } from "node:util";
+import { createRequire } from "node:module";
+import { dirname, join } from "node:path";
 import { HelperError } from "../errors";
 import type {
   BrowserAutomationClient,
@@ -19,7 +20,45 @@ import {
   QWEN_START_NEW_CHAT_SCRIPT,
 } from "../providers/qwen/page-bridge";
 
-const execFileAsync = promisify(execFile);
+const require = createRequire(import.meta.url);
+
+type BbBrowserInvocation = {
+  command: string;
+  argsPrefix: string[];
+};
+
+export function resolveBbBrowserInvocation(input?: {
+  resolvePackageJson?: () => string;
+  loadPackageJson?: (packageJsonPath: string) => { bin?: string | Record<string, string> };
+}): BbBrowserInvocation {
+  try {
+    const packageJsonPath =
+      input?.resolvePackageJson?.() ?? require.resolve("bb-browser/package.json");
+    const packageJson =
+      input?.loadPackageJson?.(packageJsonPath) ??
+      (require(packageJsonPath) as { bin?: string | Record<string, string> });
+    const bin =
+      typeof packageJson.bin === "string"
+        ? packageJson.bin
+        : packageJson.bin?.["bb-browser"];
+
+    if (typeof bin === "string" && bin.length > 0) {
+      return {
+        command: process.execPath,
+        argsPrefix: [join(dirname(packageJsonPath), bin)],
+      };
+    }
+  } catch {
+    // Fall back to the global command when the package is not installed locally.
+  }
+
+  return {
+    command: "bb-browser",
+    argsPrefix: [],
+  };
+}
+
+const BB_BROWSER_INVOCATION = resolveBbBrowserInvocation();
 
 interface BbBrowserEnvelope<T> {
   success?: boolean;
@@ -115,6 +154,10 @@ export function unwrapEvalResult<T>(raw: unknown): T {
   return unwrapped as T;
 }
 
+export function normalizeBbBrowserEvalScript(script: string) {
+  return script.replace(/\r?\n+/g, " ").trim();
+}
+
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -184,15 +227,62 @@ async function waitForOpenedTab(input: {
   return undefined;
 }
 
-async function runBbBrowserJson(args: string[]) {
-  const { stdout } = await execFileAsync("bb-browser", [...args, "--json"], {
-    maxBuffer: 20 * 1024 * 1024,
+function execBbBrowser(args: string[], options?: { maxBuffer?: number }) {
+  return new Promise<{ stdout: string; stderr: string }>((resolve, reject) => {
+    execFile(
+      BB_BROWSER_INVOCATION.command,
+      [...BB_BROWSER_INVOCATION.argsPrefix, ...args],
+      {
+        encoding: "utf8",
+        ...options,
+      },
+      (error, stdout, stderr) => {
+        if (error) {
+          reject(error);
+          return;
+        }
+
+        resolve({ stdout, stderr });
+      },
+    );
   });
+}
+
+async function runBbBrowserJson(args: string[]) {
+  const { stdout, stderr, error } = await new Promise<{
+    stdout: string;
+    stderr: string;
+    error: Error | null;
+  }>((resolve) => {
+    execFile(
+      BB_BROWSER_INVOCATION.command,
+      [...BB_BROWSER_INVOCATION.argsPrefix, ...args, "--json"],
+      {
+        encoding: "utf8",
+        maxBuffer: 20 * 1024 * 1024,
+      },
+      (callbackError, callbackStdout, callbackStderr) => {
+        resolve({
+          stdout: callbackStdout,
+          stderr: callbackStderr,
+          error: callbackError,
+        });
+      },
+    );
+  });
+  const stdoutText = stdout;
   try {
-    return JSON.parse(stdout) as unknown;
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    const preview = stdout.slice(0, 300).replace(/\s+/g, " ");
+    const parsed = JSON.parse(stdoutText) as unknown;
+    if (error) {
+      return parsed;
+    }
+    return parsed;
+  } catch (parseError) {
+    if (error) {
+      throw new Error(stderr.trim() || error.message);
+    }
+    const message = parseError instanceof Error ? parseError.message : String(parseError);
+    const preview = stdoutText.slice(0, 300).replace(/\s+/g, " ");
     throw new Error(
       `Failed to parse bb-browser JSON for "${args.join(" ")}": ${message}. stdout preview: ${preview}`,
     );
@@ -270,7 +360,7 @@ export function createBbBrowserTransport(): BbBrowserTransport {
 
     async evaluate<T>(tabId: string, script: string): Promise<T> {
       await selectTabById(tabId);
-      const raw = await runBbBrowserJson(["eval", script]);
+      const raw = await runBbBrowserJson(["eval", normalizeBbBrowserEvalScript(script)]);
       return unwrapEvalResult<T>(raw);
     },
 
@@ -283,8 +373,7 @@ export function createBbBrowserTransport(): BbBrowserTransport {
       let textboxRef: string | null = null;
 
       while (Date.now() - startedAt <= timeoutMs) {
-        const { stdout: scopedSnapshotText } = await execFileAsync(
-          "bb-browser",
+        const { stdout: scopedSnapshotText } = await execBbBrowser(
           ["snapshot", "-i", "-s", "textarea"],
           {
             maxBuffer: 20 * 1024 * 1024,
@@ -293,8 +382,7 @@ export function createBbBrowserTransport(): BbBrowserTransport {
         textboxRef = extractDeepSeekTextboxRefFromSnapshot(scopedSnapshotText);
 
         if (!textboxRef) {
-          const { stdout: fullSnapshotText } = await execFileAsync(
-            "bb-browser",
+          const { stdout: fullSnapshotText } = await execBbBrowser(
             ["snapshot", "-i"],
             {
               maxBuffer: 20 * 1024 * 1024,
@@ -316,10 +404,10 @@ export function createBbBrowserTransport(): BbBrowserTransport {
         );
       }
 
-      await execFileAsync("bb-browser", ["fill", textboxRef, prompt], {
+      await execBbBrowser(["fill", textboxRef, prompt], {
         maxBuffer: 20 * 1024 * 1024,
       });
-      await execFileAsync("bb-browser", ["press", "Enter"], {
+      await execBbBrowser(["press", "Enter"], {
         maxBuffer: 20 * 1024 * 1024,
       });
     },
