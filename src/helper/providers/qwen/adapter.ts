@@ -19,6 +19,7 @@ export function createQwenAdapter(
     tabId?: string;
     openNew?: boolean;
     openUrl?: string;
+    passive?: boolean;
   }) {
     if (!qwenTransport) {
       throw new HelperError(
@@ -69,7 +70,12 @@ export function createQwenAdapter(
     providerId: "qwen-web",
     async bindTab(input): Promise<BindResult> {
       const attemptBind = async (
-        attemptInput?: { tabId?: string; openNew?: boolean; openUrl?: string },
+        attemptInput?: {
+          tabId?: string;
+          openNew?: boolean;
+          openUrl?: string;
+          passive?: boolean;
+        },
       ): Promise<BindResult> => {
         const tab = await resolveTab(attemptInput);
         const normalizedUrl = assertQwenUrl(tab.url);
@@ -91,7 +97,7 @@ export function createQwenAdapter(
         return await attemptBind(input);
       } catch (error) {
         if (error instanceof HelperError && error.code === "NOT_BOUND") {
-          if (input?.openNew || input?.tabId || input?.openUrl) {
+          if (input?.passive || input?.openNew || input?.tabId || input?.openUrl) {
             throw error;
           }
 

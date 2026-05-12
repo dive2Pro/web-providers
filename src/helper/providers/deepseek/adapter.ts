@@ -28,6 +28,7 @@ export function createDeepSeekAdapter(
     tabId?: string;
     openNew?: boolean;
     openUrl?: string;
+    passive?: boolean;
   }) {
     if (input?.tabId) {
       const tab = await transport.getTab?.(input.tabId);
@@ -108,7 +109,12 @@ export function createDeepSeekAdapter(
     providerId: "deepseek-web",
     async bindTab(input): Promise<BindResult> {
       const attemptBind = async (
-        attemptInput?: { tabId?: string; openNew?: boolean; openUrl?: string },
+        attemptInput?: {
+          tabId?: string;
+          openNew?: boolean;
+          openUrl?: string;
+          passive?: boolean;
+        },
       ): Promise<BindResult> => {
         const tab = await resolveTab(attemptInput);
         const normalizedUrl = assertDeepSeekUrl(tab.url);
@@ -128,7 +134,7 @@ export function createDeepSeekAdapter(
         return await attemptBind(input);
       } catch (error) {
         if (error instanceof HelperError && error.code === "NOT_BOUND") {
-          if (input?.openNew || input?.tabId || input?.openUrl) {
+          if (input?.passive || input?.openNew || input?.tabId || input?.openUrl) {
             throw error;
           }
 

@@ -576,11 +576,13 @@ export class BbBrowserClient implements BrowserAutomationClient {
     tabId?: string;
     openNew?: boolean;
     openUrl?: string;
+    passive?: boolean;
   }): Promise<BindResult> {
     return this.providerRegistry[input.provider].bindTab({
       tabId: input.tabId,
       openNew: input.openNew,
       openUrl: input.openUrl,
+      passive: input.passive,
     });
   }
 

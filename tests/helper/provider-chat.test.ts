@@ -3,6 +3,74 @@ import { buildApp } from "../../src/helper/app";
 import { HelperError } from "../../src/helper/errors";
 
 describe("provider chat route", () => {
+  it("reuses a manually bound DeepSeek tab before creating a model-scoped binding", async () => {
+    const bindCalls: Array<Record<string, unknown>> = [];
+
+    const app = buildApp({
+      token: "test-token",
+      browserClient: {
+        getConnectionStatus: async () => "connected",
+        bindProviderTab: async (input: {
+          provider: string;
+          tabId?: string;
+          openNew?: boolean;
+        }) => {
+          bindCalls.push(input);
+          return {
+            tabId: input.tabId ?? "tab-1",
+            url: "https://chat.deepseek.com/a/chat/s/manual-bind",
+            loginState: "logged_in",
+            bridgeInjected: true,
+            pageState: {
+              inputReady: true,
+              busy: false,
+              latestAssistantPreview: null,
+              assistantCount: 0,
+            },
+          };
+        },
+        resetProvider: async () => undefined,
+        startNewChat: async () => undefined,
+        sendChatPrompt: async ({ prompt }: { prompt: string }) => ({
+          mode: "text",
+          outputText: `reply:${prompt}`,
+          modelLabel: "DeepSeek Web",
+        }),
+      } as never,
+    });
+
+    const bindResponse = await app.inject({
+      method: "POST",
+      url: "/v1/bind",
+      headers: {
+        authorization: "Bearer test-token",
+      },
+      payload: {
+        provider: "deepseek-web",
+      },
+    });
+
+    const chatResponse = await app.inject({
+      method: "POST",
+      url: "/v1/provider/chat",
+      headers: {
+        authorization: "Bearer test-token",
+      },
+      payload: {
+        provider: "deepseek-web",
+        model: "deepseek-web-chat",
+        messages: [{ role: "user", content: "hello" }],
+      },
+    });
+
+    expect(bindResponse.statusCode).toBe(200);
+    expect(chatResponse.statusCode).toBe(200);
+    expect(bindCalls).toEqual([
+      expect.objectContaining({ provider: "deepseek-web" }),
+      expect.objectContaining({ provider: "deepseek-web", tabId: "tab-1" }),
+    ]);
+  });
+
   it("uses x-web-providers-session-id to reuse the same bound tab across public provider chat requests", async () => {
     const bindCalls: Array<Record<string, unknown>> = [];
     let newTabCount = 0;
@@ -75,8 +143,8 @@ describe("provider chat route", () => {
     }
 
     expect(bindCalls).toEqual([
-      { provider: "deepseek-web", openNew: true, tabId: undefined },
-      { provider: "deepseek-web", openNew: undefined, tabId: "tab-1" },
+      expect.objectContaining({ provider: "deepseek-web", passive: true }),
+      expect.objectContaining({ provider: "deepseek-web", tabId: "tab-1" }),
     ]);
   });
 
@@ -160,8 +228,8 @@ describe("provider chat route", () => {
       message: "DeepSeek tab is still loading. Wait for the page to finish loading and retry.",
     });
     expect(bindCalls).toEqual([
-      { provider: "deepseek-web", openNew: true, tabId: undefined },
-      { provider: "deepseek-web", openNew: undefined, tabId: "tab-1" },
+      expect.objectContaining({ provider: "deepseek-web", passive: true }),
+      expect.objectContaining({ provider: "deepseek-web", tabId: "tab-1" }),
     ]);
   });
 
@@ -177,10 +245,11 @@ describe("provider chat route", () => {
           tabId?: string;
           openNew?: boolean;
           openUrl?: string;
+          passive?: boolean;
         }) => {
           bindCalls.push(input);
 
-          if (input.openNew) {
+          if (input.openNew || input.passive) {
             return {
               tabId: "tab-1",
               url: "https://chat.deepseek.com/a/chat/s/session-1",
@@ -241,14 +310,100 @@ describe("provider chat route", () => {
     }
 
     expect(bindCalls).toEqual([
-      { provider: "deepseek-web", openNew: true, tabId: undefined },
-      { provider: "deepseek-web", openNew: undefined, tabId: "tab-1" },
-      {
+      expect.objectContaining({ provider: "deepseek-web", passive: true }),
+      expect.objectContaining({ provider: "deepseek-web", tabId: "tab-1" }),
+      expect.objectContaining({
         provider: "deepseek-web",
-        openNew: undefined,
         openUrl: "https://chat.deepseek.com/a/chat/s/session-1",
-        tabId: undefined,
-      },
+      }),
+    ]);
+  });
+
+  it("keeps DeepSeek bindings isolated by model within the same session", async () => {
+    const bindCalls: Array<Record<string, unknown>> = [];
+    let tabCount = 0;
+
+    const app = buildApp({
+      token: "test-token",
+      browserClient: {
+        getConnectionStatus: async () => "connected",
+        bindProviderTab: async (input: {
+          provider: string;
+          tabId?: string;
+          openNew?: boolean;
+        }) => {
+          bindCalls.push(input);
+
+          if (input.tabId) {
+            return {
+              tabId: input.tabId,
+              url: input.tabId === "tab-1"
+                ? "https://chat.deepseek.com/a/chat/s/model-chat"
+                : "https://chat.deepseek.com/a/chat/s/model-tools",
+              loginState: "logged_in",
+              bridgeInjected: true,
+              pageState: {
+                inputReady: true,
+                busy: false,
+                latestAssistantPreview: null,
+                assistantCount: 0,
+              },
+            };
+          }
+
+          tabCount += 1;
+          return {
+            tabId: `tab-${tabCount}`,
+            url:
+              tabCount === 1
+                ? "https://chat.deepseek.com/a/chat/s/model-chat"
+                : "https://chat.deepseek.com/a/chat/s/model-tools",
+            loginState: "logged_in",
+            bridgeInjected: true,
+            pageState: {
+              inputReady: true,
+              busy: false,
+              latestAssistantPreview: null,
+              assistantCount: 0,
+            },
+          };
+        },
+        resetProvider: async () => undefined,
+        startNewChat: async () => undefined,
+        sendChatPrompt: async ({ prompt }: { prompt: string }) => ({
+          mode: "text",
+          outputText: `reply:${prompt}`,
+          modelLabel: "DeepSeek Web",
+        }),
+      } as never,
+    });
+
+    for (const model of [
+      "deepseek-web-chat",
+      "deepseek-web-tools",
+      "deepseek-web-chat",
+    ]) {
+      const response = await app.inject({
+        method: "POST",
+        url: "/v1/provider/chat",
+        headers: {
+          authorization: "Bearer test-token",
+          "x-web-providers-session-id": "public-session-a",
+        },
+        payload: {
+          provider: "deepseek-web",
+          model,
+          messages: [{ role: "user", content: model }],
+        },
+      });
+
+      expect(response.statusCode).toBe(200);
+    }
+
+    expect(bindCalls).toEqual([
+      expect.objectContaining({ provider: "deepseek-web", passive: true }),
+      expect.objectContaining({ provider: "deepseek-web", passive: true }),
+      expect.objectContaining({ provider: "deepseek-web", tabId: "tab-1" }),
     ]);
   });
 
@@ -338,10 +493,11 @@ describe("provider chat route", () => {
           tabId?: string;
           openNew?: boolean;
           openUrl?: string;
+          passive?: boolean;
         }) => {
           bindCalls.push(input);
 
-          if (input.openNew) {
+          if (input.openNew || input.passive) {
             return {
               tabId: "tab-1",
               url: "https://chat.deepseek.com/a/chat/s/session-1",
@@ -406,14 +562,12 @@ describe("provider chat route", () => {
     }
 
     expect(bindCalls).toEqual([
-      { provider: "deepseek-web", openNew: true, tabId: undefined },
-      { provider: "deepseek-web", openNew: undefined, tabId: "tab-1" },
-      {
+      expect.objectContaining({ provider: "deepseek-web", passive: true }),
+      expect.objectContaining({ provider: "deepseek-web", tabId: "tab-1" }),
+      expect.objectContaining({
         provider: "deepseek-web",
-        openNew: undefined,
         openUrl: "https://chat.deepseek.com/a/chat/s/session-1",
-        tabId: undefined,
-      },
+      }),
     ]);
   });
 

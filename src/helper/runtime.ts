@@ -4,8 +4,13 @@ import {
   buildProviderResponseRepairPrompt,
   getProviderResponseRepairDecision,
 } from "./provider-response";
+import type { SessionBindingStore } from "./session-binding-store";
 import { HelperState } from "./state";
-import type { BoundSession, ProviderRequestDebugRecord } from "./types";
+import {
+  normalizeBoundModelId,
+  type BoundSession,
+  type ProviderRequestDebugRecord,
+} from "./types";
 import type {
   ProviderChatRequest,
   ProviderChatResponse,
@@ -168,17 +173,30 @@ export class HelperRuntime {
   constructor(
     private readonly browserClient: BrowserAutomationClient,
     private readonly state: HelperState,
+    private readonly sessionBindingStore?: SessionBindingStore,
   ) {}
+
+  private async persistSessionBindings() {
+    if (!this.sessionBindingStore) {
+      return;
+    }
+
+    await this.sessionBindingStore.save({
+      sessions: this.state.exportSessionBindings(),
+    });
+  }
 
   private storeBoundSession(input: {
     sessionId: string;
     provider: ProviderId;
+    modelId?: string | null;
+    previousSession?: BoundSession | null;
     result: Awaited<ReturnType<NonNullable<BrowserAutomationClient["bindProviderTab"]>>>;
   }) {
-    const previousSession = this.state.getSessionBoundSession(
-      input.sessionId,
-      input.provider,
-    );
+    const modelId = normalizeBoundModelId(input.provider, input.modelId);
+    const previousSession =
+      input.previousSession ??
+      this.state.getSessionBoundSession(input.sessionId, input.provider, modelId);
     const sameTab = isSameTab(previousSession, input.result.tabId);
     const sameSessionUrl = isSameSessionUrl(previousSession, input.result.url);
     const preserveSessionState = sameTab || sameSessionUrl;
@@ -186,6 +204,7 @@ export class HelperRuntime {
 
     const nextSession: BoundSession = {
       provider: input.provider,
+      modelId,
       tabId: input.result.tabId,
       tabUrl: input.result.url,
       loginState: input.result.loginState,
@@ -206,9 +225,12 @@ export class HelperRuntime {
   async bindProvider(input: {
     sessionId?: string;
     provider: ProviderId;
+    modelId?: string | null;
     openNew?: boolean;
     tabId?: string;
     openUrl?: string;
+    passive?: boolean;
+    previousSession?: BoundSession | null;
   }) {
     const sessionId = input.sessionId ?? DEFAULT_SESSION_ID;
     this.state.touchSession(sessionId);
@@ -219,6 +241,7 @@ export class HelperRuntime {
             openNew: input.openNew,
             tabId: input.tabId,
             openUrl: input.openUrl,
+            passive: input.passive,
           })
         : await this.browserClient.bindDeepSeekTab();
 
@@ -232,42 +255,99 @@ export class HelperRuntime {
       );
     }
 
-    return this.storeBoundSession({
+    const session = this.storeBoundSession({
       sessionId,
       provider: input.provider,
+      modelId: input.modelId,
+      previousSession: input.previousSession,
       result,
     });
+    await this.persistSessionBindings();
+    return session;
   }
 
-  async ensureBound(input: { sessionId: string; provider: ProviderId }) {
+  async ensureBound(input: {
+    sessionId: string;
+    provider: ProviderId;
+    modelId?: string | null;
+  }) {
+    const modelId = normalizeBoundModelId(input.provider, input.modelId);
     this.state.touchSession(input.sessionId);
-    const existing = this.state.getSessionBoundSession(input.sessionId, input.provider);
+    const existing = this.state.getSessionBoundSession(
+      input.sessionId,
+      input.provider,
+      modelId,
+    );
+    const fallback =
+      existing ??
+      (modelId
+        ? this.state.getProviderFallbackBoundSession(
+            input.sessionId,
+            input.provider,
+          )
+        : null);
+    const shouldPromoteGenericBinding =
+      !existing &&
+      modelId !== null &&
+      fallback?.provider === input.provider &&
+      fallback.modelId === null;
 
-    if (!existing) {
-      return this.bindProvider({
-        sessionId: input.sessionId,
-        provider: input.provider,
-        openNew: true,
-      });
+    if (!fallback) {
+      try {
+        return await this.bindProvider({
+          sessionId: input.sessionId,
+          provider: input.provider,
+          modelId,
+          passive: true,
+        });
+      } catch (error) {
+        if (
+          !(error instanceof HelperError && error.code === "NOT_BOUND") &&
+          !isRecoverableTabLookupError(error)
+        ) {
+          throw error;
+        }
+
+        return this.bindProvider({
+          sessionId: input.sessionId,
+          provider: input.provider,
+          modelId,
+          openNew: true,
+        });
+      }
     }
 
+    const finalizePromotedBinding = async (session: BoundSession) => {
+      if (!shouldPromoteGenericBinding) {
+        return session;
+      }
+
+      this.state.clearSessionBoundSession(input.sessionId, input.provider, null);
+      await this.persistSessionBindings();
+      return session;
+    };
+
     try {
-      return await this.bindProvider({
+      return await finalizePromotedBinding(await this.bindProvider({
         sessionId: input.sessionId,
         provider: input.provider,
-        tabId: existing.tabId,
-      });
+        modelId,
+        tabId: fallback.tabId,
+        previousSession: fallback,
+      }));
     } catch (error) {
       if (!isRecoverableTabLookupError(error)) {
         throw error;
       }
 
       try {
-        return await this.bindProvider({
+        return await finalizePromotedBinding(await this.bindProvider({
           sessionId: input.sessionId,
           provider: input.provider,
-          openUrl: existing.tabUrl,
-        });
+          modelId,
+          openUrl: fallback.tabUrl,
+          previousSession: fallback,
+        }));
       } catch (recoveryError) {
         if (
           !isRecoverableTabLookupError(recoveryError) &&
@@ -279,8 +359,10 @@ export class HelperRuntime {
         return this.bindProvider({
           sessionId: input.sessionId,
           provider: input.provider,
+          modelId,
           openNew: true,
-          openUrl: existing.tabUrl,
+          openUrl: fallback.tabUrl,
+          previousSession: fallback,
         });
       }
     }
@@ -293,7 +375,8 @@ export class HelperRuntime {
   }) {
     const sessionId = input.sessionId ?? DEFAULT_SESSION_ID;
     const provider = (input.body.provider ?? "deepseek-web") as ProviderId;
-    if (!this.state.tryAcquireBinding(sessionId, provider)) {
+    const modelId = normalizeBoundModelId(provider, input.body.model);
+    if (!this.state.tryAcquireBinding(sessionId, provider, modelId)) {
       throw new HelperError("MODEL_BUSY", "Another request is already in progress");
     }
 
@@ -302,7 +385,7 @@ export class HelperRuntime {
     let repairSummary: ProviderRequestDebugRecord["repair"] = null;
 
     try {
-      const session = await this.ensureBound({ sessionId, provider });
+      const session = await this.ensureBound({ sessionId, provider, modelId });
       activeTabId = session.tabId;
 
       if (this.state.hasRunningRequest(session.tabId)) {
@@ -400,6 +483,7 @@ export class HelperRuntime {
               success: true,
             }
           : null;
+      let shouldPersistSessionBindings = false;
       const latestTabUrl =
         this.browserClient.getProviderTabUrl
           ? await this.browserClient.getProviderTabUrl({
@@ -407,12 +491,16 @@ export class HelperRuntime {
               tabId: session.tabId,
             })
           : null;
-      const currentSession = this.state.getSessionBoundSession(sessionId, provider) ?? session;
-      if (latestTabUrl) {
-        this.state.setSessionBoundSession(sessionId, provider, {
+      const currentSession =
+        this.state.getSessionBoundSession(sessionId, provider, modelId) ?? session;
+      let currentBoundSession = currentSession;
+      if (latestTabUrl && latestTabUrl !== currentSession.tabUrl) {
+        currentBoundSession = {
           ...currentSession,
           tabUrl: latestTabUrl,
-        });
+        };
+        this.state.setSessionBoundSession(sessionId, currentBoundSession);
+        shouldPersistSessionBindings = true;
       }
       this.state.setActiveRequest(session.tabId, null);
       this.state.setLastProviderRequest(provider, {
@@ -425,18 +513,31 @@ export class HelperRuntime {
       });
 
       if (input.body.sessionInit?.prompt) {
-        const updatedSession = this.state.getSessionBoundSession(sessionId, provider) ?? currentSession;
+        const updatedSession =
+          this.state.getSessionBoundSession(sessionId, provider, modelId) ??
+          currentBoundSession;
         const nextConversationId =
           provider === "deepseek-web"
             ? `conv-${updatedSession.tabId}`
             : `conv-${provider}-${updatedSession.tabId}-${Date.now()}`;
-        this.state.setSessionBoundSession(sessionId, provider, {
+        const nextSession: BoundSession = {
           ...updatedSession,
           conversationId: promptInput.shouldStartFresh
             ? nextConversationId
             : updatedSession.conversationId,
           providerInitialized: true,
-        });
+        };
+        if (
+          nextSession.conversationId !== updatedSession.conversationId ||
+          nextSession.providerInitialized !== updatedSession.providerInitialized
+        ) {
+          this.state.setSessionBoundSession(sessionId, nextSession);
+          shouldPersistSessionBindings = true;
+        }
+      }
+
+      if (shouldPersistSessionBindings) {
+        await this.persistSessionBindings();
       }
 
       return response;
@@ -475,22 +576,19 @@ export class HelperRuntime {
       }
       throw helperError;
     } finally {
-      this.state.releaseBinding(sessionId, provider);
+      this.state.releaseBinding(sessionId, provider, modelId);
     }
   }
 
   async resetSession(input: { sessionId?: string; provider?: ProviderId }) {
     const sessionId = input.sessionId ?? DEFAULT_SESSION_ID;
     const sessionsToReset = input.provider
-      ? (() => {
-          const session = this.state.getSessionBoundSession(sessionId, input.provider);
-          return session ? [session] : [];
-        })()
+      ? this.state.getAllProviderBoundSessions(sessionId, input.provider)
       : [...this.state.getAllSessionBoundSessions(sessionId).values()];
 
     for (const session of sessionsToReset) {
       this.state.setActiveRequest(session.tabId, null);
-      this.state.releaseBinding(sessionId, session.provider);
+      this.state.releaseBinding(sessionId, session.provider, session.modelId);
       if (this.browserClient.resetProvider) {
         await this.browserClient.resetProvider({
           provider: session.provider,
@@ -502,15 +600,16 @@ export class HelperRuntime {
     }
 
     if (input.provider) {
-      this.state.releaseBinding(sessionId, input.provider);
-      this.state.setSessionBoundSession(sessionId, input.provider, null);
+      this.state.clearProviderBoundSessions(sessionId, input.provider);
       this.state.setLastProviderRequest(input.provider, null);
+      await this.persistSessionBindings();
       return;
     }
 
     this.state.clearSessionState(sessionId);
     this.state.setDegraded(false);
     this.state.setLastBridgeHeartbeatAt(null);
+    await this.persistSessionBindings();
   }
 
   async shutdownSession(sessionId: string) {
@@ -518,7 +617,7 @@ export class HelperRuntime {
 
     for (const session of sessions) {
       this.state.setActiveRequest(session.tabId, null);
-      this.state.releaseBinding(sessionId, session.provider);
+      this.state.releaseBinding(sessionId, session.provider, session.modelId);
       if (this.browserClient.resetProvider) {
         await this.browserClient.resetProvider({
           provider: session.provider,
@@ -531,5 +630,6 @@ export class HelperRuntime {
     }
 
     this.state.clearSessionState(sessionId);
+    await this.persistSessionBindings();
   }
 }

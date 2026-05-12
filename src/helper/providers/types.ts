@@ -7,5 +7,6 @@ export interface ProviderAdapter {
     tabId?: string;
     openNew?: boolean;
     openUrl?: string;
+    passive?: boolean;
   }): Promise<BindResult>;
 }

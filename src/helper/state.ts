@@ -1,16 +1,18 @@
 import type {
   ActiveRequest,
   BoundSession,
+  PersistedSessionBindingSession,
   ProviderRequestDebugRecord,
   SessionBindingDebugRecord,
   SessionStateMeta,
 } from "./types";
+import { getBoundSessionKey } from "./types";
 import type { ProviderId } from "../shared/contracts";
 
 const DEFAULT_SESSION_ID = "__default__";
 
 export class HelperState {
-  private boundSessionsBySession = new Map<string, Map<ProviderId, BoundSession>>();
+  private boundSessionsBySession = new Map<string, Map<string, BoundSession>>();
   private sessionMeta = new Map<string, SessionStateMeta>();
   private activeRequestsByTabId = new Map<string, ActiveRequest>();
   private runningBindings = new Set<string>();
@@ -18,8 +20,12 @@ export class HelperState {
   private degraded = false;
   private lastBridgeHeartbeatAt: string | null = null;
 
-  private getBindingKey(sessionId: string, provider: ProviderId) {
-    return `${sessionId}::${provider}`;
+  private getBindingKey(
+    sessionId: string,
+    provider: ProviderId,
+    modelId?: string | null,
+  ) {
+    return `${sessionId}::${getBoundSessionKey({ provider, modelId })}`;
   }
 
   private getOrCreateSessionBindings(sessionId: string) {
@@ -28,7 +34,7 @@ export class HelperState {
       return existing;
     }
 
-    const next = new Map<ProviderId, BoundSession>();
+    const next = new Map<string, BoundSession>();
     this.boundSessionsBySession.set(sessionId, next);
     return next;
   }
@@ -67,9 +73,13 @@ export class HelperState {
         continue;
       }
 
+      const bindingEntries = [...bindings.values()].sort((left, right) =>
+        getBoundSessionKey(left).localeCompare(getBoundSessionKey(right)),
+      );
+
       const providers = Object.fromEntries(
-        [...bindings.entries()].map(([provider, session]) => [
-          provider,
+        bindingEntries.map((session) => [
+          session.provider,
           {
             tabId: session.tabId,
             tabUrl: session.tabUrl,
@@ -84,6 +94,17 @@ export class HelperState {
         sessionId,
         createdAt: meta.createdAt,
         lastSeenAt: meta.lastSeenAt,
+        bindings: bindingEntries.map((session) => ({
+          bindingKey: getBoundSessionKey(session),
+          provider: session.provider,
+          modelId: session.modelId,
+          tabId: session.tabId,
+          tabUrl: session.tabUrl,
+          conversationId: session.conversationId,
+          loginState: session.loginState,
+          bridgeInjected: session.bridgeInjected,
+          providerInitialized: session.providerInitialized,
+        })),
         providers,
       });
     }
@@ -93,59 +114,76 @@ export class HelperState {
     );
   }
 
-  getSessionBoundSession(sessionId: string, provider?: ProviderId) {
+  getSessionBoundSession(
+    sessionId: string,
+    provider?: ProviderId,
+    modelId?: string | null,
+  ) {
     const bindings = this.boundSessionsBySession.get(sessionId);
     if (!bindings) {
       return null;
     }
 
     if (provider) {
-      return bindings.get(provider) ?? null;
+      return bindings.get(getBoundSessionKey({ provider, modelId })) ?? null;
     }
 
     return bindings.values().next().value ?? null;
   }
 
-  getAllSessionBoundSessions(sessionId: string) {
-    const bindings = this.boundSessionsBySession.get(sessionId);
-    return bindings ? new Map(bindings) : new Map<ProviderId, BoundSession>();
+  getProviderFallbackBoundSession(sessionId: string, provider: ProviderId) {
+    return this.getSessionBoundSession(sessionId, provider, null);
   }
 
-  setSessionBoundSession(
-    sessionId: string,
-    providerOrSession: ProviderId | BoundSession | null,
-    session?: BoundSession | null,
-  ) {
-    if (
-      providerOrSession &&
-      typeof providerOrSession === "object" &&
-      "provider" in providerOrSession
-    ) {
-      this.touchSession(sessionId);
-      this.getOrCreateSessionBindings(sessionId).set(
-        providerOrSession.provider,
-        providerOrSession,
-      );
-      return;
-    }
-
+  getAllSessionBoundSessions(sessionId: string) {
     const bindings = this.boundSessionsBySession.get(sessionId);
+    return bindings ? new Map(bindings) : new Map<string, BoundSession>();
+  }
 
-    if (typeof providerOrSession === "string") {
-      if (session) {
-        this.touchSession(sessionId);
-        this.getOrCreateSessionBindings(sessionId).set(providerOrSession, session);
-        return;
-      }
+  getAllProviderBoundSessions(sessionId: string, provider: ProviderId) {
+    const bindings = this.boundSessionsBySession.get(sessionId);
+    if (!bindings) {
+      return [];
+    }
 
-      bindings?.delete(providerOrSession);
-      if (bindings && bindings.size === 0) {
-        this.boundSessionsBySession.delete(sessionId);
-      }
+    return [...bindings.values()].filter((session) => session.provider === provider);
+  }
+
+  setSessionBoundSession(sessionId: string, session: BoundSession) {
+    this.touchSession(sessionId);
+    this.getOrCreateSessionBindings(sessionId).set(
+      getBoundSessionKey(session),
+      session,
+    );
+  }
+
+  clearSessionBoundSession(
+    sessionId: string,
+    provider: ProviderId,
+    modelId?: string | null,
+  ) {
+    const bindings = this.boundSessionsBySession.get(sessionId);
+    bindings?.delete(getBoundSessionKey({ provider, modelId }));
+    if (bindings && bindings.size === 0) {
+      this.boundSessionsBySession.delete(sessionId);
+    }
+  }
+
+  clearProviderBoundSessions(sessionId: string, provider: ProviderId) {
+    const bindings = this.boundSessionsBySession.get(sessionId);
+    if (!bindings) {
       return;
     }
 
-    this.boundSessionsBySession.delete(sessionId);
+    for (const [bindingKey, session] of bindings.entries()) {
+      if (session.provider === provider) {
+        bindings.delete(bindingKey);
+      }
+    }
+
+    if (bindings.size === 0) {
+      this.boundSessionsBySession.delete(sessionId);
+    }
   }
 
   clearSessionState(sessionId: string) {
@@ -153,12 +191,57 @@ export class HelperState {
     this.sessionMeta.delete(sessionId);
   }
 
-  getBoundSession(provider?: ProviderId) {
-    return this.getSessionBoundSession(DEFAULT_SESSION_ID, provider);
+  hydrateSessionBindings(sessions: PersistedSessionBindingSession[]) {
+    this.boundSessionsBySession.clear();
+    this.sessionMeta.clear();
+
+    for (const session of sessions) {
+      this.sessionMeta.set(session.sessionId, session.meta);
+
+      const bindings = new Map<string, BoundSession>();
+      for (const binding of session.bindings) {
+        const normalizedSession: BoundSession = {
+          ...binding,
+          modelId: binding.modelId,
+        };
+        bindings.set(getBoundSessionKey(normalizedSession), normalizedSession);
+      }
+
+      if (bindings.size > 0) {
+        this.boundSessionsBySession.set(session.sessionId, bindings);
+      }
+    }
   }
 
-  setBoundSession(providerOrSession: ProviderId | BoundSession | null, session?: BoundSession | null) {
-    this.setSessionBoundSession(DEFAULT_SESSION_ID, providerOrSession, session);
+  exportSessionBindings() {
+    const sessions: PersistedSessionBindingSession[] = [];
+
+    for (const [sessionId, meta] of this.sessionMeta.entries()) {
+      const bindings = this.boundSessionsBySession.get(sessionId);
+      if (!bindings || bindings.size === 0) {
+        continue;
+      }
+
+      sessions.push({
+        sessionId,
+        meta,
+        bindings: [...bindings.values()].sort((left, right) =>
+          getBoundSessionKey(left).localeCompare(getBoundSessionKey(right)),
+        ),
+      });
+    }
+
+    return sessions.sort((left, right) =>
+      left.sessionId.localeCompare(right.sessionId),
+    );
+  }
+
+  getBoundSession(provider?: ProviderId, modelId?: string | null) {
+    return this.getSessionBoundSession(DEFAULT_SESSION_ID, provider, modelId);
+  }
+
+  setBoundSession(session: BoundSession) {
+    this.setSessionBoundSession(DEFAULT_SESSION_ID, session);
   }
 
   hasAnyBoundSession() {
@@ -240,8 +323,12 @@ export class HelperState {
     return false;
   }
 
-  tryAcquireBinding(sessionId: string, provider: ProviderId) {
-    const key = this.getBindingKey(sessionId, provider);
+  tryAcquireBinding(
+    sessionId: string,
+    provider: ProviderId,
+    modelId?: string | null,
+  ) {
+    const key = this.getBindingKey(sessionId, provider, modelId);
     if (this.runningBindings.has(key)) {
       return false;
     }
@@ -250,8 +337,12 @@ export class HelperState {
     return true;
   }
 
-  releaseBinding(sessionId: string, provider: ProviderId) {
-    this.runningBindings.delete(this.getBindingKey(sessionId, provider));
+  releaseBinding(
+    sessionId: string,
+    provider: ProviderId,
+    modelId?: string | null,
+  ) {
+    this.runningBindings.delete(this.getBindingKey(sessionId, provider, modelId));
   }
 
   getDegraded() {

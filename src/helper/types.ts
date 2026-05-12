@@ -6,8 +6,29 @@ import type {
   ProviderChatResponse,
 } from "../shared/contracts";
 
+export function normalizeBoundModelId(
+  provider: ProviderId,
+  modelId?: string | null,
+) {
+  if (provider !== "deepseek-web") {
+    return null;
+  }
+
+  const normalized = modelId?.trim() ?? "";
+  return normalized.length > 0 ? normalized : null;
+}
+
+export function getBoundSessionKey(input: {
+  provider: ProviderId;
+  modelId?: string | null;
+}) {
+  const modelId = normalizeBoundModelId(input.provider, input.modelId);
+  return modelId ? `${input.provider}::${modelId}` : input.provider;
+}
+
 export interface BoundSession {
   provider: ProviderId;
+  modelId: string | null;
   tabId: string;
   tabUrl: string;
   loginState: "logged_in" | "logged_out";
@@ -37,6 +58,17 @@ export interface SessionBindingDebugRecord {
   sessionId: string;
   createdAt: string;
   lastSeenAt: string;
+  bindings: Array<{
+    bindingKey: string;
+    provider: ProviderId;
+    modelId: string | null;
+    tabId: string;
+    tabUrl: string;
+    conversationId: string;
+    loginState: "logged_in" | "logged_out";
+    bridgeInjected: boolean;
+    providerInitialized: boolean;
+  }>;
   providers: Partial<
     Record<
       ProviderId,
@@ -49,6 +81,24 @@ export interface SessionBindingDebugRecord {
       }
     >
   >;
+}
+
+export interface PersistedSessionBindingRecord {
+  provider: ProviderId;
+  modelId: string | null;
+  tabId: string;
+  tabUrl: string;
+  loginState: "logged_in" | "logged_out";
+  bridgeInjected: boolean;
+  pageState: PageStateSummary;
+  conversationId: string;
+  providerInitialized: boolean;
+}
+
+export interface PersistedSessionBindingSession {
+  sessionId: string;
+  meta: SessionStateMeta;
+  bindings: PersistedSessionBindingRecord[];
 }
 
 export interface ProviderRequestDebugRecord {

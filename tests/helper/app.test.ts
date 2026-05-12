@@ -6,11 +6,17 @@ import { buildApp } from "../../src/helper/app";
 
 describe("helper app", () => {
   const requestLogDirs: string[] = [];
+  const sessionBindingDirs: string[] = [];
 
   afterEach(async () => {
     vi.restoreAllMocks();
     await Promise.all(
       requestLogDirs.splice(0).map((dir) =>
+        rm(dir, { recursive: true, force: true }),
+      ),
+    );
+    await Promise.all(
+      sessionBindingDirs.splice(0).map((dir) =>
         rm(dir, { recursive: true, force: true }),
       ),
     );
@@ -341,6 +347,19 @@ describe("helper app", () => {
           sessionId: "pi-session-a",
           createdAt: expect.any(String),
           lastSeenAt: expect.any(String),
+          bindings: [
+            {
+              bindingKey: "qwen-web",
+              provider: "qwen-web",
+              modelId: null,
+              tabId: "tab-2",
+              tabUrl: "https://chat.qwen.ai/",
+              conversationId: "conv-qwen-web-tab-2",
+              loginState: "logged_in",
+              bridgeInjected: true,
+              providerInitialized: false,
+            },
+          ],
           providers: {
             "qwen-web": {
               tabId: "tab-2",
@@ -355,6 +374,19 @@ describe("helper app", () => {
           sessionId: "public-session-a",
           createdAt: expect.any(String),
           lastSeenAt: expect.any(String),
+          bindings: [
+            {
+              bindingKey: "deepseek-web::deepseek-web-chat",
+              provider: "deepseek-web",
+              modelId: "deepseek-web-chat",
+              tabId: "tab-1",
+              tabUrl: "https://chat.deepseek.com/",
+              conversationId: "conv-tab-1",
+              loginState: "logged_in",
+              bridgeInjected: true,
+              providerInitialized: false,
+            },
+          ],
           providers: {
             "deepseek-web": {
               tabId: "tab-1",
@@ -367,6 +399,129 @@ describe("helper app", () => {
         },
       ],
     });
+  });
+
+  it("restores persisted session bindings and rebinds by remembered url after restart", async () => {
+    const sessionBindingDir = await mkdtemp(
+      join(tmpdir(), "web-providers-helper-bindings-"),
+    );
+    sessionBindingDirs.push(sessionBindingDir);
+
+    const firstApp = buildApp({
+      token: "test-token",
+      sessionBindingDir,
+      browserClient: {
+        getConnectionStatus: async () => "connected",
+        bindProviderTab: async () => ({
+          tabId: "tab-1",
+          url: "https://chat.deepseek.com/a/chat/s/persisted-session",
+          loginState: "logged_in",
+          bridgeInjected: true,
+          pageState: {
+            inputReady: true,
+            busy: false,
+            latestAssistantPreview: null,
+            assistantCount: 0,
+          },
+        }),
+        resetProvider: async () => undefined,
+        startNewChat: async () => undefined,
+        sendChatPrompt: async ({ prompt }: { prompt: string }) => ({
+          mode: "text",
+          outputText: `reply:${prompt}`,
+          modelLabel: "DeepSeek Web",
+        }),
+      } as never,
+    });
+
+    const firstResponse = await firstApp.inject({
+      method: "POST",
+      url: "/v1/provider/chat",
+      headers: {
+        authorization: "Bearer test-token",
+        "x-web-providers-session-id": "persisted-session-a",
+      },
+      payload: {
+        provider: "deepseek-web",
+        model: "deepseek-web-chat",
+        messages: [{ role: "user", content: "one" }],
+      },
+    });
+
+    expect(firstResponse.statusCode).toBe(200);
+    await firstApp.close();
+
+    const bindCalls: Array<Record<string, unknown>> = [];
+    const restartedApp = buildApp({
+      token: "test-token",
+      sessionBindingDir,
+      browserClient: {
+        getConnectionStatus: async () => "connected",
+        bindProviderTab: async (input: {
+          provider: string;
+          tabId?: string;
+          openUrl?: string;
+        }) => {
+          bindCalls.push(input);
+
+          if (input.tabId) {
+            throw new Error(`Tab not found: ${input.tabId}`);
+          }
+
+          return {
+            tabId: "tab-2",
+            url: input.openUrl ?? "https://chat.deepseek.com/a/chat/s/persisted-session",
+            loginState: "logged_in",
+            bridgeInjected: true,
+            pageState: {
+              inputReady: true,
+              busy: false,
+              latestAssistantPreview: null,
+              assistantCount: 0,
+            },
+          };
+        },
+        resetProvider: async () => undefined,
+        startNewChat: async () => undefined,
+        sendChatPrompt: async ({ prompt }: { prompt: string }) => ({
+          mode: "text",
+          outputText: `reply:${prompt}`,
+          modelLabel: "DeepSeek Web",
+        }),
+      } as never,
+    });
+
+    const secondResponse = await restartedApp.inject({
+      method: "POST",
+      url: "/v1/provider/chat",
+      headers: {
+        authorization: "Bearer test-token",
+        "x-web-providers-session-id": "persisted-session-a",
+      },
+      payload: {
+        provider: "deepseek-web",
+        model: "deepseek-web-chat",
+        messages: [{ role: "user", content: "two" }],
+      },
+    });
+
+    expect(secondResponse.statusCode).toBe(200);
+    expect(bindCalls).toEqual([
+      {
+        provider: "deepseek-web",
+        openNew: undefined,
+        openUrl: undefined,
+        tabId: "tab-1",
+      },
+      {
+        provider: "deepseek-web",
+        openNew: undefined,
+        openUrl: "https://chat.deepseek.com/a/chat/s/persisted-session",
+        tabId: undefined,
+      },
+    ]);
+
+    await restartedApp.close();
   });
 
   it("allows unauthenticated access when helper token is not configured", async () => {

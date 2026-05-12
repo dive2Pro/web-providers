@@ -83,6 +83,7 @@ export interface BrowserAutomationClient {
     tabId?: string;
     openNew?: boolean;
     openUrl?: string;
+    passive?: boolean;
   }): Promise<BindResult>;
   bindDeepSeekTab(): Promise<BindResult>;
   resetProvider?(input: { provider: ProviderId; tabId: string }): Promise<void>;

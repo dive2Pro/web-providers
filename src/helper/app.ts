@@ -14,6 +14,10 @@ import { registerInternalPiSessionShutdownRoute } from "./routes/internal-pi-ses
 import { registerProviderChatRoute } from "./routes/provider-chat";
 import { registerResetRoute } from "./routes/reset";
 import { HelperRuntime } from "./runtime";
+import {
+  LocalSessionBindingStore,
+  type SessionBindingStore,
+} from "./session-binding-store";
 import { HelperState } from "./state";
 import {
   registerRequestLogging,
@@ -31,6 +35,8 @@ export interface AppDeps {
   requestLogger?: RequestLogger;
   requestLogDir?: string;
   requestLogStore?: RequestLogStore;
+  sessionBindingDir?: string;
+  sessionBindingStore?: SessionBindingStore;
 }
 
 export interface AppContext {
@@ -49,13 +55,25 @@ export function buildApp(deps: AppDeps) {
           dir: deps.requestLogDir,
         })
       : null);
+  const sessionBindingStore =
+    deps.sessionBindingStore ??
+    (deps.sessionBindingDir
+      ? new LocalSessionBindingStore({
+          scope: "helper",
+          dir: deps.sessionBindingDir,
+        })
+      : null);
   registerRequestLogging(app, {
     scope: "helper",
     logger: deps.requestLogger,
     store: requestLogStore ?? undefined,
   });
   const state = new HelperState();
-  const runtime = new HelperRuntime(deps.browserClient, state);
+  const runtime = new HelperRuntime(
+    deps.browserClient,
+    state,
+    sessionBindingStore ?? undefined,
+  );
   const ctx: AppContext = {
     browserClient: deps.browserClient,
     state,
@@ -85,6 +103,15 @@ export function buildApp(deps: AppDeps) {
       }
       return reply.code(401).send({ error: "UNAUTHORIZED" });
     }
+  });
+
+  app.addHook("onReady", async () => {
+    if (!sessionBindingStore) {
+      return;
+    }
+
+    const persistedSessions = await sessionBindingStore.load();
+    state.hydrateSessionBindings(persistedSessions);
   });
 
   registerHealthRoute(app, ctx);
