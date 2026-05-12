@@ -77,6 +77,63 @@ npm run dev
 - 当前没有按 `requestId` 或幂等键做重复请求去重。一次请求结束后，后续重试会再次真正执行；如果上一个请求仍在运行，则会返回 `MODEL_BUSY`。
 - `conversationId` 是 helper 本地逻辑 ID，不是远端网页真实会话 ID，不能据此恢复历史网页对话。
 
+## Claude Code / cc switch 使用方案
+
+如果你希望把 `Claude Code` 切到本地 `web-providers` 网关，当前仓库提供的是 `Anthropic Messages` 兼容入口，而不是 OpenAI 入口。接入时需要把 Claude Code 的 `base URL` 指向本地网关，并让它走 `POST /v1/messages`。
+
+### 1. 启动网关
+
+建议显式配置统一 token，避免 OpenAI/Anthropic 两套入口鉴权不一致：
+
+```bash
+GATEWAY_TOKEN=dev-token npm run dev
+```
+
+默认情况下：
+- 网关地址是 `http://127.0.0.1:4321`
+- Claude Code 应走 `Anthropic` 风格鉴权头 `x-api-key: dev-token`
+- 真正执行请求的是 `POST /v1/messages`
+
+### 2. 在 cc switch 中切到本地网关
+
+`cc switch` 的核心是把 Claude Code 当前使用的 provider/base URL 切到你的本地服务。无论你是通过配置文件、环境变量还是 `cc switch` 的交互式配置完成切换，目标都应保持一致：
+
+- `Base URL`：`http://127.0.0.1:4321`
+- `API Key`：`dev-token`
+- 协议类型：`Anthropic`
+
+如果你的 `cc switch` 支持直接填写模型名，使用本仓库当前公开模型之一：
+
+- `deepseek-web-pro`
+- `deepseek-web-flash`
+- `qwen-web-chat`
+- `qwen-web-tools`
+
+不再使用旧的 `anthropic-*` 别名。
+
+### 3. 会话复用方式
+
+Claude Code 请求头里的 `x-claude-code-session-id` 会被网关自动转成内部的 `x-web-providers-session-id`，因此同一个 Claude Code session 会复用同一个已绑定网页会话。
+
+这意味着：
+- 同一条 Claude Code 会话内，标题生成请求和正式对话请求会落到同一个绑定 tab
+- 不需要客户端自己传 `tabId`
+- 如果同一个 `sessionId + provider` 已有请求进行中，并发请求会返回 `MODEL_BUSY`
+
+### 4. 连通性自检
+
+切换后可以先验证模型列表和健康状态：
+
+```bash
+curl http://127.0.0.1:4321/v1/health
+```
+
+```bash
+curl -H 'x-api-key: dev-token' http://127.0.0.1:4321/v1/models
+```
+
+如果 `cc switch` 已正确切到本地网关，Claude Code 发起对话时会命中本地 `POST /v1/messages`，再由网关转发到内部 helper/browser provider 链路。
+
 ## 🛠️ 技术栈
 
 - **Runtime**: Node.js (ESM)
