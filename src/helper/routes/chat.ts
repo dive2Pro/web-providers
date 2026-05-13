@@ -2,14 +2,24 @@ import type { FastifyInstance } from "fastify";
 import { HelperError } from "../errors";
 import type { AppContext } from "../app";
 
+const SESSION_HEADER = "x-web-providers-session-id";
+
 export function registerChatRoute(app: FastifyInstance, ctx: AppContext) {
   app.post("/v1/chat", async (request, reply) => {
     const body = request.body as {
       prompt?: string;
       timeoutMs?: number;
     };
+    const sessionId = (request.headers[SESSION_HEADER] as string | undefined)?.trim();
 
-    const session = ctx.state.getBoundSession();
+    if (!sessionId) {
+      return reply.code(400).send({
+        error: "AUTOMATION_DESYNC",
+        message: "Missing x-web-providers-session-id header",
+      });
+    }
+
+    const session = ctx.state.getSessionBoundSession(sessionId, "deepseek-web", null);
     if (!session) {
       return reply.code(409).send({
         error: "NOT_BOUND",
@@ -24,7 +34,7 @@ export function registerChatRoute(app: FastifyInstance, ctx: AppContext) {
       });
     }
 
-    if (ctx.state.hasRunningRequest()) {
+    if (ctx.state.hasRunningRequest(session.tabId)) {
       return reply.code(409).send({
         error: "MODEL_BUSY",
         message: "Another request is already in progress",
@@ -33,7 +43,7 @@ export function registerChatRoute(app: FastifyInstance, ctx: AppContext) {
 
     const now = new Date().toISOString();
 
-    ctx.state.setActiveRequest({
+    ctx.state.setActiveRequest(session.tabId, {
       requestId: `req-${Date.now()}`,
       prompt: body.prompt,
       accumulatedReply: "",
@@ -54,7 +64,7 @@ export function registerChatRoute(app: FastifyInstance, ctx: AppContext) {
           ? result.outputText
           : (result.outputText ?? "");
 
-      ctx.state.setActiveRequest(null);
+      ctx.state.setActiveRequest(session.tabId, null);
 
       return {
         reply: replyText,
@@ -68,7 +78,7 @@ export function registerChatRoute(app: FastifyInstance, ctx: AppContext) {
           ? error
           : new HelperError("AUTOMATION_DESYNC", "Unexpected automation failure");
 
-      ctx.state.setActiveRequest(null);
+      ctx.state.setActiveRequest(session.tabId, null);
 
       return reply.code(409).send({
         error: helperError.code,

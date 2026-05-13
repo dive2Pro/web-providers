@@ -7,7 +7,8 @@ export class HelperError extends Error {
       | "PAGE_UNAVAILABLE"
       | "MODEL_BUSY"
       | "TIMEOUT"
-      | "AUTOMATION_DESYNC",
+      | "AUTOMATION_DESYNC"
+      | "INVALID_PROVIDER_RESPONSE",
     message: string,
     public readonly automationDebug: SendChatAutomationDebug | null = null,
   ) {

@@ -1,263 +1,67 @@
 import type { FastifyInstance } from "fastify";
-import type {
-  ProviderId,
-  ProviderChatRequest,
-  ProviderChatResponse,
-} from "../../shared/contracts";
+import type { ProviderChatRequest } from "../../shared/contracts";
 import type { AppContext } from "../app";
 import { HelperError } from "../errors";
-import type { BoundSession, ProviderRequestDebugRecord } from "../types";
 
-function buildProviderPrompt(input: {
-  messages: ProviderChatRequest["messages"];
-  sessionInit?: ProviderChatRequest["sessionInit"];
-  providerInitialized: boolean;
-  providerInitFingerprint: string | null;
-  providerSessionKey: string | null;
-}) {
-  const currentUser = [...input.messages]
-    .reverse()
-    .find((message) => message.role === "user");
-
-  const userPrompt = currentUser?.content ?? "";
-  const nextFingerprint = input.sessionInit?.fingerprint ?? null;
-  const nextSessionKey = input.sessionInit?.sessionKey ?? null;
-  const shouldStartFresh =
-    nextFingerprint !== null &&
-    nextSessionKey !== null &&
-    (!input.providerInitialized ||
-      input.providerInitFingerprint !== nextFingerprint ||
-      input.providerSessionKey !== nextSessionKey);
-
-  if (!shouldStartFresh) {
-    return {
-      prompt: userPrompt,
-      shouldStartFresh: false,
-      nextFingerprint: input.providerInitFingerprint,
-      nextSessionKey: input.providerSessionKey,
-    };
-  }
-
-  const initPrompt = input.sessionInit?.prompt.trim() ?? "";
-
-  return {
-    prompt: [initPrompt, userPrompt].filter((part) => part.length > 0).join("\n\n"),
-    shouldStartFresh: true,
-    nextFingerprint,
-    nextSessionKey,
-  };
-}
-
-function createBaseDebugRecord(
-  session: BoundSession,
-  body: ProviderChatRequest,
-  prompt: string,
-) {
-  const startedAt = new Date().toISOString();
-  const requestId = `req-${Date.now()}`;
-  const normalizedMessages = body.messages.map((message) => ({
-    role: message.role,
-    content: message.content,
-  }));
-  const rawRequest: ProviderChatRequest = {
-    provider: body.provider,
-    model: body.model,
-    messages: normalizedMessages,
-    ...(body.sessionInit
-      ? {
-          sessionInit: {
-            fingerprint: body.sessionInit.fingerprint,
-            sessionKey: body.sessionInit.sessionKey,
-            prompt: body.sessionInit.prompt,
-          },
-        }
-      : {}),
-    ...(typeof body.temperature === "number"
-      ? { temperature: body.temperature }
-      : {}),
-    ...(typeof body.maxOutputTokens === "number"
-      ? { maxOutputTokens: body.maxOutputTokens }
-      : {}),
-    ...(typeof body.abortKey === "string"
-      ? { abortKey: body.abortKey }
-      : {}),
-  };
-
-  return {
-    record: {
-      provider: body.provider,
-      requestId,
-      rawRequest,
-      normalizedMessages,
-      prompt,
-      session: {
-        tabId: session.tabId,
-        url: session.url,
-      },
-      startedAt,
-      completedAt: null,
-      status: "running",
-      response: null,
-      automation: null,
-      error: null,
-    } satisfies ProviderRequestDebugRecord,
-    startedAt,
-    requestId,
-  };
-}
-
-function toProviderResponse(result: {
-  mode: "text" | "native_tool_call" | "json_fallback";
-  thinkingText?: string;
-  outputText?: string;
-  modelLabel?: string;
-  toolCall?: {
-    name: string;
-    argumentsJson: string;
-  };
-}): ProviderChatResponse {
-  if (result.mode === "text") {
-    return {
-      mode: "text",
-      ...(typeof result.thinkingText === "string"
-        ? { thinkingText: result.thinkingText }
-        : {}),
-      outputText: result.outputText ?? "",
-      finishReason: "stop",
-      modelLabel: result.modelLabel,
-    };
-  }
-
-  return {
-    mode: result.mode,
-    toolCall: result.toolCall as { name: string; argumentsJson: string },
-    finishReason: "stop",
-    modelLabel: result.modelLabel,
-    ...(typeof result.thinkingText === "string"
-      ? { thinkingText: result.thinkingText }
-      : {}),
-    ...(typeof result.outputText === "string"
-      ? { outputText: result.outputText }
-      : {}),
-  };
-}
+const SESSION_HEADER = "x-web-providers-session-id";
 
 export function registerProviderChatRoute(app: FastifyInstance, ctx: AppContext) {
   app.post("/v1/provider/chat", async (request, reply) => {
     const body = request.body as ProviderChatRequest;
-    const provider = (body.provider ?? "deepseek-web") as ProviderId;
-    const session = ctx.state.getBoundSession(provider);
-
-    if (!session) {
-      return reply.code(409).send({
-        error: "NOT_BOUND",
-        message: `Bind a ${provider} tab before provider chat`,
+    const sessionId = (request.headers[SESSION_HEADER] as string | undefined)?.trim();
+    if (!sessionId) {
+      return reply.code(400).send({
+        error: "AUTOMATION_DESYNC",
+        message: "Missing x-web-providers-session-id header",
       });
     }
-
-    if (ctx.state.hasRunningRequest()) {
-      return reply.code(409).send({
-        error: "MODEL_BUSY",
-        message: "Another request is already in progress",
-      });
-    }
-
-    const promptInput = buildProviderPrompt({
-      messages: body.messages,
-      sessionInit: body.sessionInit,
-      providerInitialized: session.providerInitialized,
-      providerInitFingerprint: session.providerInitFingerprint,
-      providerSessionKey: session.providerSessionKey,
-    });
-    const prompt = promptInput.prompt;
-    const debugSeed = createBaseDebugRecord(session, { ...body, provider }, prompt);
-    const baseDebugRecord = debugSeed.record;
-    ctx.state.setLastProviderRequest(provider, baseDebugRecord);
-    ctx.state.setActiveRequest({
-      requestId: debugSeed.requestId,
-      prompt,
-      accumulatedReply: "",
-      startedAt: debugSeed.startedAt,
-      lastEventAt: debugSeed.startedAt,
-      status: "running",
-      finalErrorCode: null,
-    });
+    const abortController = new AbortController();
+    const abortRequest = () => {
+      if (!abortController.signal.aborted) {
+        abortController.abort();
+      }
+    };
+    const handleRequestAborted = () => {
+      abortRequest();
+    };
+    const handleRequestClose = () => {
+      if (request.raw.aborted) {
+        abortRequest();
+      }
+    };
+    const handleResponseClose = () => {
+      if (!reply.sent) {
+        abortRequest();
+      }
+    };
+    request.raw.once("aborted", handleRequestAborted);
+    request.raw.once("close", handleRequestClose);
+    reply.raw.once("close", handleResponseClose);
 
     try {
-      if (promptInput.shouldStartFresh) {
-        await ctx.browserClient.startNewChat(
-          ctx.browserClient.bindProviderTab
-            ? { provider, tabId: session.tabId }
-            : session.tabId,
-        );
-      }
-
-      const result = await ctx.browserClient.sendChatPrompt({
-        provider,
-        tabId: session.tabId,
-        prompt,
-        timeoutMs: 30_000,
-        freshSession: promptInput.shouldStartFresh,
+      const response = await ctx.runtime.executeProviderChat({
+        sessionId,
+        body,
+        signal: abortController.signal,
       });
-
-      ctx.state.setActiveRequest(null);
-
-      const response = toProviderResponse(result);
-      ctx.state.setLastProviderRequest(provider, {
-        ...baseDebugRecord,
-        completedAt: new Date().toISOString(),
-        status: "completed",
-        response,
-        automation: result.debug ?? null,
-      });
-      if (promptInput.shouldStartFresh || body.sessionInit?.fingerprint) {
-        const nextConversationId =
-          provider === "deepseek-web"
-            ? `conv-${session.tabId}`
-            : `conv-${provider}-${session.tabId}-${Date.now()}`;
-        ctx.state.setBoundSession(provider, {
-          ...session,
-          conversationId: promptInput.shouldStartFresh
-            ? nextConversationId
-            : session.conversationId,
-          providerInitialized: true,
-          providerInitFingerprint:
-            body.sessionInit?.fingerprint ?? session.providerInitFingerprint,
-          providerSessionKey:
-            body.sessionInit?.sessionKey ?? session.providerSessionKey,
-        });
-      }
-
       return response;
     } catch (error) {
-      const rootCauseMessage =
-        error instanceof Error
-          ? error.message
-          : String(error);
+      if (abortController.signal.aborted) {
+        return;
+      }
       const helperError =
         error instanceof HelperError
           ? error
-          : new HelperError(
-              "AUTOMATION_DESYNC",
-              `Unexpected automation failure: ${rootCauseMessage}`,
-            );
-      ctx.state.setLastProviderRequest(provider, {
-        ...baseDebugRecord,
-        completedAt: new Date().toISOString(),
-        status: "failed",
-        automation: helperError.automationDebug,
-        error: {
-          code: helperError.code,
-          message: helperError.message,
-        },
-      });
-
-      ctx.state.setActiveRequest(null);
+          : new HelperError("AUTOMATION_DESYNC", "Unexpected automation failure");
 
       return reply.code(409).send({
         error: helperError.code,
         message: helperError.message,
       });
+    } finally {
+      request.raw.off("aborted", handleRequestAborted);
+      request.raw.off("close", handleRequestClose);
+      reply.raw.off("close", handleResponseClose);
     }
   });
 }

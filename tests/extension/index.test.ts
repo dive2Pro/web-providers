@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
 import registerDeepSeekExtension from "../../.pi/extensions/deepseek-web/index";
+import {
+  CODE_AGENT_SYSTEM_PROMPT_FIRST_LINE,
+  JSON_PROTOCOL_REPAIR_ACTION_RULE,
+  JSON_PROTOCOL_REPAIR_HEADER,
+  JSON_PROTOCOL_REPAIR_REQUIREMENT,
+} from "../../src/shared/code-agent-prompt";
 
 type TextContent = { type: "text"; text: string };
 type ImageContent = { type: "image"; data: string; mimeType: string };
@@ -57,6 +63,7 @@ type Context = {
   tools?: Array<{
     name: string;
     description?: string;
+    parameters?: Record<string, unknown>;
     inputSchema?: Record<string, unknown>;
   }>;
 };
@@ -192,7 +199,11 @@ describe("pi provider extension", () => {
   });
 
   it("sends provider-aware helper requests for qwen-web", async () => {
-    const calls: Array<{ path: string; body: Record<string, unknown> }> = [];
+    const calls: Array<{
+      path: string;
+      body: Record<string, unknown>;
+      headers?: Record<string, string>;
+    }> = [];
     let qwenConfig: ProviderConfig | undefined;
 
     registerDeepSeekExtension(
@@ -215,9 +226,12 @@ describe("pi provider extension", () => {
             _baseUrl: string,
             path: string,
             body: Record<string, unknown>,
+            _token?: string,
+            _signal?: AbortSignal,
+            options?: { headers?: Record<string, string> },
           ) => {
-            calls.push({ path, body });
-            if (path === "/v1/bind") {
+            calls.push({ path, body, headers: options?.headers });
+            if (path === "/internal/pi/session/shutdown") {
               return { ok: true } as T;
             }
 
@@ -251,13 +265,12 @@ describe("pi provider extension", () => {
 
     await stream?.result();
 
-    const bindCall = calls.find((call) => call.path === "/v1/bind");
-    const chatCall = calls.find((call) => call.path === "/v1/provider/chat");
-    expect(bindCall?.body).toEqual({ provider: "qwen-web" });
+    const chatCall = calls.find((call) => call.path === "/internal/pi/provider/chat");
     expect(chatCall?.body).toMatchObject({
       provider: "qwen-web",
       model: "qwen-web-chat",
     });
+    expect(chatCall?.headers?.["x-pi-session-id"]).toBe("token-123");
   });
 
   it("registers the deepseek-web provider and model", () => {
@@ -346,7 +359,7 @@ describe("pi provider extension", () => {
           ) => {
             calls.push(`post:${baseUrl}:${path}:${token}:${JSON.stringify(body)}`);
 
-            if (path === "/v1/bind") {
+            if (path === "/internal/pi/session/shutdown") {
               return { ok: true } as T;
             }
 
@@ -393,16 +406,15 @@ describe("pi provider extension", () => {
     ]);
 
     expect(calls[0]).toBe("spawn:token-123:4318");
-    expect(calls[1]).toBe(
-      'post:http://127.0.0.1:4318:/v1/bind:token-123:{"provider":"deepseek-web"}',
+    expect(calls[1]).toContain(
+      'post:http://127.0.0.1:4318:/internal/pi/provider/chat:token-123:',
     );
-    expect(calls[2]).toContain('post:http://127.0.0.1:4318:/v1/provider/chat:token-123:');
-    expect(calls[2]).toContain('"model":"deepseek-web-chat"');
-    expect(calls[2]).toContain('"messages":[{"role":"user","content":"hello"}]');
-    expect(calls[2]).toContain('"temperature":0.3');
-    expect(calls[2]).toContain('"maxOutputTokens":512');
-    expect(calls[2]).toContain('\\"type\\":\\"message\\"');
-    expect(calls[2]).toContain('system prompt');
+    expect(calls[1]).toContain('"model":"deepseek-web-chat"');
+    expect(calls[1]).toContain('"messages":[{"role":"user","content":"hello"}]');
+    expect(calls[1]).toContain('"temperature":0.3');
+    expect(calls[1]).toContain('"maxOutputTokens":512');
+    expect(calls[1]).toContain('\\"type\\":\\"message\\"');
+    expect(calls[1]).toContain('system prompt');
     expect(eventTypes).toEqual(["start", "text_start", "text_delta", "text_end", "done"]);
     expect(result).toMatchObject({
       role: "assistant",
@@ -412,6 +424,89 @@ describe("pi provider extension", () => {
       stopReason: "stop",
       content: [{ type: "text", text: "reply" }],
     });
+  });
+
+  it("uses a picked free port when no helper port is configured", async () => {
+    const calls: string[] = [];
+    let config: ProviderConfig | undefined;
+    const previousPort = process.env.PI_DEEPSEEK_HELPER_PORT;
+    delete process.env.PI_DEEPSEEK_HELPER_PORT;
+
+    try {
+      registerDeepSeekExtension(
+        {
+          registerProvider(_name, providerConfig) {
+            config = providerConfig as ProviderConfig;
+          },
+          on() {},
+        },
+        {
+          pickPort: async () => 4521,
+          spawnHelper: async ({ token, port }: { token: string; port: number }) => {
+            calls.push(`spawn:${token}:${port}`);
+            return {
+              baseUrl: `http://127.0.0.1:${port}`,
+              token,
+              stop: async () => undefined,
+            };
+          },
+          helperClient: {
+            post: async <T>(
+              baseUrl: string,
+              path: string,
+              body: Record<string, unknown>,
+              token: string,
+            ) => {
+              calls.push(`post:${baseUrl}:${path}:${token}:${JSON.stringify(body)}`);
+
+              if (path === "/internal/pi/session/shutdown") {
+                return { ok: true } as T;
+              }
+
+              return {
+                mode: "text",
+                outputText: "reply",
+                finishReason: "stop",
+              } as T;
+            },
+          },
+          randomToken: () => "token-123",
+        } as never,
+      );
+
+      const stream = config?.streamSimple?.(
+        {
+          id: "deepseek-web-chat",
+          api: "deepseek-web-api",
+          provider: "deepseek-web",
+        },
+        {
+          messages: [
+            {
+              role: "user",
+              content: [{ type: "text", text: "hello" }],
+              timestamp: Date.now(),
+            },
+          ],
+        },
+        {
+          signal: new AbortController().signal,
+        },
+      );
+
+      await collectEventTypes(stream as AssistantMessageEventStreamLike);
+
+      expect(calls[0]).toBe("spawn:token-123:4521");
+      expect(calls[1]).toContain(
+        "post:http://127.0.0.1:4521:/internal/pi/provider/chat:token-123:",
+      );
+    } finally {
+      if (previousPort === undefined) {
+        delete process.env.PI_DEEPSEEK_HELPER_PORT;
+      } else {
+        process.env.PI_DEEPSEEK_HELPER_PORT = previousPort;
+      }
+    }
   });
 
   it("emits thinking and final text as separate text blocks", async () => {
@@ -432,7 +527,7 @@ describe("pi provider extension", () => {
         }),
         helperClient: {
           post: async <T>(_baseUrl: string, path: string) => {
-            if (path === "/v1/bind") {
+            if (path === "/internal/pi/session/shutdown") {
               return { ok: true } as T;
             }
 
@@ -525,16 +620,18 @@ describe("pi provider extension", () => {
           ) => {
             calls.push({ path, body });
 
-            if (path === "/v1/bind") {
+            if (path === "/internal/pi/session/shutdown") {
               return { ok: true } as T;
             }
 
             return {
               mode: "json_fallback",
-              toolCall: {
-                name: "bash",
-                argumentsJson: "{\"cmd\":\"ls -la\"}",
-              },
+              toolCalls: [
+                {
+                  name: "bash",
+                  argumentsJson: "{\"cmd\":\"ls -la\"}",
+                },
+              ],
               finishReason: "stop",
               modelLabel: "DeepSeek Web",
             } as T;
@@ -582,7 +679,9 @@ describe("pi provider extension", () => {
       events.push(event);
     }
 
-    const providerChatCall = calls.find((call) => call.path === "/v1/provider/chat");
+    const providerChatCall = calls.find(
+      (call) => call.path === "/internal/pi/provider/chat",
+    );
     const providerMessages = Array.isArray(providerChatCall?.body.messages)
       ? (providerChatCall.body.messages as Array<{ content?: string }>)
       : [];
@@ -590,13 +689,17 @@ describe("pi provider extension", () => {
     expect(providerMessages.at(-1)?.content).toBe("inspect the project");
     expect(providerChatCall?.body.sessionInit).toMatchObject({
       prompt: expect.stringContaining('"type":"message"'),
-      fingerprint: expect.any(String),
-      sessionKey: expect.any(String),
     });
     const providerSessionInit =
       (providerChatCall?.body as { sessionInit?: { prompt?: string } } | undefined)?.sessionInit;
     expect(String(providerSessionInit?.prompt ?? "")).toContain('"type":"tool_call"');
-    expect(String(providerSessionInit?.prompt ?? "")).toContain("Tool name: bash");
+    expect(String(providerSessionInit?.prompt ?? "").split("\n")[0]).toBe(
+      CODE_AGENT_SYSTEM_PROMPT_FIRST_LINE,
+    );
+    expect(String(providerSessionInit?.prompt ?? "")).toContain(
+      "最高优先级：输出协议高于其他一切表达习惯。",
+    );
+    expect(String(providerSessionInit?.prompt ?? "")).toContain("工具名：bash");
     expect(String(providerSessionInit?.prompt ?? "")).toContain("\"cmd\"");
     expect(events.map((event) => event.type)).toEqual([
       "start",
@@ -628,6 +731,122 @@ describe("pi provider extension", () => {
     });
   });
 
+  it("emits one pi tool-call event sequence per returned tool call", async () => {
+    let config: ProviderConfig | undefined;
+
+    registerDeepSeekExtension(
+      {
+        registerProvider(_name, providerConfig) {
+          config = providerConfig as ProviderConfig;
+        },
+        on() {},
+      },
+      {
+        spawnHelper: async () => ({
+          baseUrl: "http://127.0.0.1:4318",
+          token: "token-123",
+          stop: async () => undefined,
+        }),
+        helperClient: {
+          post: async <T>(_baseUrl: string, path: string) => {
+            if (path === "/internal/pi/session/shutdown") {
+              return { ok: true } as T;
+            }
+
+            return {
+              mode: "json_fallback",
+              toolCalls: [
+                {
+                  name: "read_file",
+                  argumentsJson: "{\"path\":\"README.md\"}",
+                },
+                {
+                  name: "bash",
+                  argumentsJson: "{\"cmd\":\"pwd\"}",
+                },
+              ],
+              finishReason: "stop",
+              modelLabel: "DeepSeek Web",
+            } as T;
+          },
+        },
+        randomToken: () => "token-123",
+      },
+    );
+
+    const stream = config?.streamSimple?.(
+      {
+        id: "deepseek-web-chat",
+        api: "deepseek-web-api",
+        provider: "deepseek-web",
+      },
+      {
+        messages: [
+          {
+            role: "user",
+            content: "inspect the repo",
+            timestamp: Date.now(),
+          },
+        ],
+        tools: [
+          {
+            name: "read_file",
+            inputSchema: {
+              type: "object",
+              properties: { path: { type: "string" } },
+              required: ["path"],
+            },
+          },
+          {
+            name: "bash",
+            inputSchema: {
+              type: "object",
+              properties: { cmd: { type: "string" } },
+              required: ["cmd"],
+            },
+          },
+        ],
+      },
+      {
+        signal: new AbortController().signal,
+      },
+    );
+
+    const events: StreamEvent[] = [];
+    for await (const event of stream as AssistantMessageEventStreamLike) {
+      events.push(event);
+    }
+
+    expect(events.map((event) => event.type)).toEqual([
+      "start",
+      "toolcall_start",
+      "toolcall_delta",
+      "toolcall_end",
+      "toolcall_start",
+      "toolcall_delta",
+      "toolcall_end",
+      "done",
+    ]);
+    expect(
+      events
+        .filter((event): event is Extract<StreamEvent, { type: "toolcall_end" }> => event.type === "toolcall_end")
+        .map((event) => event.toolCall),
+    ).toEqual([
+      {
+        type: "toolCall",
+        id: "deepseek-web-0",
+        name: "read_file",
+        arguments: { path: "README.md" },
+      },
+      {
+        type: "toolCall",
+        id: "deepseek-web-1",
+        name: "bash",
+        arguments: { cmd: "pwd" },
+      },
+    ]);
+  });
+
   it("converts a text-mode protocol tool_call envelope into pi tool-call events", async () => {
     let config: ProviderConfig | undefined;
 
@@ -646,7 +865,7 @@ describe("pi provider extension", () => {
         }),
         helperClient: {
           post: async <T>(_baseUrl: string, path: string) => {
-            if (path === "/v1/bind") {
+            if (path === "/internal/pi/session/shutdown") {
               return { ok: true } as T;
             }
 
@@ -723,6 +942,384 @@ describe("pi provider extension", () => {
     });
   });
 
+  it("converts consecutive text-mode protocol tool_call objects into multiple pi tool-call events", async () => {
+    let config: ProviderConfig | undefined;
+    const calls: Array<{ path: string; body?: Record<string, unknown> }> = [];
+
+    registerDeepSeekExtension(
+      {
+        registerProvider(_name, providerConfig) {
+          config = providerConfig as ProviderConfig;
+        },
+        on() {},
+      },
+      {
+        spawnHelper: async () => ({
+          baseUrl: "http://127.0.0.1:4318",
+          token: "token-123",
+          stop: async () => undefined,
+        }),
+        helperClient: {
+          post: async <T>(
+            _baseUrl: string,
+            path: string,
+            body?: Record<string, unknown>,
+          ) => {
+            calls.push({ path, body });
+
+            if (path === "/internal/pi/session/shutdown") {
+              return { ok: true } as T;
+            }
+
+            return {
+              mode: "text",
+              outputText: [
+                "{\"type\":\"tool_call\",\"name\":\"bash\",\"arguments\":{\"cmd\":\"git status\"}}",
+                "{\"type\":\"tool_call\",\"name\":\"bash\",\"arguments\":{\"cmd\":\"git diff\"}}",
+              ].join("\n\n"),
+              finishReason: "stop",
+              modelLabel: "Qwen Web",
+            } as T;
+          },
+        },
+        randomToken: () => "token-123",
+      },
+    );
+
+    const stream = config?.streamSimple?.(
+      {
+        id: "qwen-web-chat",
+        api: "qwen-web-api",
+        provider: "qwen-web",
+      },
+      {
+        messages: [
+          {
+            role: "user",
+            content: "inspect git changes",
+            timestamp: Date.now(),
+          },
+        ],
+        tools: [
+          {
+            name: "bash",
+            description: "Execute bash commands",
+            inputSchema: {
+              type: "object",
+              properties: {
+                cmd: { type: "string" },
+              },
+              required: ["cmd"],
+            },
+          },
+        ],
+      },
+      {
+        signal: new AbortController().signal,
+      },
+    );
+
+    const events: StreamEvent[] = [];
+    for await (const event of stream as AssistantMessageEventStreamLike) {
+      events.push(event);
+    }
+
+    expect(
+      calls.filter((call) => call.path === "/internal/pi/provider/chat"),
+    ).toHaveLength(1);
+    expect(events.map((event) => event.type)).toEqual([
+      "start",
+      "toolcall_start",
+      "toolcall_delta",
+      "toolcall_end",
+      "toolcall_start",
+      "toolcall_delta",
+      "toolcall_end",
+      "done",
+    ]);
+    expect(
+      events
+        .filter((event): event is Extract<StreamEvent, { type: "toolcall_end" }> => event.type === "toolcall_end")
+        .map((event) => event.toolCall),
+    ).toEqual([
+      {
+        type: "toolCall",
+        id: "qwen-web-0",
+        name: "bash",
+        arguments: { cmd: "git status" },
+      },
+      {
+        type: "toolCall",
+        id: "qwen-web-1",
+        name: "bash",
+        arguments: { cmd: "git diff" },
+      },
+    ]);
+  });
+
+  it("includes an explicit empty tool schema in first-turn session init", async () => {
+    let config: ProviderConfig | undefined;
+
+    registerDeepSeekExtension(
+      {
+        registerProvider(_name, providerConfig) {
+          config = providerConfig as ProviderConfig;
+        },
+        on() {},
+      },
+      {
+        spawnHelper: async () => ({
+          baseUrl: "http://127.0.0.1:4318",
+          token: "token-123",
+          stop: async () => undefined,
+        }),
+        helperClient: {
+          post: async <T>(
+            _baseUrl: string,
+            path: string,
+            body: Record<string, unknown>,
+          ) => {
+            calls.push({ path, body });
+
+            if (path === "/internal/pi/session/shutdown") {
+              return { ok: true } as T;
+            }
+
+            return {
+              mode: "text",
+              outputText: "ok",
+              finishReason: "stop",
+              modelLabel: "DeepSeek Web",
+            } as T;
+          },
+        },
+        randomToken: () => "token-123",
+      },
+    );
+
+    const calls: Array<{ path: string; body: Record<string, unknown> }> = [];
+    const stream = config?.streamSimple?.(
+      {
+        id: "deepseek-web-chat",
+        api: "deepseek-web-api",
+        provider: "deepseek-web",
+      },
+      {
+        messages: [
+          {
+            role: "user",
+            content: "inspect the project",
+            timestamp: Date.now(),
+          },
+        ],
+        tools: [
+          {
+            name: "read",
+            description: "Read a file",
+          },
+        ],
+      },
+      {
+        signal: new AbortController().signal,
+      },
+    );
+
+    for await (const _event of stream as AssistantMessageEventStreamLike) {
+      // Drain the stream so the provider request completes and `calls` is populated.
+    }
+
+    const providerChatCall = calls.find(
+      (call) => call.path === "/internal/pi/provider/chat",
+    );
+    const providerSessionInit =
+      (providerChatCall?.body as { sessionInit?: { prompt?: string } } | undefined)?.sessionInit;
+
+    expect(String(providerSessionInit?.prompt ?? "").split("\n")[0]).toBe(
+      CODE_AGENT_SYSTEM_PROMPT_FIRST_LINE,
+    );
+    expect(String(providerSessionInit?.prompt ?? "")).toContain("工具名：read");
+    expect(String(providerSessionInit?.prompt ?? "")).toContain("参数 JSON Schema：{}");
+  });
+
+  it("uses pi tool parameters schema in first-turn session init", async () => {
+    let config: ProviderConfig | undefined;
+
+    registerDeepSeekExtension(
+      {
+        registerProvider(_name, providerConfig) {
+          config = providerConfig as ProviderConfig;
+        },
+        on() {},
+      },
+      {
+        spawnHelper: async () => ({
+          baseUrl: "http://127.0.0.1:4318",
+          token: "token-123",
+          stop: async () => undefined,
+        }),
+        helperClient: {
+          post: async <T>(
+            _baseUrl: string,
+            path: string,
+            body: Record<string, unknown>,
+          ) => {
+            calls.push({ path, body });
+
+            if (path === "/internal/pi/session/shutdown") {
+              return { ok: true } as T;
+            }
+
+            return {
+              mode: "text",
+              outputText: "ok",
+              finishReason: "stop",
+              modelLabel: "DeepSeek Web",
+            } as T;
+          },
+        },
+        randomToken: () => "token-123",
+      },
+    );
+
+    const calls: Array<{ path: string; body: Record<string, unknown> }> = [];
+    const stream = config?.streamSimple?.(
+      {
+        id: "deepseek-web-chat",
+        api: "deepseek-web-api",
+        provider: "deepseek-web",
+      },
+      {
+        messages: [
+          {
+            role: "user",
+            content: "inspect the project",
+            timestamp: Date.now(),
+          },
+        ],
+        tools: [
+          {
+            name: "bash",
+            description: "Execute bash commands",
+            parameters: {
+              type: "object",
+              properties: {
+                cmd: { type: "string" },
+              },
+              required: ["cmd"],
+            },
+          },
+        ],
+      },
+      {
+        signal: new AbortController().signal,
+      },
+    );
+
+    for await (const _event of stream as AssistantMessageEventStreamLike) {
+      // Drain the stream so the provider request completes and `calls` is populated.
+    }
+
+    const providerChatCall = calls.find(
+      (call) => call.path === "/internal/pi/provider/chat",
+    );
+    const providerSessionInit =
+      (providerChatCall?.body as { sessionInit?: { prompt?: string } } | undefined)?.sessionInit;
+
+    expect(String(providerSessionInit?.prompt ?? "").split("\n")[0]).toBe(
+      CODE_AGENT_SYSTEM_PROMPT_FIRST_LINE,
+    );
+    expect(String(providerSessionInit?.prompt ?? "")).toContain("工具名：bash");
+    expect(String(providerSessionInit?.prompt ?? "")).toContain('"cmd"');
+    expect(String(providerSessionInit?.prompt ?? "")).not.toContain("参数 JSON Schema：{}");
+  });
+
+  it("converts a text-mode protocol tool_call envelope even when the provider reports finishReason length", async () => {
+    let config: ProviderConfig | undefined;
+
+    registerDeepSeekExtension(
+      {
+        registerProvider(_name, providerConfig) {
+          config = providerConfig as ProviderConfig;
+        },
+        on() {},
+      },
+      {
+        spawnHelper: async () => ({
+          baseUrl: "http://127.0.0.1:4318",
+          token: "token-123",
+          stop: async () => undefined,
+        }),
+        helperClient: {
+          post: async <T>(_baseUrl: string, path: string) => {
+            if (path === "/internal/pi/session/shutdown") {
+              return { ok: true } as T;
+            }
+
+            return {
+              mode: "text",
+              outputText:
+                "{\"type\":\"tool_call\",\"name\":\"bash\",\"arguments\":{\"cmd\":\"pwd\"}}",
+              finishReason: "length",
+              modelLabel: "Qwen Web",
+            } as T;
+          },
+        },
+        randomToken: () => "token-123",
+      },
+    );
+
+    const stream = config?.streamSimple?.(
+      {
+        id: "qwen-web-chat",
+        api: "qwen-web-api",
+        provider: "qwen-web",
+      },
+      {
+        messages: [
+          {
+            role: "user",
+            content: "show cwd",
+            timestamp: Date.now(),
+          },
+        ],
+        tools: [
+          {
+            name: "bash",
+            inputSchema: {
+              type: "object",
+              properties: {
+                cmd: { type: "string" },
+              },
+              required: ["cmd"],
+            },
+          },
+        ],
+      },
+    );
+
+    const events: StreamEvent[] = [];
+    for await (const event of stream as AssistantMessageEventStreamLike) {
+      events.push(event);
+    }
+
+    expect(events.map((event) => event.type)).toEqual([
+      "start",
+      "toolcall_start",
+      "toolcall_delta",
+      "toolcall_end",
+      "done",
+    ]);
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        type: "toolcall_end",
+        toolCall: expect.objectContaining({
+          name: "bash",
+          arguments: { cmd: "pwd" },
+        }),
+      }),
+    );
+  });
+
   it("repairs malformed tool-call arguments against the active tool schema before emitting pi tool events", async () => {
     const calls: Array<{
       path: string;
@@ -752,7 +1349,7 @@ describe("pi provider extension", () => {
           ) => {
             calls.push({ path, body });
 
-            if (path === "/v1/bind") {
+            if (path === "/internal/pi/session/shutdown") {
               return { ok: true } as T;
             }
 
@@ -760,11 +1357,13 @@ describe("pi provider extension", () => {
             if (providerChatCount === 1) {
               return {
                 mode: "json_fallback",
-                toolCall: {
-                  name: "bash",
-                  argumentsJson:
-                    "{\"command\":\"ls -la /Users/yc/code/web-providers/src\",\"description\":\"List src directory structure\"}",
-                },
+                toolCalls: [
+                  {
+                    name: "bash",
+                    argumentsJson:
+                      "{\"command\":\"ls -la /Users/yc/code/web-providers/src\",\"description\":\"List src directory structure\"}",
+                  },
+                ],
                 finishReason: "stop",
                 modelLabel: "DeepSeek Web",
                 outputText:
@@ -774,10 +1373,12 @@ describe("pi provider extension", () => {
 
             return {
               mode: "json_fallback",
-              toolCall: {
-                name: "bash",
-                argumentsJson: "{\"cmd\":\"ls -la /Users/yc/code/web-providers/src\"}",
-              },
+              toolCalls: [
+                {
+                  name: "bash",
+                  argumentsJson: "{\"cmd\":\"ls -la /Users/yc/code/web-providers/src\"}",
+                },
+              ],
               finishReason: "stop",
               modelLabel: "DeepSeek Web",
               outputText:
@@ -828,12 +1429,14 @@ describe("pi provider extension", () => {
       events.push(event);
     }
 
-    const providerCalls = calls.filter((call) => call.path === "/v1/provider/chat");
+    const providerCalls = calls.filter(
+      (call) => call.path === "/internal/pi/provider/chat",
+    );
     expect(providerCalls).toHaveLength(2);
     const repairMessages =
       (providerCalls[1]?.body as { messages?: Array<{ content?: string }> } | undefined)?.messages;
     expect(String(repairMessages?.[0]?.content ?? "")).toContain(
-      "The previous reply violated the required JSON response protocol",
+      JSON_PROTOCOL_REPAIR_HEADER,
     );
     expect(String(repairMessages?.[0]?.content ?? "")).toContain(
       "\"cmd\"",
@@ -860,7 +1463,7 @@ describe("pi provider extension", () => {
     });
   });
 
-  it("repairs malformed multi-object protocol text into a single message envelope", async () => {
+  it("repairs multi-object protocol text into a single message envelope", async () => {
     const calls: Array<{
       path: string;
       body: Record<string, unknown>;
@@ -889,7 +1492,7 @@ describe("pi provider extension", () => {
           ) => {
             calls.push({ path, body });
 
-            if (path === "/v1/bind") {
+            if (path === "/internal/pi/session/shutdown") {
               return { ok: true } as T;
             }
 
@@ -941,8 +1544,14 @@ describe("pi provider extension", () => {
       collectEventTypes(stream as AssistantMessageEventStreamLike),
     ]);
 
-    const providerCalls = calls.filter((call) => call.path === "/v1/provider/chat");
-    expect(providerCalls).toHaveLength(1);
+    const providerCalls = calls.filter(
+      (call) => call.path === "/internal/pi/provider/chat",
+    );
+    expect(providerCalls).toHaveLength(2);
+    const repairMessages = (providerCalls[1]?.body as { messages?: Array<{ content?: unknown }> })
+      ?.messages;
+    const repairPrompt = String(repairMessages?.[0]?.content ?? "");
+    expect(repairPrompt).toContain("Multiple protocol envelopes were found");
     expect(eventTypes).toEqual(["start", "text_start", "text_delta", "text_end", "done"]);
     expect(result).toMatchObject({
       stopReason: "stop",
@@ -969,7 +1578,7 @@ describe("pi provider extension", () => {
         }),
         helperClient: {
           post: async <T>(_baseUrl: string, path: string) => {
-            if (path === "/v1/bind") {
+            if (path === "/internal/pi/session/shutdown") {
               return { ok: true } as T;
             }
 
@@ -986,8 +1595,8 @@ describe("pi provider extension", () => {
             return {
               mode: "text",
               outputText: [
-                "The previous reply violated the required JSON response protocol.",
-                "Return exactly one JSON object and nothing else.",
+                JSON_PROTOCOL_REPAIR_HEADER,
+                JSON_PROTOCOL_REPAIR_REQUIREMENT,
                 "",
                 '{"type":"message","content":"I\'m ready to coordinate."}',
               ].join("\n"),
@@ -1058,7 +1667,7 @@ describe("pi provider extension", () => {
           ) => {
             calls.push({ path, body });
 
-            if (path === "/v1/bind") {
+            if (path === "/internal/pi/session/shutdown") {
               return { ok: true } as T;
             }
 
@@ -1076,9 +1685,9 @@ describe("pi provider extension", () => {
               return {
                 mode: "text",
                 outputText: [
-                  "The previous reply violated the required JSON response protocol.",
-                  "Return exactly one JSON object and nothing else.",
-                  'For normal replies use: {"type":"message","content":"your response text"}',
+                  JSON_PROTOCOL_REPAIR_HEADER,
+                  JSON_PROTOCOL_REPAIR_REQUIREMENT,
+                  '普通回复使用：{"type":"message","content":"your response text"}',
                 ].join("\n"),
                 finishReason: "stop",
                 modelLabel: "DeepSeek Web",
@@ -1119,13 +1728,16 @@ describe("pi provider extension", () => {
 
     const result = await stream?.result();
 
-    const providerCalls = calls.filter((call) => call.path === "/v1/provider/chat");
+    const providerCalls = calls.filter(
+      (call) => call.path === "/internal/pi/provider/chat",
+    );
     expect(providerCalls).toHaveLength(3);
     const minimalRepairMessage =
       (providerCalls[2]?.body as { messages?: Array<{ content?: string }> } | undefined)?.messages?.[0]
         ?.content ?? "";
-    expect(minimalRepairMessage).toContain("Return exactly one JSON object and nothing else.");
-    expect(minimalRepairMessage).not.toContain("Previous invalid reply:");
+    expect(minimalRepairMessage).toContain(JSON_PROTOCOL_REPAIR_REQUIREMENT);
+    expect(minimalRepairMessage).toContain(JSON_PROTOCOL_REPAIR_ACTION_RULE);
+    expect(minimalRepairMessage).not.toContain("上一条无效回复：");
     expect(result).toMatchObject({
       stopReason: "stop",
       content: [{ type: "text", text: "Recovered on minimal repair." }],
@@ -1151,7 +1763,7 @@ describe("pi provider extension", () => {
         }),
         helperClient: {
           post: async <T>(_baseUrl: string, path: string) => {
-            if (path === "/v1/bind") {
+            if (path === "/internal/pi/session/shutdown") {
               return { ok: true } as T;
             }
 
@@ -1168,9 +1780,9 @@ describe("pi provider extension", () => {
             return {
               mode: "text",
               outputText: [
-                "The previous reply violated the required JSON response protocol.",
-                "Return exactly one JSON object and nothing else.",
-                'For normal replies use: {"type":"message","content":"your response text"}',
+                JSON_PROTOCOL_REPAIR_HEADER,
+                JSON_PROTOCOL_REPAIR_REQUIREMENT,
+                '普通回复使用：{"type":"message","content":"your response text"}',
                 "",
                 "你好，我在。",
               ].join("\n"),
@@ -1212,6 +1824,82 @@ describe("pi provider extension", () => {
     });
   });
 
+  it("does not crash protocol repair when the tool list contains malformed entries", async () => {
+    let config: ProviderConfig | undefined;
+    let providerChatCount = 0;
+
+    registerDeepSeekExtension(
+      {
+        registerProvider(_name, providerConfig) {
+          config = providerConfig as ProviderConfig;
+        },
+        on() {},
+      },
+      {
+        spawnHelper: async () => ({
+          baseUrl: "http://127.0.0.1:4318",
+          token: "token-123",
+          stop: async () => undefined,
+        }),
+        helperClient: {
+          post: async <T>(_baseUrl: string, path: string) => {
+            if (path === "/internal/pi/session/shutdown") {
+              return { ok: true } as T;
+            }
+
+            providerChatCount += 1;
+            if (providerChatCount === 1) {
+              return {
+                mode: "text",
+                outputText: "{",
+                finishReason: "stop",
+                modelLabel: "DeepSeek Web",
+              } as T;
+            }
+
+            return {
+              mode: "text",
+              outputText: '{"type":"message","content":"Recovered despite malformed tools."}',
+              finishReason: "stop",
+              modelLabel: "DeepSeek Web",
+            } as T;
+          },
+        },
+        randomToken: () => "token-123",
+      },
+    );
+
+    const stream = config?.streamSimple?.(
+      {
+        id: "deepseek-web-chat",
+        api: "deepseek-web-api",
+        provider: "deepseek-web",
+      },
+      {
+        messages: [
+          {
+            role: "user",
+            content: "hello",
+            timestamp: Date.now(),
+          },
+        ],
+        tools: [undefined, { description: "missing name" }] as unknown as Array<{
+          name: string;
+          description?: string;
+          inputSchema?: Record<string, unknown>;
+        }>,
+      },
+      {
+        signal: new AbortController().signal,
+      },
+    );
+
+    await expect(stream?.result()).resolves.toMatchObject({
+      stopReason: "stop",
+      content: [{ type: "text", text: "Recovered despite malformed tools." }],
+    });
+  });
+
   it("stops the helper on session shutdown after startup", async () => {
     let config: ProviderConfig | undefined;
     let shutdownHandler: (() => Promise<void>) | undefined;
@@ -1237,8 +1925,18 @@ describe("pi provider extension", () => {
           },
         }),
         helperClient: {
-          post: async <T>() =>
-            ({ mode: "text", outputText: "ok", finishReason: "stop" } as T),
+          post: async <T>(
+            _baseUrl: string,
+            path: string,
+            body: Record<string, unknown>,
+          ) => {
+            calls.push(`${path}:${JSON.stringify(body)}`);
+            if (path === "/internal/pi/session/shutdown") {
+              return { ok: true } as T;
+            }
+
+            return { mode: "text", outputText: "ok", finishReason: "stop" } as T;
+          },
         },
         randomToken: () => "token-123",
       },
@@ -1267,7 +1965,11 @@ describe("pi provider extension", () => {
     await stream?.result();
     await shutdownHandler?.();
 
-    expect(calls).toEqual(["stop"]);
+    expect(calls).toEqual([
+      expect.stringContaining("/internal/pi/provider/chat"),
+      '\/internal/pi/session/shutdown:{"sessionId":"token-123"}',
+      "stop",
+    ]);
   });
 
   it("reuses one helper instance across deepseek and qwen streams", async () => {
@@ -1297,7 +1999,7 @@ describe("pi provider extension", () => {
             body: Record<string, unknown>,
           ) => {
             calls.push(`${path}:${JSON.stringify(body)}`);
-            if (path === "/v1/bind") {
+            if (path === "/internal/pi/session/shutdown") {
               return { ok: true } as T;
             }
 

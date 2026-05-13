@@ -5,7 +5,8 @@ export type ErrorCode =
   | "PAGE_UNAVAILABLE"
   | "MODEL_BUSY"
   | "TIMEOUT"
-  | "AUTOMATION_DESYNC";
+  | "AUTOMATION_DESYNC"
+  | "INVALID_PROVIDER_RESPONSE";
 
 export interface HealthResponse {
   ok: true;
@@ -46,13 +47,16 @@ export interface ProviderChatRequest {
     content: string;
   }>;
   sessionInit?: {
-    fingerprint: string;
-    sessionKey: string;
     prompt: string;
   };
   temperature?: number;
   maxOutputTokens?: number;
   abortKey?: string;
+}
+
+export interface ProviderToolCall {
+  name: string;
+  argumentsJson: string;
 }
 
 export type ProviderChatResponse =
@@ -66,10 +70,7 @@ export type ProviderChatResponse =
   | {
       mode: "native_tool_call" | "json_fallback";
       thinkingText?: string;
-      toolCall: {
-        name: string;
-        argumentsJson: string;
-      };
+      toolCalls: ProviderToolCall[];
       finishReason: "stop" | "error";
       modelLabel?: string;
       outputText?: string;

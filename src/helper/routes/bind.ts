@@ -3,43 +3,34 @@ import type { AppContext } from "../app";
 import { HelperError } from "../errors";
 import type { BindRequest, ProviderId } from "../../shared/contracts";
 
+const SESSION_HEADER = "x-web-providers-session-id";
+
 export function registerBindRoute(app: FastifyInstance, ctx: AppContext) {
   app.post("/v1/bind", async (request, reply) => {
     const body = ((request.body ?? {}) as Partial<BindRequest>);
     const provider = body.provider ?? "deepseek-web";
+    const sessionId = (request.headers[SESSION_HEADER] as string | undefined)?.trim();
+
+    if (!sessionId) {
+      return reply.code(400).send({
+        error: "AUTOMATION_DESYNC",
+        message: "Missing x-web-providers-session-id header",
+      });
+    }
 
     try {
-      const result =
-        ctx.browserClient.bindProviderTab
-          ? await ctx.browserClient.bindProviderTab({ provider })
-          : await ctx.browserClient.bindDeepSeekTab();
-      const previousSession = ctx.state.getBoundSession(provider);
-      const sameTab = previousSession?.tabId === result.tabId;
-      const nextConversationId =
-        provider === "deepseek-web"
-          ? `conv-${result.tabId}`
-          : `conv-${provider}-${result.tabId}`;
-
-      ctx.state.setBoundSession(provider as ProviderId, {
+      const result = await ctx.runtime.bindProvider({
+        sessionId,
         provider: provider as ProviderId,
-        ...result,
-        conversationId: sameTab
-          ? previousSession?.conversationId ?? nextConversationId
-          : nextConversationId,
-        providerInitialized: sameTab
-          ? (previousSession?.providerInitialized ?? false)
-          : false,
-        providerInitFingerprint: sameTab
-          ? (previousSession?.providerInitFingerprint ?? null)
-          : null,
-        providerSessionKey: sameTab
-          ? (previousSession?.providerSessionKey ?? null)
-          : null,
       });
 
       return {
         provider,
-        ...result,
+        tabId: result.tabId,
+        url: result.tabUrl,
+        loginState: result.loginState,
+        bridgeInjected: result.bridgeInjected,
+        pageState: result.pageState,
       };
     } catch (error) {
       if (error instanceof HelperError) {

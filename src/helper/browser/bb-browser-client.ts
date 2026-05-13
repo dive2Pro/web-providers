@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
-import { promisify } from "node:util";
+import { createRequire } from "node:module";
+import { dirname, join } from "node:path";
 import { HelperError } from "../errors";
 import type {
   BrowserAutomationClient,
@@ -11,14 +12,54 @@ import type {
 import { assertDeepSeekUrl, INJECTED_BRIDGE_SOURCE } from "./deepseek-page-bridge";
 import { createProviderRegistry } from "../providers/registry";
 import {
+  assertQwenUrl,
   INJECTED_QWEN_BRIDGE_SOURCE,
   QWEN_PAGE_STATE_SCRIPT,
   QWEN_PROGRESS_SCRIPT,
   QWEN_RESET_COMPLETION_SCRIPT,
   QWEN_START_NEW_CHAT_SCRIPT,
 } from "../providers/qwen/page-bridge";
+import { resolveDeepSeekPageMode } from "../types";
 
-const execFileAsync = promisify(execFile);
+const require = createRequire(import.meta.url);
+
+type BbBrowserInvocation = {
+  command: string;
+  argsPrefix: string[];
+};
+
+export function resolveBbBrowserInvocation(input?: {
+  resolvePackageJson?: () => string;
+  loadPackageJson?: (packageJsonPath: string) => { bin?: string | Record<string, string> };
+}): BbBrowserInvocation {
+  try {
+    const packageJsonPath =
+      input?.resolvePackageJson?.() ?? require.resolve("bb-browser/package.json");
+    const packageJson =
+      input?.loadPackageJson?.(packageJsonPath) ??
+      (require(packageJsonPath) as { bin?: string | Record<string, string> });
+    const bin =
+      typeof packageJson.bin === "string"
+        ? packageJson.bin
+        : packageJson.bin?.["bb-browser"];
+
+    if (typeof bin === "string" && bin.length > 0) {
+      return {
+        command: process.execPath,
+        argsPrefix: [join(dirname(packageJsonPath), bin)],
+      };
+    }
+  } catch {
+    // Fall back to the global command when the package is not installed locally.
+  }
+
+  return {
+    command: "bb-browser",
+    argsPrefix: [],
+  };
+}
+
+const BB_BROWSER_INVOCATION = resolveBbBrowserInvocation();
 
 interface BbBrowserEnvelope<T> {
   success?: boolean;
@@ -40,10 +81,12 @@ interface BbBrowserTabListEnvelope {
 
 export interface BbBrowserTransport {
   getConnectionStatus(): Promise<"connected" | "disconnected">;
+  getTab?(tabId: string): Promise<{ id: string; url: string }>;
+  findTabByUrl?(url: string): Promise<{ id: string; url: string } | null>;
   findDeepSeekTab(): Promise<{ id: string; url: string }>;
   findQwenTab?(): Promise<{ id: string; url: string }>;
-  openDeepSeek(url: string): Promise<void>;
-  openQwen?(url: string): Promise<void>;
+  openDeepSeek(url: string): Promise<{ id: string; url: string } | void>;
+  openQwen?(url: string): Promise<{ id: string; url: string } | void>;
   evaluate<T>(tabId: string, script: string): Promise<T>;
   submitPrompt(tabId: string, prompt: string): Promise<void>;
 }
@@ -112,15 +155,135 @@ export function unwrapEvalResult<T>(raw: unknown): T {
   return unwrapped as T;
 }
 
-async function runBbBrowserJson(args: string[]) {
-  const { stdout } = await execFileAsync("bb-browser", [...args, "--json"], {
-    maxBuffer: 20 * 1024 * 1024,
-  });
+export function normalizeBbBrowserEvalScript(script: string) {
+  return script.replace(/\r?\n+/g, " ").trim();
+}
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function normalizeUrlForMatch(url: string) {
   try {
-    return JSON.parse(stdout) as unknown;
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    const preview = stdout.slice(0, 300).replace(/\s+/g, " ");
+    const parsed = new URL(url);
+    parsed.hash = "";
+    return parsed.toString().replace(/\/$/, "");
+  } catch {
+    return url.replace(/\/$/, "");
+  }
+}
+
+export function extractDeepSeekTextboxRefFromSnapshot(snapshotText: string) {
+  const namedTextboxRef = snapshotText.match(
+    /textbox \[ref=(\d+)\] "Message DeepSeek"/i,
+  )?.[1];
+  const textboxMatches = Array.from(snapshotText.matchAll(/textbox \[ref=(\d+)\]/g));
+  const fallbackTextboxRef = textboxMatches.at(-1)?.[1];
+
+  return namedTextboxRef ?? fallbackTextboxRef ?? null;
+}
+
+export function findOpenedTabFromSnapshots(
+  before: Array<{ index: number; id: string; url: string }>,
+  after: Array<{ index: number; id: string; url: string }>,
+  matcher: (tab: { index: number; id: string; url: string }) => boolean,
+) {
+  const beforeById = new Map(before.map((tab) => [tab.id, tab]));
+
+  return after.find((candidate) => {
+    if (!matcher(candidate)) {
+      return false;
+    }
+
+    const previous = beforeById.get(candidate.id);
+    if (!previous) {
+      return true;
+    }
+
+    return previous.url !== candidate.url;
+  });
+}
+
+async function waitForOpenedTab(input: {
+  listTabs: () => Promise<Array<{ index: number; id: string; url: string }>>;
+  before: Array<{ index: number; id: string; url: string }>;
+  matcher: (tab: { index: number; id: string; url: string }) => boolean;
+  timeoutMs?: number;
+  pollMs?: number;
+}) {
+  const timeoutMs = input.timeoutMs ?? 3_000;
+  const pollMs = input.pollMs ?? 100;
+  const startedAt = Date.now();
+
+  while (Date.now() - startedAt <= timeoutMs) {
+    const after = await input.listTabs();
+    const opened = findOpenedTabFromSnapshots(input.before, after, input.matcher);
+    if (opened) {
+      return opened;
+    }
+
+    await sleep(pollMs);
+  }
+
+  return undefined;
+}
+
+function execBbBrowser(args: string[], options?: { maxBuffer?: number }) {
+  return new Promise<{ stdout: string; stderr: string }>((resolve, reject) => {
+    execFile(
+      BB_BROWSER_INVOCATION.command,
+      [...BB_BROWSER_INVOCATION.argsPrefix, ...args],
+      {
+        encoding: "utf8",
+        ...options,
+      },
+      (error, stdout, stderr) => {
+        if (error) {
+          reject(error);
+          return;
+        }
+
+        resolve({ stdout, stderr });
+      },
+    );
+  });
+}
+
+async function runBbBrowserJson(args: string[]) {
+  const { stdout, stderr, error } = await new Promise<{
+    stdout: string;
+    stderr: string;
+    error: Error | null;
+  }>((resolve) => {
+    execFile(
+      BB_BROWSER_INVOCATION.command,
+      [...BB_BROWSER_INVOCATION.argsPrefix, ...args, "--json"],
+      {
+        encoding: "utf8",
+        maxBuffer: 20 * 1024 * 1024,
+      },
+      (callbackError, callbackStdout, callbackStderr) => {
+        resolve({
+          stdout: callbackStdout,
+          stderr: callbackStderr,
+          error: callbackError,
+        });
+      },
+    );
+  });
+  const stdoutText = stdout;
+  try {
+    const parsed = JSON.parse(stdoutText) as unknown;
+    if (error) {
+      return parsed;
+    }
+    return parsed;
+  } catch (parseError) {
+    if (error) {
+      throw new Error(stderr.trim() || error.message);
+    }
+    const message = parseError instanceof Error ? parseError.message : String(parseError);
+    const preview = stdoutText.slice(0, 300).replace(/\s+/g, " ");
     throw new Error(
       `Failed to parse bb-browser JSON for "${args.join(" ")}": ${message}. stdout preview: ${preview}`,
     );
@@ -165,6 +328,15 @@ export function createBbBrowserTransport(): BbBrowserTransport {
       return tab;
     },
 
+    async findTabByUrl(url: string) {
+      const list = await listTabs();
+      const normalizedTarget = normalizeUrlForMatch(url);
+      return (
+        list.find((entry) => normalizeUrlForMatch(entry.url) === normalizedTarget) ??
+        null
+      );
+    },
+
     async findQwenTab() {
       const list = await listTabs();
       const tab = list.find((entry) => entry.url.includes("chat.qwen.ai"));
@@ -176,48 +348,89 @@ export function createBbBrowserTransport(): BbBrowserTransport {
       return tab;
     },
 
+    async getTab(tabId: string) {
+      const list = await listTabs();
+      const tab = list.find((entry) => entry.id === tabId);
+
+      if (!tab) {
+        throw new HelperError("NOT_BOUND", `No browser tab is available for ${tabId}`);
+      }
+
+      return tab;
+    },
+
     async evaluate<T>(tabId: string, script: string): Promise<T> {
       await selectTabById(tabId);
-      const raw = await runBbBrowserJson(["eval", script]);
+      const raw = await runBbBrowserJson(["eval", normalizeBbBrowserEvalScript(script)]);
       return unwrapEvalResult<T>(raw);
     },
 
     async submitPrompt(tabId: string, prompt: string) {
       await selectTabById(tabId);
 
-      const { stdout: snapshotText } = await execFileAsync(
-        "bb-browser",
-        ["snapshot", "-i", "-s", "textarea"],
-        {
-          maxBuffer: 20 * 1024 * 1024,
-        },
-      );
+      const startedAt = Date.now();
+      const timeoutMs = 3_000;
+      const pollMs = 150;
+      let textboxRef: string | null = null;
 
-      const namedTextboxRef = snapshotText.match(
-        /textbox \[ref=(\d+)\] "Message DeepSeek"/i,
-      )?.[1];
-      const textboxMatches = Array.from(snapshotText.matchAll(/textbox \[ref=(\d+)\]/g));
-      const fallbackTextboxRef = textboxMatches.at(-1)?.[1];
-      const textboxRef = namedTextboxRef ?? fallbackTextboxRef;
+      while (Date.now() - startedAt <= timeoutMs) {
+        const { stdout: scopedSnapshotText } = await execBbBrowser(
+          ["snapshot", "-i", "-s", "textarea"],
+          {
+            maxBuffer: 20 * 1024 * 1024,
+          },
+        );
+        textboxRef = extractDeepSeekTextboxRefFromSnapshot(scopedSnapshotText);
 
-      if (!textboxRef) {
-        throw new Error("DeepSeek composer textbox not found in snapshot");
+        if (!textboxRef) {
+          const { stdout: fullSnapshotText } = await execBbBrowser(
+            ["snapshot", "-i"],
+            {
+              maxBuffer: 20 * 1024 * 1024,
+            },
+          );
+          textboxRef = extractDeepSeekTextboxRefFromSnapshot(fullSnapshotText);
+        }
+
+        if (textboxRef) {
+          break;
+        }
+
+        await sleep(pollMs);
       }
 
-      await execFileAsync("bb-browser", ["fill", textboxRef, prompt], {
+      if (!textboxRef) {
+        throw new Error(
+          "DeepSeek composer textbox not found in snapshot; the tab may still be loading or blocked by verification",
+        );
+      }
+
+      await execBbBrowser(["fill", textboxRef, prompt], {
         maxBuffer: 20 * 1024 * 1024,
       });
-      await execFileAsync("bb-browser", ["press", "Enter"], {
+      await execBbBrowser(["press", "Enter"], {
         maxBuffer: 20 * 1024 * 1024,
       });
     },
 
     async openDeepSeek(url: string) {
+      const before = await listTabs();
       await runBbBrowserJson(["open", url]);
+      return waitForOpenedTab({
+        before,
+        listTabs,
+        matcher: (candidate) => candidate.url.includes("deepseek.com"),
+      });
     },
 
     async openQwen(url: string) {
+      const before = await listTabs();
       await runBbBrowserJson(["open", url]);
+      return waitForOpenedTab({
+        before,
+        listTabs,
+        matcher: (candidate) => candidate.url.includes("chat.qwen.ai"),
+      });
     },
   };
 }
@@ -299,6 +512,33 @@ function looksLikeIncompleteStructuredText(text: string | null | undefined) {
   }
 }
 
+function throwIfAborted(signal?: AbortSignal) {
+  if (signal?.aborted) {
+    throw new Error("Operation aborted");
+  }
+}
+
+async function abortableDelay(ms: number, signal?: AbortSignal) {
+  if (signal?.aborted) {
+    throw new Error("Operation aborted");
+  }
+
+  await new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+
+    const onAbort = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+      reject(new Error("Operation aborted"));
+    };
+
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
 export class BbBrowserClient implements BrowserAutomationClient {
   private readonly providerRegistry: ReturnType<typeof createProviderRegistry>;
 
@@ -314,8 +554,37 @@ export class BbBrowserClient implements BrowserAutomationClient {
     return this.providerRegistry["deepseek-web"].bindTab();
   }
 
-  async bindProviderTab(input: { provider: "deepseek-web" | "qwen-web" }): Promise<BindResult> {
-    return this.providerRegistry[input.provider].bindTab();
+  async getProviderTabUrl(input: {
+    provider: "deepseek-web" | "qwen-web";
+    tabId: string;
+  }) {
+    try {
+      const tab = await this.transport.getTab?.(input.tabId);
+      if (!tab) {
+        return null;
+      }
+
+      return input.provider === "qwen-web"
+        ? assertQwenUrl(tab.url)
+        : assertDeepSeekUrl(tab.url);
+    } catch {
+      return null;
+    }
+  }
+
+  async bindProviderTab(input: {
+    provider: "deepseek-web" | "qwen-web";
+    tabId?: string;
+    openNew?: boolean;
+    openUrl?: string;
+    passive?: boolean;
+  }): Promise<BindResult> {
+    return this.providerRegistry[input.provider].bindTab({
+      tabId: input.tabId,
+      openNew: input.openNew,
+      openUrl: input.openUrl,
+      passive: input.passive,
+    });
   }
 
   async resetPageBridge(tabId: string): Promise<void> {
@@ -331,6 +600,7 @@ export class BbBrowserClient implements BrowserAutomationClient {
       | {
           provider: "deepseek-web" | "qwen-web";
           tabId: string;
+          modelId?: string;
         },
   ): Promise<void> {
     if (typeof input !== "string" && input.provider === "qwen-web") {
@@ -341,11 +611,27 @@ export class BbBrowserClient implements BrowserAutomationClient {
     }
 
     const tabId = typeof input === "string" ? input : input.tabId;
+    const targetModelType =
+      typeof input === "string" ? null : resolveDeepSeekPageMode(input.modelId);
+    const startNewChatScript =
+      targetModelType
+        ? `${INJECTED_BRIDGE_SOURCE}; window.__piDeepSeekBridge.startNewChat(${JSON.stringify({ targetModelType })})`
+        : `${INJECTED_BRIDGE_SOURCE}; window.__piDeepSeekBridge.startNewChat()`;
     try {
-      await this.transport.evaluate(
+      const result = await this.transport.evaluate<{
+        ok?: boolean;
+        error?: string;
+        message?: string;
+      }>(
         tabId,
-        `${INJECTED_BRIDGE_SOURCE}; window.__piDeepSeekBridge.startNewChat()`,
+        startNewChatScript,
       );
+      if (result?.ok === false) {
+        throw new HelperError(
+          result.error === "PAGE_UNAVAILABLE" ? "PAGE_UNAVAILABLE" : "AUTOMATION_DESYNC",
+          result.message ?? result.error ?? "Failed to start a new DeepSeek chat",
+        );
+      }
       return;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -360,6 +646,22 @@ export class BbBrowserClient implements BrowserAutomationClient {
 
     await new Promise((resolve) => setTimeout(resolve, 1_000));
     await this.transport.evaluate(tabId, INJECTED_BRIDGE_SOURCE);
+    if (targetModelType) {
+      const result = await this.transport.evaluate<{
+        ok?: boolean;
+        error?: string;
+        message?: string;
+      }>(
+        tabId,
+        `${INJECTED_BRIDGE_SOURCE}; window.__piDeepSeekBridge.setModelType(${JSON.stringify({ targetModelType })})`,
+      );
+      if (result?.ok === false) {
+        throw new HelperError(
+          result.error === "PAGE_UNAVAILABLE" ? "PAGE_UNAVAILABLE" : "AUTOMATION_DESYNC",
+          result.message ?? result.error ?? "Failed to switch the DeepSeek mode",
+        );
+      }
+    }
   }
 
   async sendChatPrompt(input: {
@@ -368,6 +670,7 @@ export class BbBrowserClient implements BrowserAutomationClient {
     prompt: string;
     timeoutMs: number;
     freshSession?: boolean;
+    signal?: AbortSignal;
   }): Promise<SendChatResult> {
     if (input.provider === "qwen-web") {
       return this.sendQwenChatPrompt(input);
@@ -407,6 +710,7 @@ export class BbBrowserClient implements BrowserAutomationClient {
       );
 
     try {
+      throwIfAborted(input.signal);
       const startResult = await this.transport.evaluate<{
         ok?: boolean;
         baselineState?: {
@@ -487,6 +791,7 @@ export class BbBrowserClient implements BrowserAutomationClient {
       });
 
       if (startMode === "transport_submit") {
+        throwIfAborted(input.signal);
         await this.transport.submitPrompt(input.tabId, input.prompt);
       }
 
@@ -500,6 +805,7 @@ export class BbBrowserClient implements BrowserAutomationClient {
       let previousAssistantCount = baselineAssistantCount;
 
       while (Date.now() - startedAt < hardTimeoutMs) {
+        throwIfAborted(input.signal);
         const progress = await this.transport.evaluate<{
           pageState: {
             inputReady: boolean;
@@ -583,7 +889,9 @@ export class BbBrowserClient implements BrowserAutomationClient {
               : null,
           completionTurnPreview:
             completionState?.turn?.mode === "text"
-              ? previewDebugText(completionState.turn.outputText)
+              ? previewDebugText(
+                  completionState.turn.rawOutputText ?? completionState.turn.outputText,
+                )
               : completionState?.turn?.outputText
                 ? previewDebugText(completionState.turn.outputText)
                 : null,
@@ -662,7 +970,9 @@ export class BbBrowserClient implements BrowserAutomationClient {
                 : false,
             completionObserved,
             completionTurnMode: streamedTurn.mode,
-            completionTurnPreview: previewDebugText(streamedTurn.outputText),
+            completionTurnPreview: previewDebugText(
+              streamedTurn.rawOutputText ?? streamedTurn.outputText,
+            ),
           });
           return {
             mode: "text",
@@ -670,6 +980,9 @@ export class BbBrowserClient implements BrowserAutomationClient {
               ? { thinkingText: streamedTurn.thinkingText }
               : {}),
             outputText: streamedTurn.outputText,
+            ...(typeof streamedTurn.rawOutputText === "string"
+              ? { rawOutputText: streamedTurn.rawOutputText }
+              : {}),
             debug: buildAutomationDebug({
               source: "bridge_stream",
               freshSession: input.freshSession === true,
@@ -685,9 +998,10 @@ export class BbBrowserClient implements BrowserAutomationClient {
           break;
         }
 
-        await new Promise((resolve) => setTimeout(resolve, 300));
+        await abortableDelay(300, input.signal);
       }
 
+      throwIfAborted(input.signal);
       await this.resetPageBridge(input.tabId);
       const finalState = await this.transport.evaluate<{
         inputReady: boolean;
@@ -724,6 +1038,7 @@ export class BbBrowserClient implements BrowserAutomationClient {
     prompt: string;
     timeoutMs: number;
     freshSession?: boolean;
+    signal?: AbortSignal;
   }): Promise<SendChatResult> {
     let baselineReply = "";
     let latestReply = "";
@@ -750,6 +1065,7 @@ export class BbBrowserClient implements BrowserAutomationClient {
         }),
       );
 
+    throwIfAborted(input.signal);
     await this.transport.evaluate(input.tabId, INJECTED_QWEN_BRIDGE_SOURCE);
     const baselineState = await this.transport.evaluate<PageStateSummary>(
       input.tabId,
@@ -764,6 +1080,7 @@ export class BbBrowserClient implements BrowserAutomationClient {
     }
 
     baselineReply = (baselineState.latestAssistantPreview ?? "").trim();
+    throwIfAborted(input.signal);
     await this.transport.evaluate(input.tabId, QWEN_RESET_COMPLETION_SCRIPT);
     await this.transport.submitPrompt(input.tabId, input.prompt);
 
@@ -776,19 +1093,30 @@ export class BbBrowserClient implements BrowserAutomationClient {
     let previousTurnPreview = "";
 
     while (Date.now() - startedAt < hardTimeoutMs) {
+      throwIfAborted(input.signal);
       const progress = await this.transport.evaluate<{
         pageState: PageStateSummary;
         completionState: {
           observed?: boolean;
           status?: string;
           closed?: boolean;
-          bodyPreview?: string | null;
           parserSummary?: string | null;
-          turn?: {
-            mode: "text";
-            outputText: string;
-            thinkingText?: string;
-          } | null;
+          turn?:
+            | {
+                mode: "text";
+                outputText: string;
+                thinkingText?: string;
+              }
+            | {
+                mode: "native_tool_call";
+                toolCalls: Array<{
+                  name: string;
+                  argumentsJson: string;
+                }>;
+                outputText?: string;
+                thinkingText?: string;
+              }
+            | null;
         };
       }>(input.tabId, QWEN_PROGRESS_SCRIPT);
 
@@ -823,10 +1151,6 @@ export class BbBrowserClient implements BrowserAutomationClient {
         note: [
           typeof progress.completionState?.parserSummary === "string"
             ? `parser=${progress.completionState.parserSummary}`
-            : null,
-          typeof progress.completionState?.bodyPreview === "string" &&
-          progress.completionState.bodyPreview.length > 0
-            ? `body=${previewDebugText(progress.completionState.bodyPreview)}`
             : null,
         ]
           .filter((entry) => entry)
@@ -866,7 +1190,7 @@ export class BbBrowserClient implements BrowserAutomationClient {
       if (
         terminalObserved &&
         streamedTurn?.mode === "native_tool_call" &&
-        streamedTurn.toolCall
+        streamedTurn.toolCalls.length > 0
       ) {
         finalReply = (streamedTurn.outputText ?? "").trim();
         return {
@@ -874,7 +1198,7 @@ export class BbBrowserClient implements BrowserAutomationClient {
           ...(streamedTurn.thinkingText
             ? { thinkingText: streamedTurn.thinkingText }
             : {}),
-          toolCall: streamedTurn.toolCall,
+          toolCalls: streamedTurn.toolCalls,
           ...(finalReply.length > 0 ? { outputText: finalReply } : {}),
           debug: buildAutomationDebug({
             source: "bridge_stream",
@@ -920,7 +1244,7 @@ export class BbBrowserClient implements BrowserAutomationClient {
         break;
       }
 
-      await new Promise((resolve) => setTimeout(resolve, 300));
+      await abortableDelay(300, input.signal);
     }
 
     throw buildFailure("TIMEOUT", "The page did not finish streaming in time");

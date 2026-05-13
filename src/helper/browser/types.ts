@@ -1,6 +1,7 @@
 import type {
   BrowserConnectionStatus,
   ProviderId,
+  ProviderToolCall,
 } from "../../shared/contracts";
 
 export interface PageStateSummary {
@@ -19,16 +20,12 @@ export interface BindResult {
   pageState: PageStateSummary;
 }
 
-export interface ProviderToolCall {
-  name: string;
-  argumentsJson: string;
-}
-
 export interface ProviderToolCallTurn {
   mode: "native_tool_call" | "json_fallback";
-  toolCall: ProviderToolCall;
+  toolCalls: ProviderToolCall[];
   thinkingText?: string;
   outputText?: string;
+  rawOutputText?: string;
   modelLabel?: string;
 }
 
@@ -36,6 +33,7 @@ export interface ProviderTextTurn {
   mode: "text";
   thinkingText?: string;
   outputText: string;
+  rawOutputText?: string;
   modelLabel?: string;
 }
 
@@ -78,7 +76,17 @@ export interface ChatTextResult {
 
 export interface BrowserAutomationClient {
   getConnectionStatus(): Promise<BrowserConnectionStatus>;
-  bindProviderTab?(input: { provider: ProviderId }): Promise<BindResult>;
+  getProviderTabUrl?(input: {
+    provider: ProviderId;
+    tabId: string;
+  }): Promise<string | null>;
+  bindProviderTab?(input: {
+    provider: ProviderId;
+    tabId?: string;
+    openNew?: boolean;
+    openUrl?: string;
+    passive?: boolean;
+  }): Promise<BindResult>;
   bindDeepSeekTab(): Promise<BindResult>;
   resetProvider?(input: { provider: ProviderId; tabId: string }): Promise<void>;
   resetPageBridge(tabId: string): Promise<void>;
@@ -88,6 +96,7 @@ export interface BrowserAutomationClient {
       | {
           provider: ProviderId;
           tabId: string;
+          modelId?: string;
         },
   ): Promise<void>;
   sendChatPrompt(input: {
@@ -96,5 +105,6 @@ export interface BrowserAutomationClient {
     prompt: string;
     timeoutMs: number;
     freshSession?: boolean;
+    signal?: AbortSignal;
   }): Promise<SendChatResult>;
 }

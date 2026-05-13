@@ -31,13 +31,13 @@ describe("chat route", () => {
     await app.inject({
       method: "POST",
       url: "/v1/bind",
-      headers: { authorization: "Bearer test-token" },
+      headers: { authorization: "Bearer test-token", "x-web-providers-session-id": "session-a" },
     });
 
     const response = await app.inject({
       method: "POST",
       url: "/v1/chat",
-      headers: { authorization: "Bearer test-token" },
+      headers: { authorization: "Bearer test-token", "x-web-providers-session-id": "session-a" },
       payload: { prompt: "hello" },
     });
 
@@ -61,7 +61,7 @@ describe("chat route", () => {
     const response = await app.inject({
       method: "POST",
       url: "/v1/chat",
-      headers: { authorization: "Bearer test-token" },
+      headers: { authorization: "Bearer test-token", "x-web-providers-session-id": "session-a" },
       payload: { prompt: "hello" },
     });
 
@@ -114,13 +114,13 @@ describe("chat route", () => {
     await app.inject({
       method: "POST",
       url: "/v1/bind",
-      headers: { authorization: "Bearer test-token" },
+      headers: { authorization: "Bearer test-token", "x-web-providers-session-id": "session-a" },
     });
 
     const firstRequest = app.inject({
       method: "POST",
       url: "/v1/chat",
-      headers: { authorization: "Bearer test-token" },
+      headers: { authorization: "Bearer test-token", "x-web-providers-session-id": "session-a" },
       payload: { prompt: "hello" },
     });
 
@@ -129,7 +129,7 @@ describe("chat route", () => {
     const secondResponse = await app.inject({
       method: "POST",
       url: "/v1/chat",
-      headers: { authorization: "Bearer test-token" },
+      headers: { authorization: "Bearer test-token", "x-web-providers-session-id": "session-a" },
       payload: { prompt: "hello again" },
     });
 

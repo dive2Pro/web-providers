@@ -2,7 +2,11 @@ import { describe, expect, it } from "vitest";
 import { HelperError } from "../../src/helper/errors";
 import {
   BbBrowserClient,
+  extractDeepSeekTextboxRefFromSnapshot,
   extractTabsFromTabList,
+  findOpenedTabFromSnapshots,
+  normalizeBbBrowserEvalScript,
+  resolveBbBrowserInvocation,
   unwrapEvalResult,
 } from "../../src/helper/browser/bb-browser-client";
 
@@ -56,6 +60,86 @@ describe("BbBrowserClient", () => {
     });
   });
 
+  it("extracts the DeepSeek textbox ref from scoped or full snapshots", () => {
+    expect(
+      extractDeepSeekTextboxRefFromSnapshot(
+        '标题: DeepSeek\ntextbox [ref=21] "Message DeepSeek"\nbutton [ref=22]',
+      ),
+    ).toBe("21");
+
+    expect(
+      extractDeepSeekTextboxRefFromSnapshot(
+        "div [ref=0]\ntextbox [ref=9]\nbutton [ref=10]",
+      ),
+    ).toBe("9");
+
+    expect(extractDeepSeekTextboxRefFromSnapshot("div [ref=0]\nbutton [ref=1]")).toBeNull();
+  });
+
+  it("detects a newly opened matching tab or a tab navigated into the provider page", () => {
+    expect(
+      findOpenedTabFromSnapshots(
+        [{ index: 0, id: "tab-blank", url: "about:blank" }],
+        [{ index: 0, id: "tab-blank", url: "https://chat.deepseek.com/" }],
+        (tab) => tab.url.includes("deepseek.com"),
+      ),
+    ).toEqual({
+      index: 0,
+      id: "tab-blank",
+      url: "https://chat.deepseek.com/",
+    });
+
+    expect(
+      findOpenedTabFromSnapshots(
+        [{ index: 0, id: "tab-blank", url: "about:blank" }],
+        [
+          { index: 0, id: "tab-blank", url: "about:blank" },
+          { index: 1, id: "tab-deepseek", url: "https://chat.deepseek.com/" },
+        ],
+        (tab) => tab.url.includes("deepseek.com"),
+      ),
+    ).toEqual({
+      index: 1,
+      id: "tab-deepseek",
+      url: "https://chat.deepseek.com/",
+    });
+  });
+
+  it("resolves the project-local bb-browser cli when the package is installed", () => {
+    expect(
+      resolveBbBrowserInvocation({
+        resolvePackageJson: () => "/tmp/project/node_modules/bb-browser/package.json",
+        loadPackageJson: () => ({
+          bin: {
+            "bb-browser": "dist/cli.js",
+          },
+        }),
+      }),
+    ).toEqual({
+      command: process.execPath,
+      argsPrefix: ["/tmp/project/node_modules/bb-browser/dist/cli.js"],
+    });
+  });
+
+  it("falls back to the global bb-browser command when the local package is unavailable", () => {
+    expect(
+      resolveBbBrowserInvocation({
+        resolvePackageJson: () => {
+          throw new Error("module not found");
+        },
+      }),
+    ).toEqual({
+      command: "bb-browser",
+      argsPrefix: [],
+    });
+  });
+
+  it("flattens multiline eval scripts before sending them to bb-browser", () => {
+    expect(
+      normalizeBbBrowserEvalScript('\n(() => {\n  const value = "x";\n  return value;\n})()\n'),
+    ).toBe('(() => {   const value = "x";   return value; })()');
+  });
+
   it("binds a DeepSeek tab and injects the page bridge", async () => {
     const evaluations: Array<{ tabId: string; script: string }> = [];
 
@@ -69,6 +153,15 @@ describe("BbBrowserClient", () => {
       submitPrompt: async () => undefined,
       evaluate: async <T>(tabId: string, script: string) => {
         evaluations.push({ tabId, script });
+        if (script.includes("getPageState()")) {
+          return {
+            inputReady: true,
+            busy: false,
+            latestAssistantPreview: null,
+            assistantCount: 0,
+            blockingMessage: null,
+          } as T;
+        }
         return undefined as T;
       },
     });
@@ -85,9 +178,10 @@ describe("BbBrowserClient", () => {
         busy: false,
         latestAssistantPreview: null,
         assistantCount: 0,
+        blockingMessage: null,
       },
     });
-    expect(evaluations).toHaveLength(1);
+    expect(evaluations).toHaveLength(2);
     expect(evaluations[0]?.tabId).toBe("tab-1");
   });
 
@@ -104,6 +198,15 @@ describe("BbBrowserClient", () => {
       submitPrompt: async () => undefined,
       evaluate: async <T>(tabId: string, script: string) => {
         evaluations.push({ tabId, script });
+        if (script.includes("getPageState()")) {
+          return {
+            inputReady: true,
+            busy: false,
+            latestAssistantPreview: null,
+            assistantCount: 0,
+            blockingMessage: null,
+          } as T;
+        }
         return undefined as T;
       },
     });
@@ -116,8 +219,92 @@ describe("BbBrowserClient", () => {
       loginState: "logged_in",
       bridgeInjected: true,
     });
-    expect(evaluations).toHaveLength(1);
+    expect(evaluations).toHaveLength(2);
     expect(evaluations[0]?.tabId).toBe("tab-deepseek");
+  });
+
+  it("opens a fresh DeepSeek tab instead of reusing an existing tab with the same url", async () => {
+    const opened: string[] = [];
+
+    const client = new BbBrowserClient({
+      getConnectionStatus: async () => "connected",
+      findTabByUrl: async () => ({
+        id: "tab-existing",
+        url: "https://chat.deepseek.com/a/chat/s/existing-session",
+      }),
+      findDeepSeekTab: async () => ({
+        id: "tab-fallback",
+        url: "https://chat.deepseek.com/",
+      }),
+      openDeepSeek: async (url: string) => {
+        opened.push(url);
+        return {
+          id: "tab-fresh",
+          url,
+        };
+      },
+      submitPrompt: async () => undefined,
+      evaluate: async <T>(_tabId: string, script: string) => {
+        if (script.includes("getPageState()")) {
+          return {
+            inputReady: true,
+            busy: false,
+            latestAssistantPreview: null,
+            assistantCount: 0,
+            blockingMessage: null,
+          } as T;
+        }
+
+        return undefined as T;
+      },
+    });
+
+    const result = await client.bindProviderTab({
+      provider: "deepseek-web",
+      openNew: true,
+      openUrl: "https://chat.deepseek.com/a/chat/s/existing-session",
+    });
+
+    expect(result.tabId).toBe("tab-fresh");
+    expect(opened).toEqual([
+      "https://chat.deepseek.com/a/chat/s/existing-session",
+    ]);
+  });
+
+  it("returns logged_out when the DeepSeek tab is still loading", async () => {
+    const client = new BbBrowserClient({
+      getConnectionStatus: async () => "connected",
+      findDeepSeekTab: async () => ({
+        id: "tab-loading",
+        url: "https://chat.deepseek.com/",
+      }),
+      openDeepSeek: async () => undefined,
+      submitPrompt: async () => undefined,
+      evaluate: async <T>(_tabId: string, script: string) => {
+        if (script.includes("getPageState()")) {
+          return {
+            inputReady: false,
+            busy: false,
+            latestAssistantPreview: null,
+            assistantCount: 0,
+            blockingMessage:
+              "DeepSeek tab is still loading. Wait for the page to finish loading.",
+          } as T;
+        }
+        return undefined as T;
+      },
+    });
+
+    const result = await client.bindDeepSeekTab();
+
+    expect(result).toMatchObject({
+      loginState: "logged_out",
+      pageState: {
+        inputReady: false,
+        blockingMessage:
+          "DeepSeek tab is still loading. Wait for the page to finish loading.",
+      },
+    });
   });
 
   it("binds a Qwen tab through provider dispatch", async () => {
@@ -223,6 +410,106 @@ describe("BbBrowserClient", () => {
     expect(opened).toEqual(["https://chat.deepseek.com"]);
   });
 
+  it("reopens a DeepSeek tab when bridge injection hits a missing page target", async () => {
+    const opened: string[] = [];
+    const evaluations: string[] = [];
+    let currentTabId = "tab-stale";
+
+    const client = new BbBrowserClient({
+      getConnectionStatus: async () => "connected",
+      getTab: async (tabId: string) => ({
+        id: tabId,
+        url: "https://chat.deepseek.com/",
+      }),
+      findDeepSeekTab: async () => ({
+        id: currentTabId,
+        url: "https://chat.deepseek.com/",
+      }),
+      openDeepSeek: async (url: string) => {
+        opened.push(url);
+        currentTabId = "tab-fresh";
+        return {
+          id: currentTabId,
+          url: "https://chat.deepseek.com/",
+        };
+      },
+      submitPrompt: async () => undefined,
+      evaluate: async <T>(tabId: string, script: string) => {
+        evaluations.push(`${tabId}:${script.slice(0, 20)}`);
+        if (tabId === "tab-stale") {
+          throw new Error("No page target found");
+        }
+        return undefined as T;
+      },
+    } as never);
+
+    const result = await client.bindProviderTab({
+      provider: "deepseek-web",
+      tabId: "tab-stale",
+    });
+
+    expect(result.tabId).toBe("tab-fresh");
+    expect(opened).toEqual(["https://chat.deepseek.com"]);
+    expect(evaluations[0]).toContain("tab-stale");
+    expect(evaluations[1]).toContain("tab-fresh");
+  });
+
+  it("does not open a new DeepSeek tab immediately when a remembered tab id is stale", async () => {
+    const opened: string[] = [];
+
+    const client = new BbBrowserClient({
+      getConnectionStatus: async () => "connected",
+      getTab: async () => {
+        throw new HelperError("NOT_BOUND", "No browser tab is available for tab-stale");
+      },
+      findDeepSeekTab: async () => {
+        throw new HelperError("NOT_BOUND", "No logged-in DeepSeek tab is available");
+      },
+      openDeepSeek: async (url: string) => {
+        opened.push(url);
+      },
+      submitPrompt: async () => undefined,
+      evaluate: async <T>() => undefined as T,
+    } as never);
+
+    await expect(
+      client.bindProviderTab({ provider: "deepseek-web", tabId: "tab-stale" }),
+    ).rejects.toEqual(
+      new HelperError("NOT_BOUND", "No browser tab is available for tab-stale"),
+    );
+    expect(opened).toEqual([]);
+  });
+
+  it("does not open a new Qwen tab immediately when a remembered tab id is stale", async () => {
+    const opened: string[] = [];
+
+    const client = new BbBrowserClient({
+      getConnectionStatus: async () => "connected",
+      getTab: async () => {
+        throw new HelperError("NOT_BOUND", "No browser tab is available for tab-stale");
+      },
+      findDeepSeekTab: async () => {
+        throw new HelperError("NOT_BOUND", "No logged-in DeepSeek tab is available");
+      },
+      findQwenTab: async () => {
+        throw new HelperError("NOT_BOUND", "No logged-in Qwen tab is available");
+      },
+      openDeepSeek: async () => undefined,
+      openQwen: async (url: string) => {
+        opened.push(url);
+      },
+      submitPrompt: async () => undefined,
+      evaluate: async <T>() => undefined as T,
+    } as never);
+
+    await expect(
+      client.bindProviderTab({ provider: "qwen-web", tabId: "tab-stale" }),
+    ).rejects.toEqual(
+      new HelperError("NOT_BOUND", "No browser tab is available for tab-stale"),
+    );
+    expect(opened).toEqual([]);
+  });
+
   it("treats expected target navigation during startNewChat as success and reinjects the bridge", async () => {
     const evaluations: Array<{ tabId: string; script: string }> = [];
     let callCount = 0;
@@ -275,6 +562,71 @@ describe("BbBrowserClient", () => {
     ).resolves.toBeUndefined();
     expect(evaluations[0]?.tabId).toBe("tab-qwen");
     expect(evaluations[0]?.script).toContain("New Chat");
+  });
+
+  it("passes the DeepSeek target mode when starting a pro chat", async () => {
+    const evaluations: Array<{ tabId: string; script: string }> = [];
+
+    const client = new BbBrowserClient({
+      getConnectionStatus: async () => "connected",
+      findDeepSeekTab: async () => ({
+        id: "tab-1",
+        url: "https://chat.deepseek.com/",
+      }),
+      openDeepSeek: async () => undefined,
+      submitPrompt: async () => undefined,
+      evaluate: async <T>(tabId: string, script: string) => {
+        evaluations.push({ tabId, script });
+        return { ok: true } as T;
+      },
+    });
+
+    await expect(
+      client.startNewChat({
+        provider: "deepseek-web",
+        tabId: "tab-1",
+        modelId: "deepseek-web-pro",
+      }),
+    ).resolves.toBeUndefined();
+    expect(evaluations[0]?.script).toContain('"targetModelType":"expert"');
+  });
+
+  it("reapplies the DeepSeek target mode after expected new-chat navigation", async () => {
+    const evaluations: Array<{ tabId: string; script: string }> = [];
+    let callCount = 0;
+
+    const client = new BbBrowserClient({
+      getConnectionStatus: async () => "connected",
+      findDeepSeekTab: async () => ({
+        id: "tab-1",
+        url: "https://chat.deepseek.com/",
+      }),
+      openDeepSeek: async () => undefined,
+      submitPrompt: async () => undefined,
+      evaluate: async <T>(tabId: string, script: string) => {
+        evaluations.push({ tabId, script });
+        callCount += 1;
+
+        if (callCount === 1) {
+          throw new Error("Runtime.evaluate: Inspected target navigated or closed");
+        }
+
+        return { ok: true } as T;
+      },
+    });
+
+    await expect(
+      client.startNewChat({
+        provider: "deepseek-web",
+        tabId: "tab-1",
+        modelId: "deepseek-web-pro",
+      }),
+    ).resolves.toBeUndefined();
+
+    expect(evaluations).toHaveLength(3);
+    expect(evaluations[0]?.script).toContain('startNewChat({"targetModelType":"expert"})');
+    expect(evaluations[1]?.script).toContain("__piDeepSeekBridge");
+    expect(evaluations[2]?.script).toContain('setModelType({"targetModelType":"expert"})');
   });
 
   it("translates page timeout responses into HelperError", async () => {
@@ -450,10 +802,12 @@ describe("BbBrowserClient", () => {
                 closed: true,
                 turn: {
                   mode: "native_tool_call",
-                  toolCall: {
-                    name: "read",
-                    argumentsJson: "{\"path\":\"src/app.ts\"}",
-                  },
+                  toolCalls: [
+                    {
+                      name: "read",
+                      argumentsJson: "{\"path\":\"src/app.ts\"}",
+                    },
+                  ],
                   thinkingText: "Inspecting the file request",
                   outputText: "",
                 },
@@ -483,10 +837,12 @@ describe("BbBrowserClient", () => {
     ).resolves.toMatchObject({
       mode: "native_tool_call",
       thinkingText: "Inspecting the file request",
-      toolCall: {
-        name: "read",
-        argumentsJson: "{\"path\":\"src/app.ts\"}",
-      },
+      toolCalls: [
+        {
+          name: "read",
+          argumentsJson: "{\"path\":\"src/app.ts\"}",
+        },
+      ],
       modelLabel: "Qwen Web",
     });
     expect(submitted).toEqual(["read src/app.ts"]);
@@ -1130,10 +1486,12 @@ describe("BbBrowserClient", () => {
               terminalAt: Date.now(),
               turn: {
                 mode: "json_fallback",
-                toolCall: {
-                  name: "read",
-                  argumentsJson: "{\"path\":\"src/app.ts\"}",
-                },
+                toolCalls: [
+                  {
+                    name: "read",
+                    argumentsJson: "{\"path\":\"src/app.ts\"}",
+                  },
+                ],
                 outputText:
                   "{\"type\":\"tool_call\",\"name\":\"read\",\"arguments\":{\"path\":\"src/app.ts\"}}",
               },
@@ -1153,10 +1511,12 @@ describe("BbBrowserClient", () => {
       }),
     ).resolves.toMatchObject({
       mode: "json_fallback",
-      toolCall: {
-        name: "read",
-        argumentsJson: "{\"path\":\"src/app.ts\"}",
-      },
+      toolCalls: [
+        {
+          name: "read",
+          argumentsJson: "{\"path\":\"src/app.ts\"}",
+        },
+      ],
       outputText:
         "{\"type\":\"tool_call\",\"name\":\"read\",\"arguments\":{\"path\":\"src/app.ts\"}}",
       debug: {
@@ -1251,6 +1611,96 @@ describe("BbBrowserClient", () => {
     ).resolves.toMatchObject({
       mode: "text",
       outputText: "new reply",
+      debug: {
+        source: "bridge_stream",
+        freshSession: false,
+      },
+      modelLabel: "DeepSeek Web",
+    });
+  });
+
+  it("preserves raw protocol text from bridge-streamed DeepSeek message envelopes", async () => {
+    let progressPollCount = 0;
+
+    const client = new BbBrowserClient({
+      getConnectionStatus: async () => "connected",
+      findDeepSeekTab: async () => ({
+        id: "tab-1",
+        url: "https://chat.deepseek.com/",
+      }),
+      openDeepSeek: async () => undefined,
+      submitPrompt: async () => {
+        throw new Error("transport.submitPrompt should not be used when the bridge handles submission");
+      },
+      evaluate: async <T>(_tabId: string, script: string) => {
+        if (script.includes("window.__piDeepSeekBridge.startPrompt(")) {
+          return {
+            ok: true,
+            baselineState: {
+              inputReady: true,
+              busy: false,
+              latestAssistantPreview: "old reply",
+              assistantCount: 1,
+            },
+          } as T;
+        }
+
+        if (script.includes("getCompletionState()") && script.includes("getPageState()")) {
+          progressPollCount += 1;
+
+          if (progressPollCount === 1) {
+            return {
+              pageState: {
+                inputReady: true,
+                busy: true,
+                latestAssistantPreview: null,
+                assistantCount: 1,
+              },
+              completionState: {
+                observed: true,
+                status: "streaming",
+                closed: false,
+                terminalAt: null,
+                turn: null,
+              },
+            } as T;
+          }
+
+          return {
+            pageState: {
+              inputReady: true,
+              busy: false,
+              latestAssistantPreview: "new reply",
+              assistantCount: 2,
+            },
+            completionState: {
+              observed: true,
+              status: "finished",
+              closed: true,
+              terminalAt: Date.now(),
+              turn: {
+                mode: "text",
+                outputText: "new reply",
+                rawOutputText: "{\"type\":\"message\",\"content\":\"new reply\"}",
+              },
+            },
+          } as T;
+        }
+
+        return undefined as T;
+      },
+    });
+
+    await expect(
+      client.sendChatPrompt({
+        tabId: "tab-1",
+        prompt: "hello again",
+        timeoutMs: 3000,
+      }),
+    ).resolves.toMatchObject({
+      mode: "text",
+      outputText: "new reply",
+      rawOutputText: "{\"type\":\"message\",\"content\":\"new reply\"}",
       debug: {
         source: "bridge_stream",
         freshSession: false,

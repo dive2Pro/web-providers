@@ -40,21 +40,21 @@ describe("bind and reset", () => {
     const deepseekBind = await app.inject({
       method: "POST",
       url: "/v1/bind",
-      headers: { authorization: "Bearer test-token" },
+      headers: { authorization: "Bearer test-token", "x-web-providers-session-id": "session-a" },
       payload: { provider: "deepseek-web" },
     });
 
     const qwenBind = await app.inject({
       method: "POST",
       url: "/v1/bind",
-      headers: { authorization: "Bearer test-token" },
+      headers: { authorization: "Bearer test-token", "x-web-providers-session-id": "session-a" },
       payload: { provider: "qwen-web" },
     });
 
     const deepseekReset = await app.inject({
       method: "POST",
       url: "/v1/reset",
-      headers: { authorization: "Bearer test-token" },
+      headers: { authorization: "Bearer test-token", "x-web-providers-session-id": "session-a" },
       payload: { provider: "deepseek-web" },
     });
 
@@ -93,7 +93,7 @@ describe("bind and reset", () => {
     const bindResponse = await app.inject({
       method: "POST",
       url: "/v1/bind",
-      headers: { authorization: "Bearer test-token" },
+      headers: { authorization: "Bearer test-token", "x-web-providers-session-id": "session-a" },
     });
 
     expect(bindResponse.statusCode).toBe(200);
@@ -102,7 +102,7 @@ describe("bind and reset", () => {
     const healthResponse = await app.inject({
       method: "GET",
       url: "/v1/health",
-      headers: { authorization: "Bearer test-token" },
+      headers: { authorization: "Bearer test-token", "x-web-providers-session-id": "session-a" },
     });
 
     expect(healthResponse.json()).toMatchObject({
@@ -135,13 +135,13 @@ describe("bind and reset", () => {
     await app.inject({
       method: "POST",
       url: "/v1/bind",
-      headers: { authorization: "Bearer test-token" },
+      headers: { authorization: "Bearer test-token", "x-web-providers-session-id": "session-a" },
     });
 
     const resetResponse = await app.inject({
       method: "POST",
       url: "/v1/reset",
-      headers: { authorization: "Bearer test-token" },
+      headers: { authorization: "Bearer test-token", "x-web-providers-session-id": "session-a" },
     });
 
     expect(resetResponse.statusCode).toBe(200);
@@ -166,13 +166,59 @@ describe("bind and reset", () => {
     const bindResponse = await app.inject({
       method: "POST",
       url: "/v1/bind",
-      headers: { authorization: "Bearer test-token" },
+      headers: { authorization: "Bearer test-token", "x-web-providers-session-id": "session-a" },
     });
 
     expect(bindResponse.statusCode).toBe(409);
     expect(bindResponse.json()).toEqual({
       error: "NOT_BOUND",
       message: "No logged-in DeepSeek tab is available",
+    });
+  });
+
+  it("rejects qwen bind when the opened browser page is not logged in", async () => {
+    const app = buildApp({
+      token: "test-token",
+      browserClient: {
+        getConnectionStatus: async () => "connected",
+        bindProviderTab: async () => ({
+          tabId: "tab-qwen",
+          url: "https://chat.qwen.ai/",
+          loginState: "logged_out",
+          bridgeInjected: true,
+          pageState: {
+            inputReady: false,
+            busy: false,
+            latestAssistantPreview: null,
+            assistantCount: 0,
+            blockingMessage: "Please sign in to Qwen in the browser tab.",
+          },
+        }),
+        resetProvider: async () => undefined,
+      } as never,
+    });
+
+    const bindResponse = await app.inject({
+      method: "POST",
+      url: "/v1/bind",
+      headers: { authorization: "Bearer test-token", "x-web-providers-session-id": "session-a" },
+      payload: { provider: "qwen-web" },
+    });
+
+    const healthResponse = await app.inject({
+      method: "GET",
+      url: "/v1/health",
+      headers: { authorization: "Bearer test-token", "x-web-providers-session-id": "session-a" },
+    });
+
+    expect(bindResponse.statusCode).toBe(409);
+    expect(bindResponse.json()).toEqual({
+      error: "NOT_BOUND",
+      message: "Open Qwen in the browser tab, sign in on that page, then retry.",
+    });
+    expect(healthResponse.json()).toMatchObject({
+      bindState: "unbound",
+      browser: "connected",
     });
   });
 });

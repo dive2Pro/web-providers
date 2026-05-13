@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev:helper": "tsx src/helper/main.ts",
+    "dev": "tsx src/helper/main.ts",
     "test": "vitest run",
     "build": "rm -rf dist && tsc -p tsconfig.json",
     "slides:dev": "slidev slides/web-providers.md",
@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "@sinclair/typebox": "^0.34.41",
+    "bb-browser": "^0.11.6",
     "fastify": "^5.2.1"
   },
   "devDependencies": {

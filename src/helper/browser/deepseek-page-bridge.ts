@@ -1,9 +1,9 @@
 import { HelperError } from "../errors";
 import type {
   ProviderTextTurn,
-  ProviderToolCall,
   ProviderToolCallTurn,
 } from "./types";
+import type { ProviderToolCall } from "../../shared/contracts";
 
 export const DEEPSEEK_HOST_ALLOWLIST = new Set([
   "chat.deepseek.com",
@@ -40,9 +40,25 @@ type JsonEnvelopeDetection =
       content: string;
     }
   | {
-      kind: "tool_call";
-      toolCall: ProviderToolCall;
+      kind: "tool_calls";
+      toolCalls: ProviderToolCall[];
     };
+
+function pushUniqueToolCall(
+  toolCalls: ProviderToolCall[],
+  toolCall: ProviderToolCall,
+) {
+  const key = `${toolCall.name}\u0000${toolCall.argumentsJson}`;
+  if (
+    toolCalls.some(
+      (entry) => `${entry.name}\u0000${entry.argumentsJson}` === key,
+    )
+  ) {
+    return;
+  }
+
+  toolCalls.push(toolCall);
+}
 
 function normalizeToolCallArguments(value: unknown) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
@@ -96,17 +112,19 @@ function normalizeToolCallCandidate(value: unknown): ProviderToolCall | null {
   };
 }
 
-function findToolCallInValue(
+function findToolCallsInValue(
   value: unknown,
   hintKey: string | null = null,
-): ProviderToolCall | null {
+  toolCalls: ProviderToolCall[] = [],
+): ProviderToolCall[] {
   if (!value || typeof value !== "object") {
-    return null;
+    return toolCalls;
   }
 
   const hinted =
     hintKey === "tool_call" ||
     hintKey === "tool_calls" ||
+    hintKey === "calls" ||
     hintKey === "toolCall" ||
     hintKey === "toolCalls" ||
     hintKey === "function_call" ||
@@ -118,52 +136,42 @@ function findToolCallInValue(
       for (const entry of value) {
         const direct = normalizeToolCallCandidate(entry);
         if (direct) {
-          return direct;
+          pushUniqueToolCall(toolCalls, direct);
         }
 
-        const nested = findToolCallInValue(entry);
-        if (nested) {
-          return nested;
-        }
+        findToolCallsInValue(entry, null, toolCalls);
       }
     } else {
       const direct = normalizeToolCallCandidate(value);
       if (direct) {
-        return direct;
+        pushUniqueToolCall(toolCalls, direct);
       }
     }
   }
 
   if (Array.isArray(value)) {
     for (const entry of value) {
-      const nested = findToolCallInValue(entry);
-      if (nested) {
-        return nested;
-      }
+      findToolCallsInValue(entry, null, toolCalls);
     }
 
-    return null;
+    return toolCalls;
   }
 
   for (const [key, nestedValue] of Object.entries(value)) {
-    const nested = findToolCallInValue(nestedValue, key);
-    if (nested) {
-      return nested;
-    }
+    findToolCallsInValue(nestedValue, key, toolCalls);
   }
 
-  return null;
+  return toolCalls;
 }
 
-export function detectNativeToolCall(rawEvents: CompletionRawEvent[]) {
+export function detectNativeToolCalls(rawEvents: CompletionRawEvent[]) {
+  const toolCalls: ProviderToolCall[] = [];
+
   for (const event of rawEvents) {
-    const detected = findToolCallInValue(event.parsed, event.eventType);
-    if (detected) {
-      return detected;
-    }
+    findToolCallsInValue(event.parsed, event.eventType, toolCalls);
   }
 
-  return null;
+  return toolCalls;
 }
 
 function detectJsonEnvelope(text: string): JsonEnvelopeDetection | null {
@@ -193,26 +201,36 @@ function detectJsonEnvelope(text: string): JsonEnvelopeDetection | null {
       };
     }
 
-    if (parsedObject.type === "tool_call" && typeof parsedObject.name === "string") {
-      const name = parsedObject.name.trim();
-      if (name.length === 0) {
-        return null;
-      }
-
-      if (
-        !parsedObject.arguments ||
-        typeof parsedObject.arguments !== "object" ||
-        Array.isArray(parsedObject.arguments)
-      ) {
+    if (parsedObject.type === "tool_call") {
+      const toolCall = normalizeToolCallCandidate(parsedObject);
+      if (!toolCall) {
         return null;
       }
 
       return {
-        kind: "tool_call",
-        toolCall: {
-          name,
-          argumentsJson: JSON.stringify(parsedObject.arguments),
-        },
+        kind: "tool_calls",
+        toolCalls: [toolCall],
+      };
+    }
+
+    if (parsedObject.type === "tool_calls") {
+      const toolCalls = findToolCallsInValue(
+        "tool_calls" in parsedObject
+          ? parsedObject.tool_calls
+          : "toolCalls" in parsedObject
+            ? parsedObject.toolCalls
+            : "calls" in parsedObject
+              ? parsedObject.calls
+            : null,
+        "tool_calls",
+      );
+      if (toolCalls.length === 0) {
+        return null;
+      }
+
+      return {
+        kind: "tool_calls",
+        toolCalls,
       };
     }
 
@@ -224,19 +242,107 @@ function detectJsonEnvelope(text: string): JsonEnvelopeDetection | null {
     return directMatch;
   }
 
+  const fencedMatches: JsonEnvelopeDetection[] = [];
   for (const match of text.matchAll(/```(?:json)?\s*([\s\S]*?)```/gi)) {
-    const fencedMatch = parseCandidate(match[1] ?? "");
-    if (fencedMatch) {
-      return fencedMatch;
+    const parsed = parseCandidate(match[1] ?? "");
+    if (parsed) {
+      fencedMatches.push(parsed);
     }
+  }
+  if (fencedMatches.length > 1) {
+    return null;
+  }
+  if (fencedMatches.length === 1) {
+    return fencedMatches[0] ?? null;
+  }
+
+  function extractEmbeddedObjects(source: string) {
+    const objects: Array<{ json: string; startIndex: number }> = [];
+    let depth = 0;
+    let startIndex = -1;
+    let inString = false;
+    let escaped = false;
+
+    for (let index = 0; index < source.length; index += 1) {
+      const char = source[index];
+
+      if (inString) {
+        if (escaped) {
+          escaped = false;
+          continue;
+        }
+        if (char === "\\") {
+          escaped = true;
+          continue;
+        }
+        if (char === "\"") {
+          inString = false;
+        }
+        continue;
+      }
+
+      if (char === "\"") {
+        inString = true;
+        continue;
+      }
+
+      if (char === "{") {
+        if (depth === 0) {
+          startIndex = index;
+        }
+        depth += 1;
+        continue;
+      }
+
+      if (char === "}") {
+        if (depth === 0) {
+          continue;
+        }
+        depth -= 1;
+        if (depth === 0 && startIndex >= 0) {
+          objects.push({
+            json: source.slice(startIndex, index + 1),
+            startIndex,
+          });
+          startIndex = -1;
+        }
+      }
+    }
+
+    return objects;
+  }
+
+  const embeddedMatches: JsonEnvelopeDetection[] = [];
+  for (const entry of extractEmbeddedObjects(text)) {
+    const prefix = text
+      .slice(Math.max(0, entry.startIndex - 80), entry.startIndex)
+      .toLowerCase();
+    if (
+      prefix.includes("for normal replies use:") ||
+      prefix.includes("for tool calls use:")
+    ) {
+      continue;
+    }
+
+    const parsed = parseCandidate(entry.json);
+    if (parsed) {
+      embeddedMatches.push(parsed);
+    }
+  }
+
+  if (embeddedMatches.length > 1) {
+    return null;
+  }
+  if (embeddedMatches.length === 1) {
+    return embeddedMatches[0] ?? null;
   }
 
   return null;
 }
 
-export function detectJsonFallbackToolCall(text: string) {
+export function detectJsonFallbackToolCalls(text: string) {
   const detection = detectJsonEnvelope(text);
-  return detection?.kind === "tool_call" ? detection.toolCall : null;
+  return detection?.kind === "tool_calls" ? detection.toolCalls : null;
 }
 
 export function classifyCompletionTurn(input: {
@@ -246,21 +352,21 @@ export function classifyCompletionTurn(input: {
 }): CompletionTurn {
   const outputText = input.reply.trim();
   const thinkingText = input.thinking?.trim() ?? "";
-  const nativeToolCall = detectNativeToolCall(input.rawEvents);
-  if (nativeToolCall) {
+  const nativeToolCalls = detectNativeToolCalls(input.rawEvents);
+  if (nativeToolCalls.length > 0) {
     return {
       mode: "native_tool_call",
-      toolCall: nativeToolCall,
+      toolCalls: nativeToolCalls,
       ...(thinkingText.length > 0 ? { thinkingText } : {}),
       ...(outputText.length > 0 ? { outputText } : {}),
     };
   }
 
   const jsonEnvelope = detectJsonEnvelope(outputText);
-  if (jsonEnvelope?.kind === "tool_call") {
+  if (jsonEnvelope?.kind === "tool_calls") {
     return {
       mode: "json_fallback",
-      toolCall: jsonEnvelope.toolCall,
+      toolCalls: jsonEnvelope.toolCalls,
       ...(thinkingText.length > 0 ? { thinkingText } : {}),
       outputText,
     };
@@ -271,6 +377,7 @@ export function classifyCompletionTurn(input: {
       mode: "text",
       ...(thinkingText.length > 0 ? { thinkingText } : {}),
       outputText: jsonEnvelope.content,
+      rawOutputText: outputText,
     };
   }
 
@@ -284,15 +391,16 @@ export function classifyCompletionTurn(input: {
 export const INJECTED_BRIDGE_SOURCE = `
 (() => {
   const KEY = "__piDeepSeekBridge";
-  const VERSION = 12;
+  const VERSION = 15;
   const __name = (target, _value) => target;
-  const detectNativeToolCall = ${detectNativeToolCall.toString()};
+  const detectNativeToolCalls = ${detectNativeToolCalls.toString()};
   const detectJsonEnvelope = ${detectJsonEnvelope.toString()};
-  const detectJsonFallbackToolCall = ${detectJsonFallbackToolCall.toString()};
+  const detectJsonFallbackToolCalls = ${detectJsonFallbackToolCalls.toString()};
   const classifyCompletionTurn = ${classifyCompletionTurn.toString()};
   const normalizeToolCallArguments = ${normalizeToolCallArguments.toString()};
   const normalizeToolCallCandidate = ${normalizeToolCallCandidate.toString()};
-  const findToolCallInValue = ${findToolCallInValue.toString()};
+  const pushUniqueToolCall = ${pushUniqueToolCall.toString()};
+  const findToolCallsInValue = ${findToolCallsInValue.toString()};
   const existing = window[KEY];
   if (
     existing &&
@@ -673,6 +781,42 @@ export const INJECTED_BRIDGE_SOURCE = `
     return document.querySelector("textarea");
   }
 
+  function detectBlockingMessage() {
+    const pageText = (document.body?.innerText || "").trim();
+    const path = (window.location?.pathname || "").toLowerCase();
+    const normalizedText = pageText.toLowerCase();
+
+    if (pageText.includes("One more step before you proceed")) {
+      return "One more step before you proceed...";
+    }
+
+    const signInIndicators = [
+      "sign in",
+      "log in",
+      "continue with google",
+      "continue with apple",
+      "forgot password",
+    ];
+    const authPath =
+      path.includes("login") ||
+      path.includes("signin") ||
+      path.includes("sign-in") ||
+      path.includes("auth");
+    const signInPrompt = signInIndicators.some((indicator) =>
+      normalizedText.includes(indicator),
+    );
+
+    if (authPath || signInPrompt) {
+      return "Please sign in to DeepSeek in the browser tab.";
+    }
+
+    if (document.readyState !== "complete" && !findComposer()) {
+      return "DeepSeek tab is still loading. Wait for the page to finish loading.";
+    }
+
+    return null;
+  }
+
   function findComposerControlsRoot(composer) {
     let node = composer?.parentElement || null;
     while (node) {
@@ -771,6 +915,270 @@ export const INJECTED_BRIDGE_SOURCE = `
         text === "新建对话"
       );
     }) || null;
+  }
+
+  function getNodeLabel(node) {
+    const parts = [];
+    const textContent =
+      node && typeof node.textContent === "string" ? node.textContent : "";
+    if (textContent.length > 0) {
+      parts.push(textContent);
+    }
+    if (typeof node?.getAttribute === "function") {
+      const ariaLabel = node.getAttribute("aria-label");
+      const title = node.getAttribute("title");
+      const dataTestId = node.getAttribute("data-testid");
+      if (typeof ariaLabel === "string" && ariaLabel.length > 0) {
+        parts.push(ariaLabel);
+      }
+      if (typeof title === "string" && title.length > 0) {
+        parts.push(title);
+      }
+      if (typeof dataTestId === "string" && dataTestId.length > 0) {
+        parts.push(dataTestId);
+      }
+    }
+
+    return parts.join(" ").trim().toLowerCase();
+  }
+
+  function isClickableNodeDisabled(node) {
+    if (!node) {
+      return true;
+    }
+
+    const className = (node.className || "").toString().toLowerCase();
+    return (
+      node.getAttribute?.("aria-disabled") === "true" ||
+      node.getAttribute?.("disabled") === "true" ||
+      node.disabled === true ||
+      className.includes("disabled")
+    );
+  }
+
+  function isModeNodeSelected(node) {
+    if (!node || typeof node.getAttribute !== "function") {
+      return false;
+    }
+
+    const className = (node.className || "").toString().toLowerCase();
+    return (
+      node.getAttribute("aria-checked") === "true" ||
+      node.getAttribute("aria-pressed") === "true" ||
+      node.getAttribute("aria-selected") === "true" ||
+      node.getAttribute("aria-current") === "true" ||
+      node.checked === true ||
+      node.getAttribute("data-state") === "active" ||
+      className.includes("active") ||
+      className.includes("selected") ||
+      className.includes("current")
+    );
+  }
+
+  function matchesDeepSeekModeLabel(node, targetModelType) {
+    const label = getNodeLabel(node);
+    if (label.length === 0) {
+      return false;
+    }
+
+    if (targetModelType === "expert") {
+      return (
+        label.includes("expert") ||
+        label.includes("专家") ||
+        label.includes("pro") ||
+        label.includes("deepthink") ||
+        label.includes("深度思考")
+      );
+    }
+
+    return (
+      label.includes("flash") ||
+      label.includes("instant") ||
+      label.includes("default") ||
+      label.includes("快速模式") ||
+      label.includes("普通模式") ||
+      label.includes("标准") ||
+      label.includes("默认")
+    );
+  }
+
+  function isDeepSeekConversationPath(pathname) {
+    return ((pathname || "").toLowerCase()).startsWith("/a/chat/s/");
+  }
+
+  function getModeControlNodes() {
+    return Array.from(
+      document.querySelectorAll(
+        "button, a, div[role='button'], [role='radio'], input[type='radio']"
+      )
+    );
+  }
+
+  function isRadioModeNode(node) {
+    if (!node || typeof node.getAttribute !== "function") {
+      return false;
+    }
+
+    return node.getAttribute("role") === "radio" || node.tagName === "INPUT";
+  }
+
+  function groupSiblingModeNodes(nodes) {
+    const groups = [];
+    const groupIndexes = new Map();
+
+    for (const node of nodes) {
+      const container = node.parentElement || node;
+      const existingIndex = groupIndexes.get(container);
+      if (typeof existingIndex === "number") {
+        groups[existingIndex].push(node);
+        continue;
+      }
+
+      groupIndexes.set(container, groups.length);
+      groups.push([node]);
+    }
+
+    return groups;
+  }
+
+  function findRadioModeButton(targetModelType) {
+    const radioNodes = getModeControlNodes().filter((node) =>
+      isRadioModeNode(node) && !isClickableNodeDisabled(node)
+    );
+    if (radioNodes.length < 2) {
+      return null;
+    }
+
+    const radioGroups = groupSiblingModeNodes(radioNodes)
+      .filter((group) => group.length >= 2);
+    if (radioGroups.length === 0) {
+      return null;
+    }
+
+    const composer = findComposer();
+    const preferredGroup =
+      radioGroups.find((group) => {
+        const container = group[0]?.parentElement;
+        return (
+          composer &&
+          container &&
+          typeof container.compareDocumentPosition === "function" &&
+          (container.compareDocumentPosition(composer) & 4) === 4
+        );
+      }) ||
+      radioGroups[0] ||
+      null;
+    if (!preferredGroup) {
+      return null;
+    }
+
+    return targetModelType === "expert"
+      ? preferredGroup[1] || preferredGroup.at(-1) || null
+      : preferredGroup[0] || null;
+  }
+
+  function findModeButton(targetModelType) {
+    const structuralMatch = findRadioModeButton(targetModelType);
+    if (structuralMatch) {
+      return structuralMatch;
+    }
+
+    const candidates = getModeControlNodes().filter((node) =>
+      matchesDeepSeekModeLabel(node, targetModelType) &&
+      !isClickableNodeDisabled(node)
+    );
+
+    if (candidates.length === 0) {
+      return null;
+    }
+
+    return candidates.find((node) => isModeNodeSelected(node)) || candidates[0] || null;
+  }
+
+  async function ensureModelType(targetModelType) {
+    if (targetModelType !== "expert" && targetModelType !== "default") {
+      return { ok: true };
+    }
+
+    const timeoutMs = 4_000;
+    const pollMs = 100;
+    const startedAt = Date.now();
+    let sawModeButton = false;
+
+    while (Date.now() - startedAt <= timeoutMs) {
+      const modeButton = findModeButton(targetModelType);
+      if (!(modeButton instanceof HTMLElement)) {
+        await sleep(pollMs);
+        continue;
+      }
+
+      sawModeButton = true;
+      if (isModeNodeSelected(modeButton)) {
+        return { ok: true };
+      }
+
+      modeButton.click();
+      await sleep(250);
+
+      const updatedModeButton = findModeButton(targetModelType);
+      if (
+        updatedModeButton instanceof HTMLElement &&
+        isModeNodeSelected(updatedModeButton)
+      ) {
+        return { ok: true };
+      }
+
+      await sleep(pollMs);
+    }
+
+    return {
+      ok: false,
+      error: "AUTOMATION_DESYNC",
+      message: sawModeButton
+        ? "DeepSeek " + targetModelType + " mode switch did not stick"
+        : "DeepSeek " + targetModelType + " mode control not found",
+    };
+  }
+
+  async function waitForFreshChat(previousUrl) {
+    const timeoutMs = 4_000;
+    const pollMs = 100;
+    const previousPathname = (() => {
+      try {
+        return new URL(previousUrl, window.location.origin).pathname;
+      } catch {
+        return "";
+      }
+    })();
+    const shouldRequireRouteChange = isDeepSeekConversationPath(previousPathname);
+    const startedAt = Date.now();
+
+    while (Date.now() - startedAt <= timeoutMs) {
+      const pageState = window[KEY].getPageState();
+      if (pageState.blockingMessage) {
+        return {
+          ok: false,
+          error: "PAGE_UNAVAILABLE",
+          message: pageState.blockingMessage,
+        };
+      }
+
+      const currentPathname = (window.location?.pathname || "").toLowerCase();
+      const routeChanged =
+        !shouldRequireRouteChange || currentPathname !== previousPathname.toLowerCase();
+
+      if (pageState.inputReady && !pageState.busy && routeChanged) {
+        return { ok: true };
+      }
+
+      await sleep(pollMs);
+    }
+
+    return {
+      ok: false,
+      error: "AUTOMATION_DESYNC",
+      message: "DeepSeek new chat did not finish resetting the page",
+    };
   }
 
   function setComposerValue(composer, nextValue) {
@@ -960,13 +1368,10 @@ export const INJECTED_BRIDGE_SOURCE = `
     getPageState() {
       const composer = findComposer();
       const latestAssistant = latestAssistantNode();
-      const pageText = (document.body?.innerText || "").trim();
-      const blockingMessage = pageText.includes("One more step before you proceed")
-        ? "One more step before you proceed..."
-        : null;
+      const blockingMessage = detectBlockingMessage();
       const domReply = latestAssistant ? (latestAssistant.textContent || "").trim() || null : null;
       return {
-        inputReady: Boolean(composer),
+        inputReady: Boolean(!blockingMessage && composer),
         busy: Boolean(findStopButton()) || completionState.status === "streaming",
         latestAssistantPreview: domReply,
         assistantCount:
@@ -1046,7 +1451,8 @@ export const INJECTED_BRIDGE_SOURCE = `
         baselineState,
       };
     },
-    async startNewChat() {
+    async startNewChat(input = {}) {
+      const previousUrl = window.location?.href || "";
       const newChatButton = findNewChatButton();
 
       if (newChatButton instanceof HTMLElement) {
@@ -1057,8 +1463,20 @@ export const INJECTED_BRIDGE_SOURCE = `
         await sleep(1_500);
       }
 
+      const readyResult = await waitForFreshChat(previousUrl);
+      if (!readyResult.ok) {
+        return readyResult;
+      }
+
       resetCompletionState();
+      const modeResult = await ensureModelType(input.targetModelType);
+      if (!modeResult.ok) {
+        return modeResult;
+      }
       return { ok: true };
+    },
+    async setModelType(input = {}) {
+      return ensureModelType(input.targetModelType);
     },
     async sendPrompt({ prompt, timeoutMs }) {
       const started = await window[KEY].startPrompt({ prompt });

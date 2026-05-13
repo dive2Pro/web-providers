@@ -1,11 +1,26 @@
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
+import { createServer } from "node:net";
 import { fileURLToPath } from "node:url";
 import type {
   ProviderChatRequest,
   ProviderChatResponse,
 } from "../shared/contracts";
+import {
+  CODE_AGENT_SYSTEM_PROMPT,
+  JSON_PROTOCOL_MINIMAL_EXPLAIN_RULE,
+  JSON_PROTOCOL_MINIMAL_MARKDOWN_RULE,
+  JSON_PROTOCOL_MINIMAL_REPEAT_RULE,
+  JSON_PROTOCOL_PROMPT_PREFIXES,
+  JSON_PROTOCOL_REPAIR_ACTION_RULE,
+  JSON_PROTOCOL_REPAIR_HEADER,
+  JSON_PROTOCOL_REPAIR_REQUIREMENT,
+  RESPONSE_MESSAGE_EXAMPLE,
+  RESPONSE_TOOL_CALLS_EXAMPLE,
+  RESPONSE_TOOL_CALL_EXAMPLE,
+} from "../shared/code-agent-prompt";
+import { logServiceStarted } from "../shared/startup-log";
 
 interface ManagedHelper {
   baseUrl: string;
@@ -66,8 +81,22 @@ type ToolResultMessage = {
 type ToolDefinition = {
   name: string;
   description?: string;
+  parameters?: Record<string, unknown>;
   inputSchema?: Record<string, unknown>;
 };
+
+function sanitizeTools(tools: ToolDefinition[] | undefined) {
+  return (tools ?? []).filter(
+    (tool): tool is ToolDefinition =>
+      Boolean(tool) &&
+      typeof tool.name === "string" &&
+      tool.name.trim().length > 0,
+  );
+}
+
+function getToolSchema(tool: ToolDefinition) {
+  return tool.parameters ?? tool.inputSchema ?? {};
+}
 
 type ProtocolEnvelope =
   | {
@@ -78,6 +107,13 @@ type ProtocolEnvelope =
       type: "tool_call";
       name: string;
       arguments: Record<string, unknown>;
+    }
+  | {
+      type: "tool_calls";
+      calls: Array<{
+        name: string;
+        arguments: Record<string, unknown>;
+      }>;
     };
 
 interface ProviderContext {
@@ -278,6 +314,7 @@ interface PiExtensionApi {
 
 export interface ExtensionDeps {
   spawnHelper(input: { token: string; port: number }): Promise<ManagedHelper>;
+  pickPort?(): Promise<number>;
   helperClient: {
     post<T>(
       baseUrl: string,
@@ -285,6 +322,7 @@ export interface ExtensionDeps {
       body: Record<string, unknown>,
       token: string,
       signal?: AbortSignal,
+      options?: { headers?: Record<string, string> },
     ): Promise<T>;
   };
   randomToken(): string;
@@ -292,7 +330,6 @@ export interface ExtensionDeps {
 
 const projectRoot = fileURLToPath(new URL("../../", import.meta.url));
 const PROVIDER_BASE_URL = "http://127.0.0.1";
-const FIXED_HELPER_PORT = Number(process.env.PI_DEEPSEEK_HELPER_PORT ?? 4318);
 const DEBUG_PROVIDER_REQUESTS = process.env.PI_DEEPSEEK_DEBUG === "1";
 const PROVIDER_DESCRIPTORS = [
   {
@@ -310,27 +347,21 @@ const PROVIDER_DESCRIPTORS = [
     modelName: "Qwen Web Chat",
   },
 ] as const;
-const RESPONSE_ENVELOPE_INSTRUCTION = [
-  "Your entire assistant reply must be exactly one JSON object.",
-  'For normal replies use: {"type":"message","content":"your response text"}',
-  'For tool calls use: {"type":"tool_call","name":"tool_name","arguments":{"key":"value"}}',
-  "Do not add any prose before or after it.",
-  "Do not wrap it in markdown or code fences.",
-].join(" ");
-
 function buildToolCatalogPrompt(tools: ToolDefinition[] | undefined) {
-  if (!tools || tools.length === 0) {
+  const safeTools = sanitizeTools(tools);
+
+  if (safeTools.length === 0) {
     return "";
   }
 
   return [
-    "When using JSON fallback tool calls, you must use one of these exact tool definitions.",
-    "Use the exact tool name and argument keys from the schema.",
-    ...tools.map((tool) =>
+    "当你通过 JSON 回退协议调用工具时，只能使用下面这些精确定义。",
+    "必须严格使用 schema 中给出的工具名与参数键，参数值必须满足对应的 JSON schema。",
+    ...safeTools.map((tool) =>
       [
-        `Tool name: ${tool.name}`,
-        tool.description ? `Description: ${tool.description}` : "",
-        `Arguments JSON schema: ${JSON.stringify(tool.inputSchema ?? {})}`,
+        `工具名：${tool.name}`,
+        tool.description ? `描述：${tool.description}` : "",
+        `参数 JSON Schema：${JSON.stringify(getToolSchema(tool))}`,
       ]
         .filter((part) => part.length > 0)
         .join("\n"),
@@ -376,6 +407,52 @@ function parseStrictProtocolEnvelope(text: string): {
       };
     }
 
+    if (candidate.type === "tool_calls") {
+      if (
+        Object.keys(candidate).length !== 2 ||
+        !Array.isArray(candidate.calls) ||
+        candidate.calls.length === 0
+      ) {
+        return null;
+      }
+
+      const calls = candidate.calls
+        .map((entry) => {
+          if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+            return null;
+          }
+
+          const call = entry as Record<string, unknown>;
+          if (
+            typeof call.name !== "string" ||
+            !call.arguments ||
+            typeof call.arguments !== "object" ||
+            Array.isArray(call.arguments)
+          ) {
+            return null;
+          }
+
+          return {
+            name: call.name,
+            arguments: call.arguments as Record<string, unknown>,
+          };
+        })
+        .filter(
+          (
+            entry,
+          ): entry is { name: string; arguments: Record<string, unknown> } => entry !== null,
+        );
+
+      if (calls.length !== candidate.calls.length) {
+        return null;
+      }
+
+      return {
+        type: "tool_calls",
+        calls,
+      };
+    }
+
     return null;
   }
 
@@ -390,6 +467,13 @@ function parseStrictProtocolEnvelope(text: string): {
     if (
       envelope.type === "tool_call" &&
       envelope.name.trim() === "tool_name"
+    ) {
+      return true;
+    }
+
+    if (
+      envelope.type === "tool_calls" &&
+      envelope.calls.every((call) => call.name.trim() === "tool_name")
     ) {
       return true;
     }
@@ -456,16 +540,13 @@ function parseStrictProtocolEnvelope(text: string): {
     return objects;
   }
 
-  function findEmbeddedEnvelope(source: string) {
+  function findEmbeddedEnvelopes(source: string) {
     return extractEmbeddedObjects(source)
       .map((entry) => {
         const prefix = source
           .slice(Math.max(0, entry.startIndex - 80), entry.startIndex)
           .toLowerCase();
-        if (
-          prefix.includes("for normal replies use:") ||
-          prefix.includes("for tool calls use:")
-        ) {
+        if (JSON_PROTOCOL_PROMPT_PREFIXES.some((marker) => prefix.includes(marker))) {
           return null;
         }
 
@@ -484,12 +565,62 @@ function parseStrictProtocolEnvelope(text: string): {
         }
       })
       .filter((entry): entry is ProtocolEnvelope => entry !== null)
-      .at(-1);
+  }
+
+  function selectEmbeddedEnvelope(source: string): {
+    envelope: ProtocolEnvelope | null;
+    error: string | null;
+  } {
+    const embedded = findEmbeddedEnvelopes(source);
+
+    if (embedded.length > 1) {
+      const embeddedToolCalls = embedded.flatMap((entry) => {
+        if (entry.type === "tool_call") {
+          return [
+            {
+              name: entry.name,
+              arguments: entry.arguments,
+            },
+          ];
+        }
+
+        if (entry.type === "tool_calls") {
+          return entry.calls;
+        }
+
+        return [];
+      });
+
+      if (
+        embeddedToolCalls.length > 0 &&
+        embedded.every(
+          (entry) => entry.type === "tool_call" || entry.type === "tool_calls",
+        )
+      ) {
+        return {
+          envelope: {
+            type: "tool_calls",
+            calls: embeddedToolCalls,
+          },
+          error: null,
+        };
+      }
+
+      return {
+        envelope: null,
+        error: "Multiple protocol envelopes were found. Return exactly one JSON object.",
+      };
+    }
+
+    return {
+      envelope: embedded[0] ?? null,
+      error: null,
+    };
   }
 
   const trimmed = text.trim();
   const protocolLike =
-    /"type"\s*:\s*"(message|tool_call)"/.test(text) || trimmed.startsWith("{");
+    /"type"\s*:\s*"(message|tool_call|tool_calls)"/.test(text) || trimmed.startsWith("{");
 
   if (trimmed.length === 0) {
     return {
@@ -503,10 +634,17 @@ function parseStrictProtocolEnvelope(text: string): {
   try {
     parsed = JSON.parse(trimmed);
   } catch {
-    const embeddedEnvelope = findEmbeddedEnvelope(text);
-    if (embeddedEnvelope) {
+    const embeddedResult = selectEmbeddedEnvelope(text);
+    if (embeddedResult.error) {
       return {
-        envelope: embeddedEnvelope,
+        envelope: null,
+        protocolLike: true,
+        error: embeddedResult.error,
+      };
+    }
+    if (embeddedResult.envelope) {
+      return {
+        envelope: embeddedResult.envelope,
         protocolLike: true,
         error: null,
       };
@@ -536,10 +674,17 @@ function parseStrictProtocolEnvelope(text: string): {
     };
   }
 
-  const embeddedEnvelope = findEmbeddedEnvelope(text);
-  if (embeddedEnvelope) {
+  const embeddedResult = selectEmbeddedEnvelope(text);
+  if (embeddedResult.error) {
     return {
-      envelope: embeddedEnvelope,
+      envelope: null,
+      protocolLike: true,
+      error: embeddedResult.error,
+    };
+  }
+  if (embeddedResult.envelope) {
+    return {
+      envelope: embeddedResult.envelope,
       protocolLike: true,
       error: null,
     };
@@ -562,10 +707,19 @@ function parseStrictProtocolEnvelope(text: string): {
     };
   }
 
+  if (candidate.type === "tool_calls") {
+    return {
+      envelope: null,
+      protocolLike: true,
+      error:
+        'Multi-tool replies must match {"type":"tool_calls","calls":[{"name":"tool_name","arguments":{...}}]} exactly.',
+    };
+  }
+
   return {
     envelope: null,
     protocolLike,
-    error: 'Reply "type" must be either "message" or "tool_call".',
+    error: 'Reply "type" must be "message", "tool_call", or "tool_calls".',
   };
 }
 
@@ -585,17 +739,28 @@ function normalizeProtocolToolCallResponse(
   response: Extract<ProviderChatResponse, { mode: "text" }>,
 ): ProviderChatResponse {
   const parsed = parseStrictProtocolEnvelope(response.outputText);
-  if (parsed.envelope?.type !== "tool_call") {
+  if (
+    parsed.envelope?.type !== "tool_call" &&
+    parsed.envelope?.type !== "tool_calls"
+  ) {
     return response;
   }
 
   return {
     mode: "json_fallback",
-    toolCall: {
-      name: parsed.envelope.name,
-      argumentsJson: JSON.stringify(parsed.envelope.arguments),
-    },
-    finishReason: response.finishReason,
+    toolCalls:
+      parsed.envelope.type === "tool_call"
+        ? [
+            {
+              name: parsed.envelope.name,
+              argumentsJson: JSON.stringify(parsed.envelope.arguments),
+            },
+          ]
+        : parsed.envelope.calls.map((toolCall) => ({
+            name: toolCall.name,
+            argumentsJson: JSON.stringify(toolCall.arguments),
+          })),
+    finishReason: response.finishReason === "error" ? "error" : "stop",
     modelLabel: response.modelLabel,
     ...(typeof response.thinkingText === "string"
       ? { thinkingText: response.thinkingText }
@@ -709,19 +874,35 @@ function validateToolCallAgainstTools(
   },
   tools: ToolDefinition[] | undefined,
 ): string[] {
-  if (!tools || tools.length === 0) {
+  const safeTools = sanitizeTools(tools);
+
+  if (safeTools.length === 0) {
     return [];
   }
 
-  const matchedTool = tools.find((tool) => tool.name === toolCall.name);
+  const matchedTool = safeTools.find((tool) => tool.name === toolCall.name);
   if (!matchedTool) {
     return [`Tool "${toolCall.name}" is not in the allowed tool list.`];
   }
 
   return validateValueAgainstSchema(
     toolCall.arguments,
-    matchedTool.inputSchema,
+    getToolSchema(matchedTool),
     "arguments",
+  );
+}
+
+function validateToolCallsAgainstTools(
+  toolCalls: Array<{
+    name: string;
+    arguments: Record<string, unknown>;
+  }>,
+  tools: ToolDefinition[] | undefined,
+) {
+  return toolCalls.flatMap((toolCall, index) =>
+    validateToolCallAgainstTools(toolCall, tools).map(
+      (issue) => `toolCalls[${index}]: ${issue}`,
+    ),
   );
 }
 
@@ -731,40 +912,42 @@ function buildProtocolRepairPrompt(input: {
   tools: ToolDefinition[] | undefined;
 }) {
   return [
-    "The previous reply violated the required JSON response protocol.",
-    "Return exactly one JSON object and nothing else.",
-    'For normal replies use: {"type":"message","content":"your response text"}',
-    'For tool calls use: {"type":"tool_call","name":"tool_name","arguments":{"key":"value"}}',
-    "Problems to fix:",
+    JSON_PROTOCOL_REPAIR_HEADER,
+    JSON_PROTOCOL_REPAIR_REQUIREMENT,
+    JSON_PROTOCOL_REPAIR_ACTION_RULE,
+    `普通回复使用：${RESPONSE_MESSAGE_EXAMPLE}`,
+    `工具调用使用：${RESPONSE_TOOL_CALL_EXAMPLE}`,
+    `多工具并行调用使用：${RESPONSE_TOOL_CALLS_EXAMPLE}`,
+    "需要修复的问题：",
     ...input.issues.map((issue) => `- ${issue}`),
-    "Previous invalid reply:",
+    "上一条无效回复：",
     input.rawOutput,
-    ...(input.tools && input.tools.length > 0
-      ? ["Allowed tool definitions:", buildToolCatalogPrompt(input.tools)]
+    ...(sanitizeTools(input.tools).length > 0
+      ? ["允许使用的工具定义：", buildToolCatalogPrompt(input.tools)]
       : []),
   ].join("\n");
 }
 
 function buildMinimalProtocolRepairPrompt(tools: ToolDefinition[] | undefined) {
   return [
-    "Return exactly one JSON object and nothing else.",
-    'For normal replies use: {"type":"message","content":"your response text"}',
-    'For tool calls use: {"type":"tool_call","name":"tool_name","arguments":{"key":"value"}}',
-    "Do not repeat these instructions.",
-    "Do not explain your answer.",
-    "Do not wrap the JSON in markdown.",
-    ...(tools && tools.length > 0
+    JSON_PROTOCOL_REPAIR_REQUIREMENT,
+    JSON_PROTOCOL_REPAIR_ACTION_RULE,
+    `普通回复使用：${RESPONSE_MESSAGE_EXAMPLE}`,
+    `工具调用使用：${RESPONSE_TOOL_CALL_EXAMPLE}`,
+    `多工具并行调用使用：${RESPONSE_TOOL_CALLS_EXAMPLE}`,
+    JSON_PROTOCOL_MINIMAL_REPEAT_RULE,
+    JSON_PROTOCOL_MINIMAL_EXPLAIN_RULE,
+    JSON_PROTOCOL_MINIMAL_MARKDOWN_RULE,
+    ...(sanitizeTools(tools).length > 0
       ? [
-          `Allowed tool names: ${tools.map((tool) => tool.name).join(", ")}`,
+          `允许使用的工具名：${sanitizeTools(tools).map((tool) => tool.name).join(", ")}`,
         ]
       : []),
   ].join("\n");
 }
 
 function looksLikeProtocolRepairEcho(text: string) {
-  return text.includes(
-    "The previous reply violated the required JSON response protocol.",
-  );
+  return text.includes(JSON_PROTOCOL_REPAIR_HEADER);
 }
 
 function recoverPlainTextFromProtocolFailure(text: string) {
@@ -774,25 +957,28 @@ function recoverPlainTextFromProtocolFailure(text: string) {
   }
 
   const boilerplatePatterns = [
-    /^The previous reply violated the required JSON response protocol\.\n?/g,
-    /^Return exactly one JSON object and nothing else\.\n?/g,
-    /^For normal replies use: .*?\n?/gm,
-    /^For tool calls use: .*?\n?/gm,
+    /^上一条回复违反了要求的 JSON 响应协议。\n?/g,
+    /^你现在必须只返回一个 JSON 对象，且不能输出任何其他文本。\n?/g,
+    /^每次回复只能返回一种最终动作：message、tool_call 或 tool_calls。\n?/g,
+    /^普通回复使用：.*?\n?/gm,
+    /^工具调用使用：.*?\n?/gm,
+    /^多工具并行调用使用：.*?\n?/gm,
     /^\{"type":"message","content":"your response text"\}\n?/gm,
     /^\{"type":"tool_call","name":"tool_name","arguments":\{"key":"value"\}\}\n?/gm,
-    /^Problems to fix:\n?/gm,
+    /^\{"type":"tool_calls","calls":\[.*\]\}\n?/gm,
+    /^需要修复的问题：\n?/gm,
     /^- .*?\n?/gm,
-    /^Previous invalid reply:\n?/gm,
-    /^Allowed tool definitions:\n?/gm,
-    /^When using JSON fallback tool calls, you must use one of these exact tool definitions\.\n?/gm,
-    /^Use the exact tool name and argument keys from the schema\.\n?/gm,
-    /^Tool name: .*?\n?/gm,
-    /^Description: .*?\n?/gm,
-    /^Arguments JSON schema: .*?\n?/gm,
-    /^Do not repeat these instructions\.\n?/gm,
-    /^Do not explain your answer\.\n?/gm,
-    /^Do not wrap the JSON in markdown\.\n?/gm,
-    /^Allowed tool names: .*?\n?/gm,
+    /^上一条无效回复：\n?/gm,
+    /^允许使用的工具定义：\n?/gm,
+    /^当你通过 JSON 回退协议调用工具时，只能使用下面这些精确定义。\n?/gm,
+    /^必须严格使用 schema 中给出的工具名与参数键，参数值必须满足对应的 JSON schema。\n?/gm,
+    /^工具名：.*?\n?/gm,
+    /^描述：.*?\n?/gm,
+    /^参数 JSON Schema：.*?\n?/gm,
+    /^不要重复这些指令。\n?/gm,
+    /^不要解释你的答案。\n?/gm,
+    /^不要用 Markdown 或代码块包裹 JSON。\n?/gm,
+    /^允许使用的工具名：.*?\n?/gm,
   ];
 
   let recovered = normalized;
@@ -820,18 +1006,28 @@ function shouldRepairProviderResponse(
 } {
   if (response.mode !== "text") {
     try {
-      const toolCall = parseValidatedToolCall(response.toolCall);
-      const issues = validateToolCallAgainstTools(toolCall, tools);
+      const toolCalls = parseValidatedToolCalls(response.toolCalls);
+      const issues = validateToolCallsAgainstTools(toolCalls, tools);
       return {
         shouldRepair: issues.length > 0,
         issues,
         rawOutput:
           response.outputText ??
-          JSON.stringify({
-            type: "tool_call",
-            name: response.toolCall.name,
-            arguments: toolCall.arguments,
-          }),
+          JSON.stringify(
+            toolCalls.length === 1
+              ? {
+                  type: "tool_call",
+                  name: toolCalls[0]?.name,
+                  arguments: toolCalls[0]?.arguments,
+                }
+              : {
+                  type: "tool_calls",
+                  calls: toolCalls.map((toolCall) => ({
+                    name: toolCall.name,
+                    arguments: toolCall.arguments,
+                  })),
+                },
+          ),
       };
     } catch (error) {
       return {
@@ -964,13 +1160,13 @@ function pushProviderMessage(
 function buildSessionInitPrompt(context: ProviderContext) {
   const parts: string[] = [];
 
+  parts.push(CODE_AGENT_SYSTEM_PROMPT);
+
   if (context.systemPrompt?.trim()) {
     parts.push(context.systemPrompt.trim());
   }
 
-  parts.push(RESPONSE_ENVELOPE_INSTRUCTION);
-
-  if ((context.tools?.length ?? 0) > 0) {
+  if (sanitizeTools(context.tools).length > 0) {
     parts.push(buildToolCatalogPrompt(context.tools));
   }
 
@@ -983,19 +1179,8 @@ function buildSessionInitPrompt(context: ProviderContext) {
     return undefined;
   }
 
-  const firstTimestamp = [...context.messages]
-    .map((message) => message.timestamp)
-    .filter((timestamp) => Number.isFinite(timestamp))
-    .sort((left, right) => left - right)[0];
-  const sessionKey =
-    typeof firstTimestamp === "number"
-      ? `session-${firstTimestamp}`
-      : `session-${createHash("sha256").update(prompt).digest("hex")}`;
-
   return {
     prompt,
-    fingerprint: createHash("sha256").update(prompt).digest("hex"),
-    sessionKey,
   };
 }
 
@@ -1051,6 +1236,19 @@ function parseValidatedToolCall(input: {
   };
 }
 
+function parseValidatedToolCalls(
+  toolCalls: Array<{
+    name: string;
+    argumentsJson: string;
+  }>,
+) {
+  if (!Array.isArray(toolCalls) || toolCalls.length === 0) {
+    throw new Error("Invalid DeepSeek tool call payload");
+  }
+
+  return toolCalls.map((toolCall) => parseValidatedToolCall(toolCall));
+}
+
 function toErrorMessage(error: unknown) {
   if (error instanceof Error) {
     return error.message;
@@ -1082,12 +1280,14 @@ async function postJson<T>(
   body: Record<string, unknown>,
   token: string,
   signal?: AbortSignal,
+  options?: { headers?: Record<string, string> },
 ) {
   const response = await fetch(`${baseUrl}${path}`, {
     method: "POST",
     headers: {
       authorization: `Bearer ${token}`,
       "content-type": "application/json",
+      ...(options?.headers ?? {}),
     },
     body: JSON.stringify(body),
     signal,
@@ -1129,7 +1329,7 @@ async function spawnDefaultHelper(input: {
   token: string;
   port: number;
 }): Promise<ManagedHelper> {
-  const child = spawn("npm", ["run", "dev:helper"], {
+  const child = spawn("npm", ["run", "dev"], {
     cwd: projectRoot,
     env: {
       ...process.env,
@@ -1172,9 +1372,50 @@ async function spawnDefaultHelper(input: {
   };
 }
 
+function getConfiguredHelperPort() {
+  const value = process.env.PI_DEEPSEEK_HELPER_PORT;
+  if (!value) {
+    return null;
+  }
+
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+}
+
+async function pickDefaultHelperPort() {
+  const configuredPort = getConfiguredHelperPort();
+  if (configuredPort !== null) {
+    return configuredPort;
+  }
+
+  const server = createServer();
+
+  try {
+    const port = await new Promise<number>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(0, "127.0.0.1", () => {
+        const address = server.address();
+        if (!address || typeof address === "string") {
+          reject(new Error("Failed to determine helper port"));
+          return;
+        }
+
+        resolve(address.port);
+      });
+    });
+
+    return port;
+  } finally {
+    await new Promise((resolve) => {
+      server.close(() => resolve(undefined));
+    });
+  }
+}
+
 function defaultDeps(): ExtensionDeps {
   return {
     spawnHelper: spawnDefaultHelper,
+    pickPort: pickDefaultHelperPort,
     helperClient: {
       post: postJson,
     },
@@ -1186,6 +1427,7 @@ export default function registerDeepSeekExtension(
   pi: PiExtensionApi,
   deps: ExtensionDeps = defaultDeps(),
 ) {
+  const piSessionId = deps.randomToken();
   let helperPromise: Promise<ManagedHelper> | null = null;
   let helper: ManagedHelper | null = null;
 
@@ -1197,7 +1439,9 @@ export default function registerDeepSeekExtension(
     if (!helperPromise) {
       helperPromise = (async () => {
         const token = deps.randomToken();
-        const started = await deps.spawnHelper({ token, port: FIXED_HELPER_PORT });
+        const port = deps.pickPort ? await deps.pickPort() : 4318;
+        const started = await deps.spawnHelper({ token, port });
+        logServiceStarted("helper", started.baseUrl);
         helper = started;
         return started;
       })().catch((error) => {
@@ -1222,6 +1466,23 @@ export default function registerDeepSeekExtension(
 
   pi.on("session_start", async () => undefined);
   pi.on("session_shutdown", async () => {
+    const current = helper ?? (helperPromise ? await helperPromise.catch(() => null) : null);
+    if (current) {
+      try {
+        await deps.helperClient.post(
+          current.baseUrl,
+          "/internal/pi/session/shutdown",
+          { sessionId: piSessionId },
+          current.token,
+          undefined,
+          {
+            headers: {
+              "x-pi-session-id": piSessionId,
+            },
+          },
+        );
+      } catch {}
+    }
     await stopHelper();
   });
 
@@ -1255,16 +1516,6 @@ export default function registerDeepSeekExtension(
 
         try {
           const current = await ensureHelper();
-
-          await deps.helperClient.post(
-            current.baseUrl,
-            "/v1/bind",
-            {
-              provider: model.provider,
-            },
-            current.token,
-            options?.signal,
-          );
 
           const sessionInit = buildSessionInitPrompt(context);
           const emitText = (text: string) => {
@@ -1332,40 +1583,44 @@ export default function registerDeepSeekExtension(
           };
 
           const emitToolCall = (response: Extract<ProviderChatResponse, { mode: "native_tool_call" | "json_fallback" }>) => {
-            const validatedToolCall = parseValidatedToolCall(response.toolCall);
-            const toolCallId = `${model.provider}-${output.content.length}`;
+            const validatedToolCalls = parseValidatedToolCalls(response.toolCalls);
 
-            output.content.push({
-              type: "toolCall",
-              id: toolCallId,
-              name: validatedToolCall.name,
-              arguments: {},
-            });
-            const contentIndex = output.content.length - 1;
-            stream.push({ type: "toolcall_start", contentIndex, partial: output });
+            for (const [index, validatedToolCall] of validatedToolCalls.entries()) {
+              const rawToolCall = response.toolCalls[index];
+              const toolCallId = `${model.provider}-${output.content.length}`;
 
-            const toolCallBlock = output.content[contentIndex];
-            if (toolCallBlock?.type === "toolCall") {
-              toolCallBlock.arguments = validatedToolCall.arguments;
-            }
-
-            stream.push({
-              type: "toolcall_delta",
-              contentIndex,
-              delta: response.toolCall.argumentsJson,
-              partial: output,
-            });
-            stream.push({
-              type: "toolcall_end",
-              contentIndex,
-              toolCall: {
+              output.content.push({
                 type: "toolCall",
                 id: toolCallId,
                 name: validatedToolCall.name,
-                arguments: validatedToolCall.arguments,
-              },
-              partial: output,
-            });
+                arguments: {},
+              });
+              const contentIndex = output.content.length - 1;
+              stream.push({ type: "toolcall_start", contentIndex, partial: output });
+
+              const toolCallBlock = output.content[contentIndex];
+              if (toolCallBlock?.type === "toolCall") {
+                toolCallBlock.arguments = validatedToolCall.arguments;
+              }
+
+              stream.push({
+                type: "toolcall_delta",
+                contentIndex,
+                delta: rawToolCall?.argumentsJson ?? "{}",
+                partial: output,
+              });
+              stream.push({
+                type: "toolcall_end",
+                contentIndex,
+                toolCall: {
+                  type: "toolCall",
+                  id: toolCallId,
+                  name: validatedToolCall.name,
+                  arguments: validatedToolCall.arguments,
+                },
+                partial: output,
+              });
+            }
           };
 
           const buildRequestPayload = (messages: ProviderChatRequest["messages"]) => ({
@@ -1386,7 +1641,7 @@ export default function registerDeepSeekExtension(
 
             const response = await deps.helperClient.post<ProviderChatResponse>(
               current.baseUrl,
-              "/v1/provider/chat",
+              "/internal/pi/provider/chat",
               (() => {
                 logProviderDebug("provider chat request", {
                   helperBaseUrl: current.baseUrl,
@@ -1397,6 +1652,11 @@ export default function registerDeepSeekExtension(
               })(),
               current.token,
               options?.signal,
+              {
+                headers: {
+                  "x-pi-session-id": piSessionId,
+                },
+              },
             );
             logProviderDebug("provider chat response", {
               helperBaseUrl: current.baseUrl,

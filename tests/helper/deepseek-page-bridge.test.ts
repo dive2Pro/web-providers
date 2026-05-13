@@ -116,7 +116,18 @@ Object.defineProperty(FakeTextarea.prototype, "value", {
 function createBridgeTestContext(options?: {
   latestAssistantText?: string;
   assistantVisible?: boolean;
+  includeNewChatButton?: boolean;
+  includeModeButtons?: boolean;
+  modeControlsAsRadios?: boolean;
+  selectedMode?: "expert" | "default";
+  modeButtonsAppearAfterMs?: number;
+  expertModeLabel?: string;
+  flashModeLabel?: string;
+  initialUrl?: string;
+  newChatTargetUrl?: string;
+  newChatNavigatesAfterMs?: number;
 }) {
+  const createdAt = Date.now();
   const unrelatedPageIcon = new FakeElement({
     className: "_7d1f5e2 ds-icon-button ds-icon-button--l ds-icon-button--sizing-icon",
     attributes: {
@@ -147,7 +158,51 @@ function createBridgeTestContext(options?: {
   });
   const composerRoot = new FakeElement();
   const composerInputWrapper = new FakeElement();
+  const modeGroupRoot = new FakeElement();
   const textarea = new FakeTextarea(composerSend);
+  const newChatButton = new FakeElement({
+    attributes: {
+      "aria-label": "New Chat",
+    },
+  });
+  const expertModeButton = new FakeElement({
+    attributes: {
+      role: options?.modeControlsAsRadios ? "radio" : "button",
+      "aria-checked":
+        options?.modeControlsAsRadios && options?.selectedMode === "expert"
+          ? "true"
+          : "false",
+      "aria-pressed": options?.selectedMode === "expert" ? "true" : "false",
+    },
+  });
+  const flashModeButton = new FakeElement({
+    attributes: {
+      role: options?.modeControlsAsRadios ? "radio" : "button",
+      "aria-checked":
+        options?.modeControlsAsRadios && options?.selectedMode === "default"
+          ? "true"
+          : "false",
+      "aria-pressed": options?.selectedMode === "default" ? "true" : "false",
+    },
+  });
+  expertModeButton.textContent = options?.expertModeLabel ?? "Expert";
+  flashModeButton.textContent = options?.flashModeLabel ?? "Flash";
+  expertModeButton.parentElement = modeGroupRoot;
+  flashModeButton.parentElement = modeGroupRoot;
+  expertModeButton.click = () => {
+    expertModeButton.clicked += 1;
+    expertModeButton.setAttribute("aria-checked", "true");
+    flashModeButton.setAttribute("aria-checked", "false");
+    expertModeButton.setAttribute("aria-pressed", "true");
+    flashModeButton.setAttribute("aria-pressed", "false");
+  };
+  flashModeButton.click = () => {
+    flashModeButton.clicked += 1;
+    flashModeButton.setAttribute("aria-checked", "true");
+    expertModeButton.setAttribute("aria-checked", "false");
+    flashModeButton.setAttribute("aria-pressed", "true");
+    expertModeButton.setAttribute("aria-pressed", "false");
+  };
   const shouldCreateAssistant = options?.assistantVisible === true ||
     typeof options?.latestAssistantText === "string";
   const latestAssistantMarkdown = shouldCreateAssistant
@@ -199,9 +254,41 @@ function createBridgeTestContext(options?: {
         return textarea;
       }
 
+      if (
+        options?.includeNewChatButton &&
+        (selector === "button[aria-label='New Chat']" ||
+          selector === "a[aria-label='New Chat']")
+      ) {
+        return newChatButton;
+      }
+
       return null;
     },
     querySelectorAll(selector: string) {
+      const shouldShowModeButtons =
+        options?.includeModeButtons &&
+        Date.now() - createdAt >= (options?.modeButtonsAppearAfterMs ?? 0);
+
+      if (
+        selector === "button, a, div[role='button']" ||
+        selector ===
+          "button, a, div[role='button'], [role='radio'], input[type='radio']"
+      ) {
+        const modeControls = shouldShowModeButtons
+          ? options?.modeControlsAsRadios
+            ? [flashModeButton, expertModeButton]
+            : [expertModeButton, flashModeButton]
+          : [];
+        return [
+          ...(options?.includeNewChatButton ? [newChatButton] : []),
+          ...modeControls,
+          unrelatedPageIcon,
+          composerToggle,
+          composerAttach,
+          composerSend,
+        ];
+      }
+
       if (selector === "div[role='button']") {
         return [unrelatedPageIcon, composerToggle, composerAttach, composerSend];
       }
@@ -230,10 +317,30 @@ function createBridgeTestContext(options?: {
     }
   }
 
+  const windowLocation = {
+    href: options?.initialUrl ?? "https://chat.deepseek.com/",
+    pathname: (() => {
+      try {
+        return new URL(options?.initialUrl ?? "https://chat.deepseek.com/").pathname;
+      } catch {
+        return "/";
+      }
+    })(),
+  };
+
+  newChatButton.click = () => {
+    newChatButton.clicked += 1;
+    const targetUrl = options?.newChatTargetUrl;
+    if (targetUrl) {
+      setTimeout(() => {
+        windowLocation.href = targetUrl;
+        windowLocation.pathname = new URL(targetUrl).pathname;
+      }, options?.newChatNavigatesAfterMs ?? 0);
+    }
+  };
+
   const windowObject: Record<string, unknown> = {
-    location: {
-      href: "https://chat.deepseek.com/",
-    },
+    location: windowLocation,
   };
 
   const context: Record<string, any> = {
@@ -265,6 +372,9 @@ function createBridgeTestContext(options?: {
     textarea,
     unrelatedPageIcon,
     composerSend,
+    newChatButton,
+    expertModeButton,
+    flashModeButton,
     latestAssistantMarkdown,
     latestAssistantMessage,
   };
@@ -298,10 +408,12 @@ describe("deepseek page bridge", () => {
       }),
     ).toEqual({
       mode: "native_tool_call",
-      toolCall: {
-        name: "read",
-        argumentsJson: "{\"path\":\"src/app.ts\"}",
-      },
+      toolCalls: [
+        {
+          name: "read",
+          argumentsJson: "{\"path\":\"src/app.ts\"}",
+        },
+      ],
     });
   });
 
@@ -313,10 +425,12 @@ describe("deepseek page bridge", () => {
       }),
     ).toEqual({
       mode: "json_fallback",
-      toolCall: {
-        name: "read",
-        argumentsJson: "{\"path\":\"src/app.ts\"}",
-      },
+      toolCalls: [
+        {
+          name: "read",
+          argumentsJson: "{\"path\":\"src/app.ts\"}",
+        },
+      ],
       outputText: "{\"type\":\"tool_call\",\"name\":\"read\",\"arguments\":{\"path\":\"src/app.ts\"}}",
     });
   });
@@ -330,6 +444,7 @@ describe("deepseek page bridge", () => {
     ).toEqual({
       mode: "text",
       outputText: "hello from deepseek",
+      rawOutputText: "{\"type\":\"message\",\"content\":\"hello from deepseek\"}",
     });
   });
 
@@ -361,11 +476,200 @@ describe("deepseek page bridge", () => {
       }),
     ).toEqual({
       mode: "json_fallback",
-      toolCall: {
-        name: "bash",
-        argumentsJson: "{\"cmd\":\"ls -la\"}",
-      },
+      toolCalls: [
+        {
+          name: "bash",
+          argumentsJson: "{\"cmd\":\"ls -la\"}",
+        },
+      ],
       outputText: reply,
+    });
+  });
+
+  it("classifies embedded JSON fallback tool calls from mixed prose", () => {
+    const reply = [
+      "我先检查一下目录。",
+      '{"type":"tool_call","name":"bash","arguments":{"cmd":"ls -la"}}',
+    ].join("\n");
+
+    expect(
+      classifyCompletionTurn({
+        reply,
+        rawEvents: [],
+      }),
+    ).toEqual({
+      mode: "json_fallback",
+      toolCalls: [
+        {
+          name: "bash",
+          argumentsJson: "{\"cmd\":\"ls -la\"}",
+        },
+      ],
+      outputText: reply,
+    });
+  });
+
+  it("keeps multi-object protocol output as plain text for upper-layer repair", () => {
+    const reply = [
+      '{"type":"message","content":"先看下项目结构"}',
+      '{"type":"tool_call","name":"bash","arguments":{"command":"ls -la"}}',
+      '{"type":"tool_call","name":"read","arguments":{"file":"package.json"}}',
+    ].join("\n");
+
+    expect(
+      classifyCompletionTurn({
+        reply,
+        rawEvents: [],
+      }),
+    ).toEqual({
+      mode: "text",
+      outputText: reply,
+    });
+  });
+
+  it("switches DeepSeek into expert mode when starting a new chat", async () => {
+    const { context, newChatButton, expertModeButton, flashModeButton } =
+      createBridgeTestContext({
+        includeNewChatButton: true,
+        includeModeButtons: true,
+        selectedMode: "default",
+      });
+
+    vm.runInNewContext(INJECTED_BRIDGE_SOURCE, context);
+
+    const bridge = (context.window as Record<string, any>).__piDeepSeekBridge;
+    const result = await bridge.startNewChat({ targetModelType: "expert" });
+
+    expect(result).toEqual({ ok: true });
+    expect(newChatButton.clicked).toBe(1);
+    expect(expertModeButton.clicked).toBe(1);
+    expect(expertModeButton.getAttribute("aria-pressed")).toBe("true");
+    expect(flashModeButton.getAttribute("aria-pressed")).toBe("false");
+  });
+
+  it("waits for the DeepSeek mode buttons to appear before switching to expert mode", async () => {
+    const { context, expertModeButton, flashModeButton } =
+      createBridgeTestContext({
+        includeNewChatButton: true,
+        includeModeButtons: true,
+        selectedMode: "default",
+        modeButtonsAppearAfterMs: 900,
+      });
+
+    vm.runInNewContext(INJECTED_BRIDGE_SOURCE, context);
+
+    const bridge = (context.window as Record<string, any>).__piDeepSeekBridge;
+    const result = await bridge.startNewChat({ targetModelType: "expert" });
+
+    expect(result).toEqual({ ok: true });
+    expect(expertModeButton.clicked).toBe(1);
+    expect(expertModeButton.getAttribute("aria-pressed")).toBe("true");
+    expect(flashModeButton.getAttribute("aria-pressed")).toBe("false");
+  });
+
+  it("recognizes the DeepThink toggle as the DeepSeek expert mode control", async () => {
+    const { context, expertModeButton } = createBridgeTestContext({
+      includeNewChatButton: true,
+      includeModeButtons: true,
+      selectedMode: "default",
+      expertModeLabel: "DeepThink",
+      flashModeLabel: "Search",
+    });
+
+    vm.runInNewContext(INJECTED_BRIDGE_SOURCE, context);
+
+    const bridge = (context.window as Record<string, any>).__piDeepSeekBridge;
+    const result = await bridge.startNewChat({ targetModelType: "expert" });
+
+    expect(result).toEqual({ ok: true });
+    expect(expertModeButton.clicked).toBe(1);
+    expect(expertModeButton.getAttribute("aria-pressed")).toBe("true");
+  });
+
+  it("prefers the second root-page radio for expert mode even without matching labels", async () => {
+    const { context, expertModeButton, flashModeButton } =
+      createBridgeTestContext({
+        includeNewChatButton: true,
+        includeModeButtons: true,
+        modeControlsAsRadios: true,
+        selectedMode: "default",
+        expertModeLabel: "模式二",
+        flashModeLabel: "模式一",
+      });
+
+    vm.runInNewContext(INJECTED_BRIDGE_SOURCE, context);
+
+    const bridge = (context.window as Record<string, any>).__piDeepSeekBridge;
+    const result = await bridge.startNewChat({ targetModelType: "expert" });
+
+    expect(result).toEqual({ ok: true });
+    expect(expertModeButton.clicked).toBe(1);
+    expect(expertModeButton.getAttribute("aria-checked")).toBe("true");
+    expect(flashModeButton.getAttribute("aria-checked")).toBe("false");
+  });
+
+  it("prefers the first root-page radio for default mode on the Chinese page", async () => {
+    const { context, expertModeButton, flashModeButton } =
+      createBridgeTestContext({
+        includeModeButtons: true,
+        modeControlsAsRadios: true,
+        selectedMode: "expert",
+        expertModeLabel: "专家模式",
+        flashModeLabel: "快速模式",
+      });
+
+    vm.runInNewContext(INJECTED_BRIDGE_SOURCE, context);
+
+    const bridge = (context.window as Record<string, any>).__piDeepSeekBridge;
+    const result = await bridge.setModelType({ targetModelType: "default" });
+
+    expect(result).toEqual({ ok: true });
+    expect(flashModeButton.clicked).toBe(1);
+    expect(flashModeButton.getAttribute("aria-checked")).toBe("true");
+    expect(expertModeButton.getAttribute("aria-checked")).toBe("false");
+  });
+
+  it("waits for the page url to leave the previous DeepSeek conversation before sending", async () => {
+    const { context, newChatButton } = createBridgeTestContext({
+      includeNewChatButton: true,
+      includeModeButtons: true,
+      selectedMode: "default",
+      initialUrl: "https://chat.deepseek.com/a/chat/s/original-session",
+      newChatTargetUrl: "https://chat.deepseek.com/",
+      newChatNavigatesAfterMs: 300,
+    });
+
+    vm.runInNewContext(INJECTED_BRIDGE_SOURCE, context);
+
+    const bridge = (context.window as Record<string, any>).__piDeepSeekBridge;
+    const result = await bridge.startNewChat({ targetModelType: "expert" });
+
+    expect(result).toEqual({ ok: true });
+    expect(newChatButton.clicked).toBe(1);
+    expect((context.window as Record<string, any>).location.pathname).toBe("/");
+  });
+
+  it("classifies a tool_calls JSON envelope into multiple structured tool calls", () => {
+    expect(
+      classifyCompletionTurn({
+        reply:
+          "{\"type\":\"tool_calls\",\"calls\":[{\"name\":\"read\",\"arguments\":{\"path\":\"src/app.ts\"}},{\"name\":\"bash\",\"arguments\":{\"cmd\":\"pwd\"}}]}",
+        rawEvents: [],
+      }),
+    ).toEqual({
+      mode: "json_fallback",
+      toolCalls: [
+        {
+          name: "read",
+          argumentsJson: "{\"path\":\"src/app.ts\"}",
+        },
+        {
+          name: "bash",
+          argumentsJson: "{\"cmd\":\"pwd\"}",
+        },
+      ],
+      outputText:
+        "{\"type\":\"tool_calls\",\"calls\":[{\"name\":\"read\",\"arguments\":{\"path\":\"src/app.ts\"}},{\"name\":\"bash\",\"arguments\":{\"cmd\":\"pwd\"}}]}",
     });
   });
 
@@ -898,6 +1202,7 @@ describe("deepseek page bridge", () => {
         mode: "text",
         thinkingText: "We need",
         outputText: "Hey!",
+        rawOutputText: "{\"type\":\"message\",\"content\":\"Hey!\"}",
       },
       meta: {
         source: "bridge_stream",
@@ -975,10 +1280,12 @@ describe("deepseek page bridge", () => {
       ok: true,
       turn: {
         mode: "json_fallback",
-        toolCall: {
-          name: "read",
-          argumentsJson: "{\"path\":\"src/app.ts\"}",
-        },
+        toolCalls: [
+          {
+            name: "read",
+            argumentsJson: "{\"path\":\"src/app.ts\"}",
+          },
+        ],
         outputText:
           "{\"type\":\"tool_call\",\"name\":\"read\",\"arguments\":{\"path\":\"src/app.ts\"}}",
       },

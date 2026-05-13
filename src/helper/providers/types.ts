@@ -3,5 +3,10 @@ import type { BindResult } from "../browser/types";
 
 export interface ProviderAdapter {
   providerId: ProviderId;
-  bindTab(): Promise<BindResult>;
+  bindTab(input?: {
+    tabId?: string;
+    openNew?: boolean;
+    openUrl?: string;
+    passive?: boolean;
+  }): Promise<BindResult>;
 }
