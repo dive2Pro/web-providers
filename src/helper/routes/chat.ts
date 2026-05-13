@@ -2,14 +2,24 @@ import type { FastifyInstance } from "fastify";
 import { HelperError } from "../errors";
 import type { AppContext } from "../app";
 
+const SESSION_HEADER = "x-web-providers-session-id";
+
 export function registerChatRoute(app: FastifyInstance, ctx: AppContext) {
   app.post("/v1/chat", async (request, reply) => {
     const body = request.body as {
       prompt?: string;
       timeoutMs?: number;
     };
+    const sessionId = (request.headers[SESSION_HEADER] as string | undefined)?.trim();
 
-    const session = ctx.state.getBoundSession();
+    if (!sessionId) {
+      return reply.code(400).send({
+        error: "AUTOMATION_DESYNC",
+        message: "Missing x-web-providers-session-id header",
+      });
+    }
+
+    const session = ctx.state.getSessionBoundSession(sessionId, "deepseek-web", null);
     if (!session) {
       return reply.code(409).send({
         error: "NOT_BOUND",

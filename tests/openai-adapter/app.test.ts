@@ -402,6 +402,7 @@ describe("openai adapter app", () => {
       url: "/v1/chat/completions",
       headers: {
         authorization: "Bearer adapter-token",
+        "x-web-providers-session-id": "session-123",
         "x-request-source": "openai-test",
       },
       payload: {
@@ -420,6 +421,7 @@ describe("openai adapter app", () => {
         statusCode: 200,
         headers: expect.objectContaining({
           authorization: "Bearer adapter-token",
+          "x-web-providers-session-id": "session-123",
           "x-request-source": "openai-test",
         }),
         body: {
@@ -456,6 +458,7 @@ describe("openai adapter app", () => {
       url: "/v1/chat/completions",
       headers: {
         authorization: "Bearer adapter-token",
+        "x-web-providers-session-id": "session-123",
         "x-request-source": "openai-api-test",
       },
       payload: {
@@ -471,6 +474,7 @@ describe("openai adapter app", () => {
       url: "/v1/debug/request-logs?limit=5",
       headers: {
         authorization: "Bearer adapter-token",
+        "x-web-providers-session-id": "session-123",
       },
     });
 
@@ -485,6 +489,7 @@ describe("openai adapter app", () => {
           url: "/v1/chat/completions",
           headers: expect.objectContaining({
             authorization: "Bearer adapter-token",
+            "x-web-providers-session-id": "session-123",
             "x-request-source": "openai-api-test",
           }),
           body: {
@@ -550,7 +555,7 @@ describe("openai adapter app", () => {
     const response = await app.inject({
       method: "GET",
       url: "/v1/models",
-      headers: { authorization: "Bearer adapter-token" },
+      headers: { authorization: "Bearer adapter-token", "x-web-providers-session-id": "session-123" },
     });
 
     expect(response.statusCode).toBe(200);
@@ -583,6 +588,7 @@ describe("openai adapter app", () => {
       url: "/v1/chat/completions",
       headers: {
         authorization: "Bearer adapter-token",
+        "x-web-providers-session-id": "session-123",
       },
       payload: {
         model: "deepseek-web-chat",
@@ -630,6 +636,7 @@ describe("openai adapter app", () => {
       url: "/v1/responses",
       headers: {
         authorization: "Bearer adapter-token",
+        "x-web-providers-session-id": "session-123",
       },
       payload: {
         model: "qwen-web-tools",
@@ -683,6 +690,7 @@ describe("openai adapter app", () => {
       url: "/v1/responses",
       headers: {
         authorization: "Bearer adapter-token",
+        "x-web-providers-session-id": "session-123",
       },
       payload: {
         model: "deepseek-web-chat",
@@ -723,6 +731,7 @@ describe("openai adapter app", () => {
       url: "/v1/chat/completions",
       headers: {
         authorization: "Bearer adapter-token",
+        "x-web-providers-session-id": "session-123",
       },
       payload: {
         model: "deepseek-web-chat",
@@ -758,6 +767,7 @@ describe("openai adapter app", () => {
       url: "/v1/chat/completions",
       headers: {
         authorization: "Bearer adapter-token",
+        "x-web-providers-session-id": "session-123",
       },
       payload: {
         model: "deepseek-web-chat",
@@ -814,6 +824,7 @@ describe("openai adapter app", () => {
       url: "/v1/chat/completions",
       headers: {
         authorization: "Bearer adapter-token",
+        "x-web-providers-session-id": "session-123",
       },
       payload: {
         messages: [{ role: "user", content: "hello" }],
@@ -849,6 +860,7 @@ describe("openai adapter app", () => {
       url: "/v1/chat/completions",
       headers: {
         authorization: "Bearer adapter-token",
+        "x-web-providers-session-id": "session-123",
       },
       payload: {
         model: "deepseek-web-chat",
@@ -891,6 +903,7 @@ describe("openai adapter app", () => {
       url: "/v1/chat/completions",
       headers: {
         authorization: "Bearer adapter-token",
+        "x-web-providers-session-id": "session-123",
       },
       payload: {
         model: "qwen-web-tools",
@@ -939,6 +952,7 @@ describe("openai adapter app", () => {
       url: "/v1/chat/completions",
       headers: {
         authorization: "Bearer adapter-token",
+        "x-web-providers-session-id": "session-123",
       },
       payload: {
         model: "deepseek-web-chat",
@@ -970,6 +984,7 @@ describe("openai adapter app", () => {
       url: "/v1/chat/completions",
       headers: {
         authorization: "Bearer adapter-token",
+        "x-web-providers-session-id": "session-123",
       },
       payload: {
         model: "missing-model",
@@ -1008,6 +1023,7 @@ describe("openai adapter app", () => {
       url: "/v1/responses",
       headers: {
         authorization: "Bearer adapter-token",
+        "x-web-providers-session-id": "session-123",
       },
       payload: {
         model: "deepseek-web-chat",
@@ -1054,6 +1070,7 @@ describe("openai adapter app", () => {
       url: "/v1/responses",
       headers: {
         authorization: "Bearer adapter-token",
+        "x-web-providers-session-id": "session-123",
       },
       payload: {
         model: "qwen-web-tools",
@@ -1104,6 +1121,7 @@ describe("openai adapter app", () => {
       url: "/v1/responses",
       headers: {
         authorization: "Bearer adapter-token",
+        "x-web-providers-session-id": "session-123",
       },
       payload: {
         model: "deepseek-web-chat",

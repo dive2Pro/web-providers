@@ -14,7 +14,7 @@ describe("merged helper openai routes", () => {
     const response = await app.inject({
       method: "GET",
       url: "/v1/models",
-      headers: { authorization: "Bearer test-token" },
+      headers: { authorization: "Bearer test-token", "x-web-providers-session-id": "session-a" },
     });
 
     expect(response.statusCode).toBe(200);
@@ -69,7 +69,7 @@ describe("merged helper openai routes", () => {
     const response = await app.inject({
       method: "POST",
       url: "/v1/chat/completions",
-      headers: { authorization: "Bearer test-token" },
+      headers: { authorization: "Bearer test-token", "x-web-providers-session-id": "session-a" },
       payload: {
         model: "deepseek-web-chat",
         messages: [{ role: "user", content: "hello" }],
@@ -136,7 +136,7 @@ describe("merged helper openai routes", () => {
     const response = await app.inject({
       method: "POST",
       url: "/v1/messages?beta=true",
-      headers: { authorization: "Bearer test-token" },
+      headers: { "x-api-key": "test-token", "x-claude-code-session-id": "claude-session-1" },
       payload: {
         model: "deepseek-web-chat",
         max_tokens: 64,
@@ -176,7 +176,7 @@ describe("merged helper openai routes", () => {
     const response = await app.inject({
       method: "POST",
       url: "/v1/messages?beta=true",
-      headers: { "x-api-key": "test-token" },
+      headers: { "x-api-key": "test-token", "x-claude-code-session-id": "claude-session-1" },
       payload: {
         model: "deepseek-web-chat",
         max_tokens: 64,
@@ -227,7 +227,7 @@ describe("merged helper openai routes", () => {
     const response = await app.inject({
       method: "POST",
       url: "/v1/messages?beta=true",
-      headers: { "x-api-key": "test-token" },
+      headers: { "x-api-key": "test-token", "x-claude-code-session-id": "claude-session-1" },
       payload: {
         model: "deepseek-web-chat",
         max_tokens: 64,
@@ -263,7 +263,7 @@ describe("merged helper openai routes", () => {
     const response = await app.inject({
       method: "POST",
       url: "/v1/chat/completions",
-      headers: { authorization: "Bearer test-token" },
+      headers: { authorization: "Bearer test-token", "x-web-providers-session-id": "session-a" },
       payload: {
         model: "deepseek-web-chat",
         messages: [{ role: "user", content: "hello" }],
@@ -279,7 +279,7 @@ describe("merged helper openai routes", () => {
     });
   });
 
-  it("does not reuse the same public openai tab across separate requests by default", async () => {
+  it("rejects merged openai requests without an explicit session id", async () => {
     const bindCalls: Array<Record<string, unknown>> = [];
     let openedCount = 0;
 
@@ -331,13 +331,16 @@ describe("merged helper openai routes", () => {
         },
       });
 
-      expect(response.statusCode).toBe(200);
+      expect(response.statusCode).toBe(400);
+      expect(response.json()).toEqual({
+        error: {
+          code: "invalid_request",
+          message: "Missing x-web-providers-session-id or x-pi-session-id header",
+        },
+      });
     }
 
-    expect(bindCalls).toEqual([
-      expect.objectContaining({ provider: "deepseek-web", openNew: true }),
-      expect.objectContaining({ provider: "deepseek-web", openNew: true }),
-    ]);
+    expect(bindCalls).toEqual([]);
   });
 
   it("reuses the same public openai tab when x-web-providers-session-id stays the same", async () => {
@@ -516,7 +519,7 @@ describe("merged helper openai routes", () => {
     const response = await app.inject({
       method: "POST",
       url: "/v1/chat/completions",
-      headers: { authorization: "Bearer test-token" },
+      headers: { authorization: "Bearer test-token", "x-web-providers-session-id": "session-a" },
       payload: {
         messages: [{ role: "user", content: "hello" }],
       },

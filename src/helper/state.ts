@@ -9,8 +9,6 @@ import type {
 import { getBoundSessionKey } from "./types";
 import type { ProviderId } from "../shared/contracts";
 
-const DEFAULT_SESSION_ID = "__default__";
-
 export class HelperState {
   private boundSessionsBySession = new Map<string, Map<string, BoundSession>>();
   private sessionMeta = new Map<string, SessionStateMeta>();
@@ -234,14 +232,6 @@ export class HelperState {
     return sessions.sort((left, right) =>
       left.sessionId.localeCompare(right.sessionId),
     );
-  }
-
-  getBoundSession(provider?: ProviderId, modelId?: string | null) {
-    return this.getSessionBoundSession(DEFAULT_SESSION_ID, provider, modelId);
-  }
-
-  setBoundSession(session: BoundSession) {
-    this.setSessionBoundSession(DEFAULT_SESSION_ID, session);
   }
 
   hasAnyBoundSession() {

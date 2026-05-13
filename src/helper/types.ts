@@ -119,7 +119,7 @@ export interface PersistedSessionBindingSession {
 }
 
 export interface ProviderRequestDebugRecord {
-  sessionId?: string;
+  sessionId: string;
   provider: ProviderId;
   requestId: string;
   rawRequest: ProviderChatRequest;

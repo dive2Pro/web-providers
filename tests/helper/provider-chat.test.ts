@@ -65,6 +65,7 @@ describe("provider chat route", () => {
       url: "/v1/bind",
       headers: {
         authorization: "Bearer test-token",
+        "x-web-providers-session-id": "session-a",
       },
       payload: {
         provider: "deepseek-web",
@@ -76,6 +77,7 @@ describe("provider chat route", () => {
       url: "/v1/provider/chat",
       headers: {
         authorization: "Bearer test-token",
+        "x-web-providers-session-id": "session-a",
       },
       payload: {
         provider: "deepseek-web",
@@ -446,7 +448,7 @@ describe("provider chat route", () => {
     const bindResponse = await app.inject({
       method: "POST",
       url: "/v1/bind",
-      headers: { authorization: "Bearer test-token" },
+      headers: { authorization: "Bearer test-token", "x-web-providers-session-id": "session-a" },
       payload: { provider: "qwen-web" },
     });
 
@@ -455,6 +457,7 @@ describe("provider chat route", () => {
       url: "/v1/provider/chat",
       headers: {
         authorization: "Bearer test-token",
+        "x-web-providers-session-id": "session-a",
       },
       payload: {
         provider: "qwen-web",
@@ -611,7 +614,7 @@ describe("provider chat route", () => {
     await app.inject({
       method: "POST",
       url: "/v1/bind",
-      headers: { authorization: "Bearer test-token" },
+      headers: { authorization: "Bearer test-token", "x-web-providers-session-id": "session-a" },
     });
 
     const response = await app.inject({
@@ -619,6 +622,7 @@ describe("provider chat route", () => {
       url: "/v1/provider/chat",
       headers: {
         authorization: "Bearer test-token",
+        "x-web-providers-session-id": "session-a",
       },
       payload: {
         model: "deepseek-web-chat",
@@ -667,7 +671,7 @@ describe("provider chat route", () => {
     await app.inject({
       method: "POST",
       url: "/v1/bind",
-      headers: { authorization: "Bearer test-token" },
+      headers: { authorization: "Bearer test-token", "x-web-providers-session-id": "session-a" },
     });
 
     const response = await app.inject({
@@ -675,6 +679,7 @@ describe("provider chat route", () => {
       url: "/v1/provider/chat",
       headers: {
         authorization: "Bearer test-token",
+        "x-web-providers-session-id": "session-a",
       },
       payload: {
         model: "deepseek-web-chat",
@@ -727,7 +732,7 @@ describe("provider chat route", () => {
     await app.inject({
       method: "POST",
       url: "/v1/bind",
-      headers: { authorization: "Bearer test-token" },
+      headers: { authorization: "Bearer test-token", "x-web-providers-session-id": "session-a" },
     });
 
     const response = await app.inject({
@@ -735,6 +740,7 @@ describe("provider chat route", () => {
       url: "/v1/provider/chat",
       headers: {
         authorization: "Bearer test-token",
+        "x-web-providers-session-id": "session-a",
       },
       payload: {
         model: "deepseek-web-chat",
@@ -802,7 +808,7 @@ describe("provider chat route", () => {
     await app.inject({
       method: "POST",
       url: "/v1/bind",
-      headers: { authorization: "Bearer test-token" },
+      headers: { authorization: "Bearer test-token", "x-web-providers-session-id": "session-a" },
     });
 
     const response = await app.inject({
@@ -810,6 +816,7 @@ describe("provider chat route", () => {
       url: "/v1/provider/chat",
       headers: {
         authorization: "Bearer test-token",
+        "x-web-providers-session-id": "session-a",
       },
       payload: {
         model: "deepseek-web-chat",
@@ -878,7 +885,7 @@ describe("provider chat route", () => {
     await app.inject({
       method: "POST",
       url: "/v1/bind",
-      headers: { authorization: "Bearer test-token" },
+      headers: { authorization: "Bearer test-token", "x-web-providers-session-id": "session-a" },
     });
 
     const response = await app.inject({
@@ -886,6 +893,7 @@ describe("provider chat route", () => {
       url: "/v1/provider/chat",
       headers: {
         authorization: "Bearer test-token",
+        "x-web-providers-session-id": "session-a",
       },
       payload: {
         model: "deepseek-web-pro",
@@ -941,13 +949,13 @@ describe("provider chat route", () => {
     await app.inject({
       method: "POST",
       url: "/v1/bind",
-      headers: { authorization: "Bearer test-token" },
+      headers: { authorization: "Bearer test-token", "x-web-providers-session-id": "session-a" },
     });
 
     await app.inject({
       method: "POST",
       url: "/v1/provider/chat",
-      headers: { authorization: "Bearer test-token" },
+      headers: { authorization: "Bearer test-token", "x-web-providers-session-id": "session-a" },
       payload: {
         model: "deepseek-web-chat",
         messages: [
@@ -996,13 +1004,13 @@ describe("provider chat route", () => {
     await app.inject({
       method: "POST",
       url: "/v1/bind",
-      headers: { authorization: "Bearer test-token" },
+      headers: { authorization: "Bearer test-token", "x-web-providers-session-id": "session-a" },
     });
 
     await app.inject({
       method: "POST",
       url: "/v1/provider/chat",
-      headers: { authorization: "Bearer test-token" },
+      headers: { authorization: "Bearer test-token", "x-web-providers-session-id": "session-a" },
       payload: {
         model: "deepseek-web-chat",
         messages: [{ role: "user", content: "hello" }],
@@ -1061,13 +1069,13 @@ describe("provider chat route", () => {
     await app.inject({
       method: "POST",
       url: "/v1/bind",
-      headers: { authorization: "Bearer test-token" },
+      headers: { authorization: "Bearer test-token", "x-web-providers-session-id": "session-a" },
     });
 
     await app.inject({
       method: "POST",
       url: "/v1/provider/chat",
-      headers: { authorization: "Bearer test-token" },
+      headers: { authorization: "Bearer test-token", "x-web-providers-session-id": "session-a" },
       payload: {
         model: "deepseek-web-pro",
         messages: [{ role: "user", content: "hello" }],
@@ -1112,13 +1120,13 @@ describe("provider chat route", () => {
     await app.inject({
       method: "POST",
       url: "/v1/bind",
-      headers: { authorization: "Bearer test-token" },
+      headers: { authorization: "Bearer test-token", "x-web-providers-session-id": "session-a" },
     });
 
     await app.inject({
       method: "POST",
       url: "/v1/provider/chat",
-      headers: { authorization: "Bearer test-token" },
+      headers: { authorization: "Bearer test-token", "x-web-providers-session-id": "session-a" },
       payload: {
         model: "deepseek-web-chat",
         messages: [{ role: "user", content: "hello" }],
@@ -1131,7 +1139,7 @@ describe("provider chat route", () => {
     await app.inject({
       method: "POST",
       url: "/v1/provider/chat",
-      headers: { authorization: "Bearer test-token" },
+      headers: { authorization: "Bearer test-token", "x-web-providers-session-id": "session-a" },
       payload: {
         model: "deepseek-web-chat",
         messages: [{ role: "user", content: "continue" }],
@@ -1179,13 +1187,13 @@ describe("provider chat route", () => {
     await app.inject({
       method: "POST",
       url: "/v1/bind",
-      headers: { authorization: "Bearer test-token" },
+      headers: { authorization: "Bearer test-token", "x-web-providers-session-id": "session-a" },
     });
 
     await app.inject({
       method: "POST",
       url: "/v1/provider/chat",
-      headers: { authorization: "Bearer test-token" },
+      headers: { authorization: "Bearer test-token", "x-web-providers-session-id": "session-a" },
       payload: {
         model: "deepseek-web-chat",
         messages: [{ role: "user", content: "hello" }],
@@ -1198,7 +1206,7 @@ describe("provider chat route", () => {
     await app.inject({
       method: "POST",
       url: "/v1/provider/chat",
-      headers: { authorization: "Bearer test-token" },
+      headers: { authorization: "Bearer test-token", "x-web-providers-session-id": "session-a" },
       payload: {
         model: "deepseek-web-chat",
         messages: [{ role: "user", content: "hello again" }],
@@ -1246,13 +1254,13 @@ describe("provider chat route", () => {
     await app.inject({
       method: "POST",
       url: "/v1/bind",
-      headers: { authorization: "Bearer test-token" },
+      headers: { authorization: "Bearer test-token", "x-web-providers-session-id": "session-a" },
     });
 
     await app.inject({
       method: "POST",
       url: "/v1/provider/chat",
-      headers: { authorization: "Bearer test-token" },
+      headers: { authorization: "Bearer test-token", "x-web-providers-session-id": "session-a" },
       payload: {
         model: "deepseek-web-chat",
         messages: [{ role: "user", content: "hello" }],
@@ -1265,13 +1273,13 @@ describe("provider chat route", () => {
     await app.inject({
       method: "POST",
       url: "/v1/bind",
-      headers: { authorization: "Bearer test-token" },
+      headers: { authorization: "Bearer test-token", "x-web-providers-session-id": "session-a" },
     });
 
     await app.inject({
       method: "POST",
       url: "/v1/provider/chat",
-      headers: { authorization: "Bearer test-token" },
+      headers: { authorization: "Bearer test-token", "x-web-providers-session-id": "session-a" },
       payload: {
         model: "deepseek-web-chat",
         messages: [{ role: "user", content: "continue" }],
@@ -1326,13 +1334,13 @@ describe("provider chat route", () => {
     await app.inject({
       method: "POST",
       url: "/v1/bind",
-      headers: { authorization: "Bearer test-token" },
+      headers: { authorization: "Bearer test-token", "x-web-providers-session-id": "session-a" },
     });
 
     await app.inject({
       method: "POST",
       url: "/v1/provider/chat",
-      headers: { authorization: "Bearer test-token" },
+      headers: { authorization: "Bearer test-token", "x-web-providers-session-id": "session-a" },
       payload: {
         model: "deepseek-web-chat",
         messages: [{ role: "user", content: "hello" }],
@@ -1345,13 +1353,13 @@ describe("provider chat route", () => {
     await app.inject({
       method: "POST",
       url: "/v1/bind",
-      headers: { authorization: "Bearer test-token" },
+      headers: { authorization: "Bearer test-token", "x-web-providers-session-id": "session-a" },
     });
 
     await app.inject({
       method: "POST",
       url: "/v1/provider/chat",
-      headers: { authorization: "Bearer test-token" },
+      headers: { authorization: "Bearer test-token", "x-web-providers-session-id": "session-a" },
       payload: {
         model: "deepseek-web-chat",
         messages: [{ role: "user", content: "continue" }],
@@ -1398,13 +1406,13 @@ describe("provider chat route", () => {
     await app.inject({
       method: "POST",
       url: "/v1/bind",
-      headers: { authorization: "Bearer test-token" },
+      headers: { authorization: "Bearer test-token", "x-web-providers-session-id": "session-a" },
     });
 
     await app.inject({
       method: "POST",
       url: "/v1/provider/chat",
-      headers: { authorization: "Bearer test-token" },
+      headers: { authorization: "Bearer test-token", "x-web-providers-session-id": "session-a" },
       payload: {
         model: "deepseek-web-chat",
         messages: [
@@ -1419,7 +1427,7 @@ describe("provider chat route", () => {
     const response = await app.inject({
       method: "GET",
       url: "/v1/debug/provider-last",
-      headers: { authorization: "Bearer test-token" },
+      headers: { authorization: "Bearer test-token", "x-web-providers-session-id": "session-a" },
     });
 
     expect(response.statusCode).toBe(200);
@@ -1485,13 +1493,13 @@ describe("provider chat route", () => {
     await app.inject({
       method: "POST",
       url: "/v1/bind",
-      headers: { authorization: "Bearer test-token" },
+      headers: { authorization: "Bearer test-token", "x-web-providers-session-id": "session-a" },
     });
 
     const requestResponse = await app.inject({
       method: "POST",
       url: "/v1/provider/chat",
-      headers: { authorization: "Bearer test-token" },
+      headers: { authorization: "Bearer test-token", "x-web-providers-session-id": "session-a" },
       payload: {
         model: "deepseek-web-chat",
         messages: [{ role: "user", content: "hey" }],
@@ -1503,7 +1511,7 @@ describe("provider chat route", () => {
     const debugResponse = await app.inject({
       method: "GET",
       url: "/v1/debug/provider-last",
-      headers: { authorization: "Bearer test-token" },
+      headers: { authorization: "Bearer test-token", "x-web-providers-session-id": "session-a" },
     });
 
     expect(debugResponse.statusCode).toBe(200);
@@ -1553,13 +1561,13 @@ describe("provider chat route", () => {
     await app.inject({
       method: "POST",
       url: "/v1/bind",
-      headers: { authorization: "Bearer test-token" },
+      headers: { authorization: "Bearer test-token", "x-web-providers-session-id": "session-a" },
     });
 
     const response = await app.inject({
       method: "POST",
       url: "/v1/provider/chat",
-      headers: { authorization: "Bearer test-token" },
+      headers: { authorization: "Bearer test-token", "x-web-providers-session-id": "session-a" },
       payload: {
         model: "deepseek-web-chat",
         messages: [{ role: "user", content: "hey" }],
@@ -1614,13 +1622,13 @@ describe("provider chat route", () => {
     await app.inject({
       method: "POST",
       url: "/v1/bind",
-      headers: { authorization: "Bearer test-token" },
+      headers: { authorization: "Bearer test-token", "x-web-providers-session-id": "session-a" },
     });
 
     const requestResponse = await app.inject({
       method: "POST",
       url: "/v1/provider/chat",
-      headers: { authorization: "Bearer test-token" },
+      headers: { authorization: "Bearer test-token", "x-web-providers-session-id": "session-a" },
       payload: {
         model: "deepseek-web-chat",
         messages: [{ role: "user", content: "hey" }],
@@ -1632,7 +1640,7 @@ describe("provider chat route", () => {
     const debugResponse = await app.inject({
       method: "GET",
       url: "/v1/debug/provider-last",
-      headers: { authorization: "Bearer test-token" },
+      headers: { authorization: "Bearer test-token", "x-web-providers-session-id": "session-a" },
     });
 
     expect(debugResponse.statusCode).toBe(200);
@@ -1693,13 +1701,13 @@ describe("provider chat route", () => {
     await app.inject({
       method: "POST",
       url: "/v1/bind",
-      headers: { authorization: "Bearer test-token" },
+      headers: { authorization: "Bearer test-token", "x-web-providers-session-id": "session-a" },
     });
 
     const response = await app.inject({
       method: "POST",
       url: "/v1/provider/chat",
-      headers: { authorization: "Bearer test-token" },
+      headers: { authorization: "Bearer test-token", "x-web-providers-session-id": "session-a" },
       payload: {
         model: "deepseek-web-chat",
         messages: [{ role: "user", content: "hello" }],
@@ -1765,7 +1773,7 @@ describe("provider chat route", () => {
     await app.inject({
       method: "POST",
       url: "/v1/bind",
-      headers: { authorization: "Bearer test-token" },
+      headers: { authorization: "Bearer test-token", "x-web-providers-session-id": "session-a" },
     });
 
     await app.listen({ host: "127.0.0.1", port: 0 });
@@ -1781,6 +1789,7 @@ describe("provider chat route", () => {
         method: "POST",
         headers: {
           authorization: "Bearer test-token",
+          "x-web-providers-session-id": "session-a",
           "content-type": "application/json",
         },
         body: JSON.stringify({
@@ -1804,7 +1813,7 @@ describe("provider chat route", () => {
     const secondRequest = app.inject({
       method: "POST",
       url: "/v1/provider/chat",
-      headers: { authorization: "Bearer test-token" },
+      headers: { authorization: "Bearer test-token", "x-web-providers-session-id": "session-a" },
       payload: {
         model: "deepseek-web-chat",
         messages: [{ role: "user", content: "run next" }],

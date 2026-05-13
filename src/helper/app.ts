@@ -208,7 +208,7 @@ export function buildApp(deps: AppDeps) {
   }
   registerGatewayModelsRoutes(app);
   const runProviderRequest = async (input: {
-    sessionId?: string;
+    sessionId: string;
     request: Parameters<typeof toProviderChatRequest>[0];
   }) =>
     ctx.runtime.executeProviderChat({
@@ -219,7 +219,16 @@ export function buildApp(deps: AppDeps) {
     run: async (
       request: Parameters<typeof toProviderChatRequest>[0],
       options?: { sessionId?: string },
-    ) => runProviderRequest({ request, sessionId: options?.sessionId }),
+    ) => {
+      if (!options?.sessionId) {
+        throw new HelperError(
+          "AUTOMATION_DESYNC",
+          "Missing session id for OpenAI-compatible request",
+        );
+      }
+
+      return runProviderRequest({ request, sessionId: options.sessionId });
+    },
   };
   const anthropicExecutionClient: AnthropicExecutionClient = {
     run: async (request, options) => {
@@ -228,8 +237,15 @@ export function buildApp(deps: AppDeps) {
           return buildSessionTitleResponse(request.messages);
         }
 
+        if (!options?.sessionId) {
+          throw new HelperError(
+            "AUTOMATION_DESYNC",
+            "Missing session id for Anthropic-compatible request",
+          );
+        }
+
         return await ctx.runtime.executeProviderChat({
-          sessionId: options?.sessionId,
+          sessionId: options.sessionId,
           body: toAnthropicProviderChatRequest(request),
         });
       } catch (error) {

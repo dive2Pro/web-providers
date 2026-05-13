@@ -43,7 +43,11 @@ function resolvePublicSessionId(request: FastifyRequest) {
     return explicitHeader.trim();
   }
 
-  return `public-${Date.now()}-${Math.random().toString(16).slice(2, 10)}`;
+  throw new AdapterError(
+    400,
+    "invalid_request",
+    "Missing x-web-providers-session-id or x-pi-session-id header",
+  );
 }
 
 export async function handlePseudoStreamRoute<TBody extends StreamCapableBody>(

@@ -18,7 +18,11 @@ function errorResponse(error: AnthropicAdapterError) {
 
 function getSessionId(headers: Record<string, unknown>) {
   const sessionId = headers["x-claude-code-session-id"];
-  return typeof sessionId === "string" && sessionId.length > 0 ? sessionId : undefined;
+  if (typeof sessionId === "string" && sessionId.length > 0) {
+    return sessionId;
+  }
+
+  throw invalidRequestError("x-claude-code-session-id header is required");
 }
 
 function assertJsonObject(body: unknown) {

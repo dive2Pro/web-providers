@@ -56,6 +56,7 @@ describe("gateway app", () => {
       url: "/v1/chat/completions",
       headers: {
         authorization: "Bearer openai-token",
+        "x-web-providers-session-id": "session-123",
         "x-request-source": "gateway-test",
       },
       payload: {
@@ -74,6 +75,7 @@ describe("gateway app", () => {
         statusCode: 200,
         headers: expect.objectContaining({
           authorization: "Bearer openai-token",
+          "x-web-providers-session-id": "session-123",
           "x-request-source": "gateway-test",
         }),
         body: {
@@ -111,6 +113,7 @@ describe("gateway app", () => {
       url: "/v1/chat/completions",
       headers: {
         authorization: "Bearer openai-token",
+        "x-web-providers-session-id": "session-123",
         "x-request-source": "gateway-api-test",
       },
       payload: {
@@ -126,6 +129,7 @@ describe("gateway app", () => {
       url: "/v1/debug/request-logs?limit=5",
       headers: {
         authorization: "Bearer openai-token",
+        "x-web-providers-session-id": "session-123",
       },
     });
 
@@ -140,6 +144,7 @@ describe("gateway app", () => {
           url: "/v1/chat/completions",
           headers: expect.objectContaining({
             authorization: "Bearer openai-token",
+            "x-web-providers-session-id": "session-123",
             "x-request-source": "gateway-api-test",
           }),
           body: {
@@ -213,6 +218,7 @@ describe("gateway app", () => {
       url: "/v1/debug/session-bindings",
       headers: {
         authorization: "Bearer openai-token",
+        "x-web-providers-session-id": "session-123",
       },
     });
 
@@ -254,6 +260,7 @@ describe("gateway app", () => {
       url: "/v1/models",
       headers: {
         authorization: "Bearer openai-token",
+        "x-web-providers-session-id": "session-123",
       },
     });
 
@@ -304,6 +311,7 @@ describe("gateway app", () => {
       url: "/v1/chat/completions",
       headers: {
         authorization: "Bearer openai-token",
+        "x-web-providers-session-id": "session-123",
       },
       payload: {
         model: "deepseek-web-chat",
@@ -347,6 +355,7 @@ describe("gateway app", () => {
       url: "/v1/messages",
       headers: {
         "x-api-key": "anthropic-token",
+      "x-claude-code-session-id": "claude-session-1",
       },
       payload: {
         model: "deepseek-web-chat",
@@ -384,6 +393,7 @@ describe("gateway app", () => {
       url: "/v1/messages",
       headers: {
         "x-api-key": "anthropic-token",
+      "x-claude-code-session-id": "claude-session-1",
       },
       payload: {
         model: "deepseek-web-chat",

@@ -2,16 +2,19 @@ import type { FastifyInstance } from "fastify";
 import type { ProviderChatRequest } from "../../shared/contracts";
 import type { AppContext } from "../app";
 import { HelperError } from "../errors";
-import { DEFAULT_SESSION_ID } from "../runtime";
 
 const SESSION_HEADER = "x-web-providers-session-id";
 
 export function registerProviderChatRoute(app: FastifyInstance, ctx: AppContext) {
   app.post("/v1/provider/chat", async (request, reply) => {
     const body = request.body as ProviderChatRequest;
-    const sessionId =
-      (request.headers[SESSION_HEADER] as string | undefined)?.trim() ||
-      DEFAULT_SESSION_ID;
+    const sessionId = (request.headers[SESSION_HEADER] as string | undefined)?.trim();
+    if (!sessionId) {
+      return reply.code(400).send({
+        error: "AUTOMATION_DESYNC",
+        message: "Missing x-web-providers-session-id header",
+      });
+    }
     const abortController = new AbortController();
     const abortRequest = () => {
       if (!abortController.signal.aborted) {

@@ -61,13 +61,13 @@ describe("helper app", () => {
     await app.inject({
       method: "POST",
       url: "/v1/bind",
-      headers: { authorization: "Bearer test-token" },
+      headers: { authorization: "Bearer test-token", "x-web-providers-session-id": "session-a" },
       payload: { provider: "deepseek-web" },
     });
     await app.inject({
       method: "POST",
       url: "/v1/provider/chat",
-      headers: { authorization: "Bearer test-token" },
+      headers: { authorization: "Bearer test-token", "x-web-providers-session-id": "session-a" },
       payload: {
         provider: "deepseek-web",
         model: "deepseek-web-chat",
@@ -77,13 +77,13 @@ describe("helper app", () => {
     await app.inject({
       method: "POST",
       url: "/v1/bind",
-      headers: { authorization: "Bearer test-token" },
+      headers: { authorization: "Bearer test-token", "x-web-providers-session-id": "session-a" },
       payload: { provider: "qwen-web" },
     });
     await app.inject({
       method: "POST",
       url: "/v1/provider/chat",
-      headers: { authorization: "Bearer test-token" },
+      headers: { authorization: "Bearer test-token", "x-web-providers-session-id": "session-a" },
       payload: {
         provider: "qwen-web",
         model: "qwen-web-chat",
@@ -172,6 +172,7 @@ describe("helper app", () => {
       url: "/v1/bind",
       headers: {
         authorization: "Bearer test-token",
+        "x-web-providers-session-id": "session-a",
         "x-request-source": "helper-test",
       },
       payload: {
@@ -189,6 +190,7 @@ describe("helper app", () => {
         statusCode: 200,
         headers: expect.objectContaining({
           authorization: "Bearer test-token",
+          "x-web-providers-session-id": "session-a",
           "x-request-source": "helper-test",
         }),
         body: {
@@ -229,6 +231,7 @@ describe("helper app", () => {
       url: "/v1/bind",
       headers: {
         authorization: "Bearer test-token",
+        "x-web-providers-session-id": "session-a",
         "x-request-source": "helper-api-test",
       },
       payload: {
@@ -257,6 +260,7 @@ describe("helper app", () => {
           url: "/v1/bind",
           headers: expect.objectContaining({
             authorization: "Bearer test-token",
+            "x-web-providers-session-id": "session-a",
             "x-request-source": "helper-api-test",
           }),
           body: {
@@ -296,7 +300,10 @@ describe("helper app", () => {
         resetProvider: async () => undefined,
         sendChatPrompt: async ({ provider, prompt }: { provider?: string; prompt: string }) => ({
           mode: "text",
-          outputText: `${provider}:${prompt}`,
+          outputText: JSON.stringify({
+            type: "message",
+            content: `${provider}:${prompt}`,
+          }),
           modelLabel: provider === "qwen-web" ? "Qwen Web" : "DeepSeek Web",
         }),
       } as never,
@@ -428,7 +435,10 @@ describe("helper app", () => {
         startNewChat: async () => undefined,
         sendChatPrompt: async ({ prompt }: { prompt: string }) => ({
           mode: "text",
-          outputText: `reply:${prompt}`,
+          outputText: JSON.stringify({
+            type: "message",
+            content: `reply:${prompt}`,
+          }),
           modelLabel: "DeepSeek Web",
         }),
       } as never,
@@ -485,7 +495,10 @@ describe("helper app", () => {
         startNewChat: async () => undefined,
         sendChatPrompt: async ({ prompt }: { prompt: string }) => ({
           mode: "text",
-          outputText: `reply:${prompt}`,
+          outputText: JSON.stringify({
+            type: "message",
+            content: `reply:${prompt}`,
+          }),
           modelLabel: "DeepSeek Web",
         }),
       } as never,

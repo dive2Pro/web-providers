@@ -18,8 +18,6 @@ import type {
   ProviderToolCall,
 } from "../shared/contracts";
 
-export const DEFAULT_SESSION_ID = "__default__";
-export const OPENAI_PUBLIC_SESSION_ID = "__openai_public__";
 const MAX_PROVIDER_RESPONSE_REPAIR_ATTEMPTS = 3;
 
 function buildProviderPrompt(input: {
@@ -224,7 +222,7 @@ export class HelperRuntime {
   }
 
   async bindProvider(input: {
-    sessionId?: string;
+    sessionId: string;
     provider: ProviderId;
     modelId?: string | null;
     openNew?: boolean;
@@ -233,7 +231,7 @@ export class HelperRuntime {
     passive?: boolean;
     previousSession?: BoundSession | null;
   }) {
-    const sessionId = input.sessionId ?? DEFAULT_SESSION_ID;
+    const sessionId = input.sessionId;
     this.state.touchSession(sessionId);
     const result =
       this.browserClient.bindProviderTab
@@ -337,11 +335,11 @@ export class HelperRuntime {
   }
 
   async executeProviderChat(input: {
-    sessionId?: string;
+    sessionId: string;
     body: ProviderChatRequest;
     signal?: AbortSignal;
   }) {
-    const sessionId = input.sessionId ?? DEFAULT_SESSION_ID;
+    const sessionId = input.sessionId;
     const provider = (input.body.provider ?? "deepseek-web") as ProviderId;
     const modelId = normalizeBoundModelId(provider, input.body.model);
     if (!this.state.tryAcquireBinding(sessionId, provider, modelId)) {
@@ -552,8 +550,8 @@ export class HelperRuntime {
     }
   }
 
-  async resetSession(input: { sessionId?: string; provider?: ProviderId }) {
-    const sessionId = input.sessionId ?? DEFAULT_SESSION_ID;
+  async resetSession(input: { sessionId: string; provider?: ProviderId }) {
+    const sessionId = input.sessionId;
     const sessionsToReset = input.provider
       ? this.state.getAllProviderBoundSessions(sessionId, input.provider)
       : [...this.state.getAllSessionBoundSessions(sessionId).values()];

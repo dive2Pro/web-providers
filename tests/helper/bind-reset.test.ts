@@ -40,21 +40,21 @@ describe("bind and reset", () => {
     const deepseekBind = await app.inject({
       method: "POST",
       url: "/v1/bind",
-      headers: { authorization: "Bearer test-token" },
+      headers: { authorization: "Bearer test-token", "x-web-providers-session-id": "session-a" },
       payload: { provider: "deepseek-web" },
     });
 
     const qwenBind = await app.inject({
       method: "POST",
       url: "/v1/bind",
-      headers: { authorization: "Bearer test-token" },
+      headers: { authorization: "Bearer test-token", "x-web-providers-session-id": "session-a" },
       payload: { provider: "qwen-web" },
     });
 
     const deepseekReset = await app.inject({
       method: "POST",
       url: "/v1/reset",
-      headers: { authorization: "Bearer test-token" },
+      headers: { authorization: "Bearer test-token", "x-web-providers-session-id": "session-a" },
       payload: { provider: "deepseek-web" },
     });
 
@@ -93,7 +93,7 @@ describe("bind and reset", () => {
     const bindResponse = await app.inject({
       method: "POST",
       url: "/v1/bind",
-      headers: { authorization: "Bearer test-token" },
+      headers: { authorization: "Bearer test-token", "x-web-providers-session-id": "session-a" },
     });
 
     expect(bindResponse.statusCode).toBe(200);
@@ -102,7 +102,7 @@ describe("bind and reset", () => {
     const healthResponse = await app.inject({
       method: "GET",
       url: "/v1/health",
-      headers: { authorization: "Bearer test-token" },
+      headers: { authorization: "Bearer test-token", "x-web-providers-session-id": "session-a" },
     });
 
     expect(healthResponse.json()).toMatchObject({
@@ -135,13 +135,13 @@ describe("bind and reset", () => {
     await app.inject({
       method: "POST",
       url: "/v1/bind",
-      headers: { authorization: "Bearer test-token" },
+      headers: { authorization: "Bearer test-token", "x-web-providers-session-id": "session-a" },
     });
 
     const resetResponse = await app.inject({
       method: "POST",
       url: "/v1/reset",
-      headers: { authorization: "Bearer test-token" },
+      headers: { authorization: "Bearer test-token", "x-web-providers-session-id": "session-a" },
     });
 
     expect(resetResponse.statusCode).toBe(200);
@@ -166,7 +166,7 @@ describe("bind and reset", () => {
     const bindResponse = await app.inject({
       method: "POST",
       url: "/v1/bind",
-      headers: { authorization: "Bearer test-token" },
+      headers: { authorization: "Bearer test-token", "x-web-providers-session-id": "session-a" },
     });
 
     expect(bindResponse.statusCode).toBe(409);
@@ -201,14 +201,14 @@ describe("bind and reset", () => {
     const bindResponse = await app.inject({
       method: "POST",
       url: "/v1/bind",
-      headers: { authorization: "Bearer test-token" },
+      headers: { authorization: "Bearer test-token", "x-web-providers-session-id": "session-a" },
       payload: { provider: "qwen-web" },
     });
 
     const healthResponse = await app.inject({
       method: "GET",
       url: "/v1/health",
-      headers: { authorization: "Bearer test-token" },
+      headers: { authorization: "Bearer test-token", "x-web-providers-session-id": "session-a" },
     });
 
     expect(bindResponse.statusCode).toBe(409);

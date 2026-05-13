@@ -2,16 +2,25 @@ import type { FastifyInstance } from "fastify";
 import type { AppContext } from "../app";
 import { HelperError } from "../errors";
 import type { BindRequest, ProviderId } from "../../shared/contracts";
-import { DEFAULT_SESSION_ID } from "../runtime";
+
+const SESSION_HEADER = "x-web-providers-session-id";
 
 export function registerBindRoute(app: FastifyInstance, ctx: AppContext) {
   app.post("/v1/bind", async (request, reply) => {
     const body = ((request.body ?? {}) as Partial<BindRequest>);
     const provider = body.provider ?? "deepseek-web";
+    const sessionId = (request.headers[SESSION_HEADER] as string | undefined)?.trim();
+
+    if (!sessionId) {
+      return reply.code(400).send({
+        error: "AUTOMATION_DESYNC",
+        message: "Missing x-web-providers-session-id header",
+      });
+    }
 
     try {
       const result = await ctx.runtime.bindProvider({
-        sessionId: DEFAULT_SESSION_ID,
+        sessionId,
         provider: provider as ProviderId,
       });
 

@@ -341,6 +341,7 @@ describe("anthropic adapter app", () => {
       url: "/v1/messages",
       headers: {
         "x-api-key": "adapter-token",
+        "x-claude-code-session-id": "claude-session-1",
         "x-request-source": "anthropic-test",
       },
       payload: {
@@ -360,6 +361,7 @@ describe("anthropic adapter app", () => {
         statusCode: 200,
         headers: expect.objectContaining({
           "x-api-key": "adapter-token",
+          "x-claude-code-session-id": "claude-session-1",
           "x-request-source": "anthropic-test",
         }),
         body: {
@@ -397,6 +399,7 @@ describe("anthropic adapter app", () => {
       url: "/v1/messages",
       headers: {
         "x-api-key": "adapter-token",
+        "x-claude-code-session-id": "claude-session-1",
         "x-request-source": "anthropic-api-test",
       },
       payload: {
@@ -413,6 +416,7 @@ describe("anthropic adapter app", () => {
       url: "/v1/debug/request-logs?limit=5",
       headers: {
         "x-api-key": "adapter-token",
+        "x-claude-code-session-id": "claude-session-1",
       },
     });
 
@@ -427,6 +431,7 @@ describe("anthropic adapter app", () => {
           url: "/v1/messages",
           headers: expect.objectContaining({
             "x-api-key": "adapter-token",
+            "x-claude-code-session-id": "claude-session-1",
             "x-request-source": "anthropic-api-test",
           }),
           body: {
@@ -452,6 +457,7 @@ describe("anthropic adapter app", () => {
       url: "/v1/models",
       headers: {
         "x-api-key": "adapter-token",
+        "x-claude-code-session-id": "claude-session-1",
       },
     });
 
@@ -490,6 +496,7 @@ describe("anthropic adapter app", () => {
       url: "/v1/messages",
       headers: {
         "x-api-key": "adapter-token",
+        "x-claude-code-session-id": "claude-session-1",
       },
       payload: {
         model: "anthropic-deepseek-web-chat",
@@ -571,6 +578,7 @@ describe("anthropic adapter app", () => {
       url: "/v1/messages",
       headers: {
         "x-api-key": "adapter-token",
+        "x-claude-code-session-id": "claude-session-1",
       },
       payload: {
         model: "deepseek-web-chat",
@@ -614,6 +622,7 @@ describe("anthropic adapter app", () => {
       url: "/v1/messages",
       headers: {
         "x-api-key": "adapter-token",
+        "x-claude-code-session-id": "claude-session-1",
       },
       payload: {
         model: "qwen-web-tools",
@@ -659,6 +668,7 @@ describe("anthropic adapter app", () => {
       url: "/v1/messages",
       headers: {
         "x-api-key": "adapter-token",
+        "x-claude-code-session-id": "claude-session-1",
       },
       payload: {
         model: "deepseek-web-chat",
@@ -692,6 +702,7 @@ describe("anthropic adapter app", () => {
       url: "/v1/messages",
       headers: {
         "x-api-key": "adapter-token",
+        "x-claude-code-session-id": "claude-session-1",
       },
       payload: {
         model: "qwen-web-tools",
@@ -752,6 +763,7 @@ describe("anthropic adapter app", () => {
       url: "/v1/messages",
       headers: {
         "x-api-key": "adapter-token",
+        "x-claude-code-session-id": "claude-session-1",
       },
       payload: {
         model: "deepseek-web-chat",
@@ -798,6 +810,7 @@ describe("anthropic adapter app", () => {
       url: "/v1/messages",
       headers: {
         "x-api-key": "adapter-token",
+        "x-claude-code-session-id": "claude-session-1",
       },
       payload: {
         model: "qwen-web-tools",
@@ -838,6 +851,7 @@ describe("anthropic adapter app", () => {
       url: "/v1/messages/count_tokens",
       headers: {
         "x-api-key": "adapter-token",
+        "x-claude-code-session-id": "claude-session-1",
       },
       payload: {
         system: "Be terse.",
@@ -869,6 +883,7 @@ describe("anthropic adapter app", () => {
       url: "/v1/messages",
       headers: {
         "x-api-key": "adapter-token",
+        "x-claude-code-session-id": "claude-session-1",
       },
       payload: {
         model: "deepseek-web-chat",
@@ -912,6 +927,7 @@ describe("anthropic adapter app", () => {
       url: "/v1/messages",
       headers: {
         "x-api-key": "adapter-token",
+        "x-claude-code-session-id": "claude-session-1",
       },
       payload: {
         model: "qwen-web-tools",
