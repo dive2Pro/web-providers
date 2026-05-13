@@ -94,6 +94,7 @@ describe("helper app", () => {
     const response = await app.inject({
       method: "GET",
       url: "/v1/debug/provider-last",
+      headers: { "x-web-providers-session-id": "session-a" },
     });
 
     expect(response.statusCode).toBe(200);
@@ -124,6 +125,94 @@ describe("helper app", () => {
 
     expect(response.statusCode).toBe(200);
     expect(response.json()).toBeNull();
+  });
+
+  it("keeps provider debug state isolated per public session header", async () => {
+    const app = buildApp({
+      token: "test-token",
+      browserClient: {
+        getConnectionStatus: async () => "connected",
+        bindProviderTab: async ({ provider }: { provider: string }) => ({
+          tabId: provider === "deepseek-web" ? "tab-1" : "tab-2",
+          url:
+            provider === "deepseek-web"
+              ? "https://chat.deepseek.com/"
+              : "https://chat.qwen.ai/",
+          loginState: "logged_in",
+          bridgeInjected: true,
+          pageState: {
+            inputReady: true,
+            busy: false,
+            latestAssistantPreview: null,
+            assistantCount: 0,
+          },
+        }),
+        resetProvider: async () => undefined,
+        startNewChat: async () => undefined,
+        sendChatPrompt: async ({ provider, prompt }: { provider?: string; prompt: string }) => ({
+          mode: "text",
+          outputText: `${provider}:${prompt}`,
+          modelLabel: provider === "qwen-web" ? "Qwen Web" : "DeepSeek Web",
+        }),
+      } as never,
+    });
+
+    await app.inject({
+      method: "POST",
+      url: "/v1/bind",
+      headers: { authorization: "Bearer test-token", "x-web-providers-session-id": "session-a" },
+      payload: { provider: "deepseek-web" },
+    });
+    await app.inject({
+      method: "POST",
+      url: "/v1/provider/chat",
+      headers: { authorization: "Bearer test-token", "x-web-providers-session-id": "session-a" },
+      payload: {
+        provider: "deepseek-web",
+        model: "deepseek-web-chat",
+        messages: [{ role: "user", content: "hi-a" }],
+      },
+    });
+
+    await app.inject({
+      method: "POST",
+      url: "/v1/bind",
+      headers: { authorization: "Bearer test-token", "x-web-providers-session-id": "session-b" },
+      payload: { provider: "deepseek-web" },
+    });
+    await app.inject({
+      method: "POST",
+      url: "/v1/provider/chat",
+      headers: { authorization: "Bearer test-token", "x-web-providers-session-id": "session-b" },
+      payload: {
+        provider: "deepseek-web",
+        model: "deepseek-web-chat",
+        messages: [{ role: "user", content: "hi-b" }],
+      },
+    });
+
+    const sessionAResponse = await app.inject({
+      method: "GET",
+      url: "/v1/debug/provider-last?provider=deepseek-web",
+      headers: { "x-web-providers-session-id": "session-a" },
+    });
+
+    const sessionBResponse = await app.inject({
+      method: "GET",
+      url: "/v1/debug/provider-last?provider=deepseek-web",
+      headers: { "x-web-providers-session-id": "session-b" },
+    });
+
+    expect(sessionAResponse.statusCode).toBe(200);
+    expect(sessionAResponse.json()).toMatchObject({
+      sessionId: "session-a",
+      prompt: "hi-a",
+    });
+    expect(sessionBResponse.statusCode).toBe(200);
+    expect(sessionBResponse.json()).toMatchObject({
+      sessionId: "session-b",
+      prompt: "hi-b",
+    });
   });
 
   it("still requires authorization for non-debug helper routes", async () => {

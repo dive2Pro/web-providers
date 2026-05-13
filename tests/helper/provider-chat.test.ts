@@ -469,6 +469,7 @@ describe("provider chat route", () => {
     const debugResponse = await app.inject({
       method: "GET",
       url: "/v1/debug/provider-last?provider=qwen-web",
+      headers: { "x-web-providers-session-id": "session-a" },
     });
 
     expect(bindResponse.statusCode).toBe(200);

@@ -375,7 +375,7 @@ export class HelperRuntime {
         prompt,
       );
       baseDebugRecord = debugSeed.record;
-      this.state.setLastProviderRequest(provider, baseDebugRecord);
+      this.state.setLastProviderRequest(sessionId, provider, baseDebugRecord);
       this.state.setActiveRequest(session.tabId, {
         requestId: debugSeed.requestId,
         prompt,
@@ -473,7 +473,7 @@ export class HelperRuntime {
         shouldPersistSessionBindings = true;
       }
       this.state.setActiveRequest(session.tabId, null);
-      this.state.setLastProviderRequest(provider, {
+      this.state.setLastProviderRequest(sessionId, provider, {
         ...baseDebugRecord,
         completedAt: new Date().toISOString(),
         status: "completed",
@@ -532,7 +532,7 @@ export class HelperRuntime {
               `Unexpected automation failure: ${rootCauseMessage}`,
             );
       if (baseDebugRecord) {
-        this.state.setLastProviderRequest(provider, {
+        this.state.setLastProviderRequest(sessionId, provider, {
           ...baseDebugRecord,
           completedAt: new Date().toISOString(),
           status: "failed",
@@ -571,7 +571,7 @@ export class HelperRuntime {
 
     if (input.provider) {
       this.state.clearProviderBoundSessions(sessionId, input.provider);
-      this.state.setLastProviderRequest(input.provider, null);
+      this.state.setLastProviderRequest(sessionId, input.provider, null);
       await this.persistSessionBindings();
       return;
     }
@@ -596,7 +596,7 @@ export class HelperRuntime {
       } else {
         await this.browserClient.resetPageBridge(session.tabId);
       }
-      this.state.setLastProviderRequest(session.provider, null);
+      this.state.setLastProviderRequest(sessionId, session.provider, null);
     }
 
     this.state.clearSessionState(sessionId);

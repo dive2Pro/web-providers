@@ -14,7 +14,7 @@ export class HelperState {
   private sessionMeta = new Map<string, SessionStateMeta>();
   private activeRequestsByTabId = new Map<string, ActiveRequest>();
   private runningBindings = new Set<string>();
-  private lastProviderRequests = new Map<ProviderId, ProviderRequestDebugRecord>();
+  private lastProviderRequestsBySession = new Map<string, Map<ProviderId, ProviderRequestDebugRecord>>();
   private degraded = false;
   private lastBridgeHeartbeatAt: string | null = null;
 
@@ -34,6 +34,17 @@ export class HelperState {
 
     const next = new Map<string, BoundSession>();
     this.boundSessionsBySession.set(sessionId, next);
+    return next;
+  }
+
+  private getOrCreateLastProviderRequests(sessionId: string) {
+    const existing = this.lastProviderRequestsBySession.get(sessionId);
+    if (existing) {
+      return existing;
+    }
+
+    const next = new Map<ProviderId, ProviderRequestDebugRecord>();
+    this.lastProviderRequestsBySession.set(sessionId, next);
     return next;
   }
 
@@ -187,6 +198,7 @@ export class HelperState {
   clearSessionState(sessionId: string) {
     this.boundSessionsBySession.delete(sessionId);
     this.sessionMeta.delete(sessionId);
+    this.lastProviderRequestsBySession.delete(sessionId);
   }
 
   hydrateSessionBindings(sessions: PersistedSessionBindingSession[]) {
@@ -261,15 +273,21 @@ export class HelperState {
     this.activeRequestsByTabId.delete(tabId);
   }
 
-  getLastProviderRequest(provider?: ProviderId) {
-    if (provider) {
-      return this.lastProviderRequests.get(provider) ?? null;
+  getLastProviderRequest(sessionId: string, provider?: ProviderId) {
+    const requests = this.lastProviderRequestsBySession.get(sessionId);
+    if (!requests) {
+      return null;
     }
 
-    return this.lastProviderRequests.values().next().value ?? null;
+    if (provider) {
+      return requests.get(provider) ?? null;
+    }
+
+    return requests.values().next().value ?? null;
   }
 
   setLastProviderRequest(
+    sessionId: string,
     providerOrRecord: ProviderId | ProviderRequestDebugRecord | null,
     record?: ProviderRequestDebugRecord | null,
   ) {
@@ -278,25 +296,38 @@ export class HelperState {
       typeof providerOrRecord === "object" &&
       "provider" in providerOrRecord
     ) {
-      this.lastProviderRequests.set(providerOrRecord.provider, providerOrRecord);
+      this.getOrCreateLastProviderRequests(sessionId).set(
+        providerOrRecord.provider,
+        providerOrRecord,
+      );
       return;
     }
 
     if (typeof providerOrRecord === "string") {
       if (record) {
-        this.lastProviderRequests.set(providerOrRecord, record);
+        const requests = this.getOrCreateLastProviderRequests(sessionId);
+        requests.set(providerOrRecord, record);
         return;
       }
 
-      this.lastProviderRequests.delete(providerOrRecord);
+      const requests = this.lastProviderRequestsBySession.get(sessionId);
+      if (!requests) {
+        return;
+      }
+
+      requests.delete(providerOrRecord);
+      if (requests.size === 0) {
+        this.lastProviderRequestsBySession.delete(sessionId);
+      }
       return;
     }
 
-    this.lastProviderRequests.clear();
+    this.lastProviderRequestsBySession.delete(sessionId);
   }
 
-  getAllLastProviderRequests() {
-    return Object.fromEntries(this.lastProviderRequests.entries());
+  getAllLastProviderRequests(sessionId: string) {
+    const requests = this.lastProviderRequestsBySession.get(sessionId);
+    return requests ? Object.fromEntries(requests.entries()) : {};
   }
 
   hasRunningRequest(tabId?: string) {
@@ -356,7 +387,7 @@ export class HelperState {
     this.sessionMeta.clear();
     this.activeRequestsByTabId.clear();
     this.runningBindings.clear();
-    this.lastProviderRequests.clear();
+    this.lastProviderRequestsBySession.clear();
     this.degraded = false;
     this.lastBridgeHeartbeatAt = null;
   }

@@ -2,14 +2,21 @@ import type { FastifyInstance } from "fastify";
 import type { AppContext } from "../app";
 import type { ProviderId } from "../../shared/contracts";
 
+const SESSION_HEADER = "x-web-providers-session-id";
+
 export function registerDebugProviderLastRoute(app: FastifyInstance, ctx: AppContext) {
   app.get("/v1/debug/provider-last", async (request) => {
-    const { provider } = (request.query ?? {}) as { provider?: ProviderId };
-    if (provider) {
-      return ctx.state.getLastProviderRequest(provider);
+    const sessionId = (request.headers[SESSION_HEADER] as string | undefined)?.trim();
+    if (!sessionId) {
+      return null;
     }
 
-    const allRecords = ctx.state.getAllLastProviderRequests();
+    const { provider } = (request.query ?? {}) as { provider?: ProviderId };
+    if (provider) {
+      return ctx.state.getLastProviderRequest(sessionId, provider);
+    }
+
+    const allRecords = ctx.state.getAllLastProviderRequests(sessionId);
     const entries = Object.entries(allRecords);
 
     if (entries.length === 0) {

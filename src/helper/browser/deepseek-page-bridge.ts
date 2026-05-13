@@ -1269,8 +1269,9 @@ export const INJECTED_BRIDGE_SOURCE = `
     const dsMessages = Array.from(document.querySelectorAll(".ds-message"));
     for (let index = dsMessages.length - 1; index >= 0; index -= 1) {
       const message = dsMessages[index];
-      if (message && message.querySelector(".ds-markdown")) {
-        return message;
+      const markdownNode = message?.querySelector(".ds-markdown");
+      if (markdownNode) {
+        return markdownNode;
       }
     }
 

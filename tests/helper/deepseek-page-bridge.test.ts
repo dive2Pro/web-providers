@@ -509,6 +509,28 @@ describe("deepseek page bridge", () => {
     });
   });
 
+  it("uses only the assistant markdown block for the latest preview", () => {
+    const { context, latestAssistantMarkdown, latestAssistantMessage } = createBridgeTestContext({
+      assistantVisible: true,
+    });
+
+    if (!latestAssistantMarkdown || !latestAssistantMessage) {
+      throw new Error("expected assistant nodes to exist");
+    }
+
+    latestAssistantMarkdown.textContent = "final answer";
+    latestAssistantMessage.textContent = "Thought for 2 seconds\nfinal answer";
+
+    vm.runInNewContext(INJECTED_BRIDGE_SOURCE, context);
+
+    const bridge = (context.window as Record<string, any>).__piDeepSeekBridge;
+    expect(bridge).toBeTruthy();
+
+    expect(bridge.getPageState()).toMatchObject({
+      latestAssistantPreview: "final answer",
+    });
+  });
+
   it("keeps multi-object protocol output as plain text for upper-layer repair", () => {
     const reply = [
       '{"type":"message","content":"先看下项目结构"}',
