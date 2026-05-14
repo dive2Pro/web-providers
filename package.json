@@ -1,11 +1,17 @@
 {
   "name": "web-providers",
-  "private": true,
+  "version": "1.0.2",
   "type": "module",
+  "files": [
+    "src",
+    "README.md"
+  ],
   "scripts": {
     "dev": "tsx src/helper/main.ts",
     "test": "vitest run",
     "build": "rm -rf dist && tsc -p tsconfig.json",
+    "prepublishOnly": "npm run build",
+    "publish:wsf": "npm publish --registry=http://static-repo.wanshifu.com:8007/",
     "slides:dev": "slidev slides/web-providers.md",
     "slides:build": "slidev build slides/web-providers.md --out ../slides-dist",
     "slides:export": "slidev export slides/web-providers.md"

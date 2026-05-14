@@ -387,10 +387,15 @@ export class HelperRuntime {
       });
 
       if (shouldStartFreshSession) {
+        const startNewChatTarget = this.browserClient.bindProviderTab
+          ? {
+              provider,
+              tabId: session.tabId,
+              ...(modelId !== null && modelId !== undefined ? { modelId } : {}),
+            }
+          : session.tabId;
         await this.browserClient.startNewChat(
-          this.browserClient.bindProviderTab
-            ? { provider, tabId: session.tabId, modelId }
-            : session.tabId,
+          startNewChatTarget,
         );
       }
 

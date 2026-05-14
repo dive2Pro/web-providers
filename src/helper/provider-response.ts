@@ -454,16 +454,17 @@ export function getProviderResponseRepairDecision(
       response: normalized,
       shouldRepair: false,
       issues: [],
-      rawOutput: response.outputText,
+      rawOutput: response.outputText ?? "",
     };
   }
 
-  const parsed = originalParsed ?? parseStrictProtocolEnvelope(response.outputText);
+  const outputText = response.outputText ?? "";
+  const parsed = originalParsed ?? parseStrictProtocolEnvelope(outputText);
   return {
     response: normalized,
     shouldRepair: parsed.envelope === null,
     issues: parsed.error ? [parsed.error] : ["Return exactly one JSON object."],
-    rawOutput: response.outputText,
+    rawOutput: outputText,
   };
 }
 
