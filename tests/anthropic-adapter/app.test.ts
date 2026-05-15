@@ -146,6 +146,59 @@ describe("anthropic adapter normalization", () => {
       ],
     });
   });
+
+  it("filters WebSearch tools for DeepSeek models", () => {
+    const normalized = normalizeMessagesRequest(
+      {
+        model: "deepseek-web-pro",
+        messages: [{ role: "user", content: "search then read" }],
+        tools: [
+          {
+            name: "WebSearch",
+            input_schema: { type: "object", properties: {} },
+          },
+          {
+            name: "read_file",
+            input_schema: { type: "object", properties: {} },
+          },
+        ],
+        tool_choice: {
+          type: "tool",
+          name: "WebSearch",
+        },
+      },
+      getAnthropicPublicModel("deepseek-web-pro")!,
+    );
+
+    expect(normalized.tools).toEqual([
+      expect.objectContaining({
+        name: "read_file",
+      }),
+    ]);
+    expect(normalized.toolChoice).toBe("auto");
+  });
+
+  it("downgrades DeepSeek tool choice to none when WebSearch is the only tool", () => {
+    const normalized = normalizeMessagesRequest(
+      {
+        model: "deepseek-web-pro",
+        messages: [{ role: "user", content: "search the web" }],
+        tools: [
+          {
+            name: "web_search",
+            input_schema: { type: "object", properties: {} },
+          },
+        ],
+        tool_choice: {
+          type: "any",
+        },
+      },
+      getAnthropicPublicModel("deepseek-web-pro")!,
+    );
+
+    expect(normalized.tools).toEqual([]);
+    expect(normalized.toolChoice).toBe("none");
+  });
 });
 
 describe("anthropic adapter helper client", () => {

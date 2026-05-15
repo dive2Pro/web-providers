@@ -3,6 +3,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { buildApp } from "../../src/helper/app";
+import { JSON_PROTOCOL_RESPONSE_FORMAT_DECLARATION } from "../../src/shared/code-agent-prompt";
+
+function expectedChatPrompt(userPrompt: string) {
+  return [userPrompt.trim(), "------ \n", JSON_PROTOCOL_RESPONSE_FORMAT_DECLARATION].join(
+    "\n\n",
+  );
+}
 
 describe("helper app", () => {
   const requestLogDirs: string[] = [];
@@ -206,12 +213,12 @@ describe("helper app", () => {
     expect(sessionAResponse.statusCode).toBe(200);
     expect(sessionAResponse.json()).toMatchObject({
       sessionId: "session-a",
-      prompt: "hi-a",
+      prompt: expectedChatPrompt("hi-a"),
     });
     expect(sessionBResponse.statusCode).toBe(200);
     expect(sessionBResponse.json()).toMatchObject({
       sessionId: "session-b",
-      prompt: "hi-b",
+      prompt: expectedChatPrompt("hi-b"),
     });
   });
 

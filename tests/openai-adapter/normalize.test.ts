@@ -223,4 +223,69 @@ describe("openai adapter normalization", () => {
       ],
     });
   });
+
+  it("filters WebSearch tools for DeepSeek models", () => {
+    const normalized = normalizeChatCompletionsRequest(
+      {
+        model: "deepseek-web-pro",
+        messages: [{ role: "user", content: "search then read" }],
+        tools: [
+          {
+            type: "function",
+            function: {
+              name: "WebSearch",
+              parameters: { type: "object", properties: {} },
+            },
+          },
+          {
+            type: "function",
+            function: {
+              name: "read_file",
+              parameters: { type: "object", properties: {} },
+            },
+          },
+        ],
+        tool_choice: {
+          type: "function",
+          function: {
+            name: "WebSearch",
+          },
+        },
+      },
+      getPublicModel("deepseek-web-pro")!,
+    );
+
+    expect(normalized.tools).toEqual([
+      expect.objectContaining({
+        name: "read_file",
+      }),
+    ]);
+    expect(normalized.toolChoice).toBe("auto");
+  });
+
+  it("downgrades DeepSeek tool choice to none when WebSearch is the only tool", () => {
+    const normalized = normalizeResponsesRequest(
+      {
+        model: "deepseek-web-pro",
+        input: "search the web",
+        tools: [
+          {
+            type: "function",
+            name: "web_search",
+            input_schema: { type: "object", properties: {} },
+          } as unknown as {
+            type?: "function";
+            name: string;
+            description?: string;
+            parameters?: unknown;
+          },
+        ],
+        tool_choice: "auto",
+      },
+      getPublicModel("deepseek-web-pro")!,
+    );
+
+    expect(normalized.tools).toEqual([]);
+    expect(normalized.toolChoice).toBe("none");
+  });
 });

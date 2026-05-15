@@ -21,6 +21,7 @@ import {
   RESPONSE_TOOL_CALL_EXAMPLE,
 } from "../shared/code-agent-prompt";
 import { logServiceStarted } from "../shared/startup-log";
+import { shouldDropToolForProvider } from "../shared/tool-filter";
 
 interface ManagedHelper {
   baseUrl: string;
@@ -91,6 +92,15 @@ function sanitizeTools(tools: ToolDefinition[] | undefined) {
       Boolean(tool) &&
       typeof tool.name === "string" &&
       tool.name.trim().length > 0,
+  );
+}
+
+function filterToolsForProvider(
+  provider: string,
+  tools: ToolDefinition[] | undefined,
+) {
+  return sanitizeTools(tools).filter(
+    (tool) => !shouldDropToolForProvider(provider, tool.name),
   );
 }
 
@@ -1516,8 +1526,12 @@ export default function registerDeepSeekExtension(
 
         try {
           const current = await ensureHelper();
+          const availableTools = filterToolsForProvider(model.provider, context.tools);
 
-          const sessionInit = buildSessionInitPrompt(context);
+          const sessionInit = buildSessionInitPrompt({
+            ...context,
+            tools: availableTools,
+          });
           const emitText = (text: string) => {
             if (text.length === 0) {
               return;
@@ -1669,7 +1683,7 @@ export default function registerDeepSeekExtension(
           let response: ProviderChatResponse;
           response = await sendProviderTurn(toProviderMessages(context));
 
-          const repairDecision = shouldRepairProviderResponse(response, context.tools);
+          const repairDecision = shouldRepairProviderResponse(response, availableTools);
           if (repairDecision.shouldRepair) {
             response = await sendProviderTurn([
               {
@@ -1677,12 +1691,12 @@ export default function registerDeepSeekExtension(
                 content: buildProtocolRepairPrompt({
                   rawOutput: repairDecision.rawOutput,
                   issues: repairDecision.issues,
-                  tools: context.tools,
+                  tools: availableTools,
                 }),
               },
             ]);
 
-            const postRepairDecision = shouldRepairProviderResponse(response, context.tools);
+            const postRepairDecision = shouldRepairProviderResponse(response, availableTools);
             if (postRepairDecision.shouldRepair) {
               if (
                 response.mode === "text" &&
@@ -1698,13 +1712,13 @@ export default function registerDeepSeekExtension(
                 response = await sendProviderTurn([
                   {
                     role: "user",
-                    content: buildMinimalProtocolRepairPrompt(context.tools),
+                    content: buildMinimalProtocolRepairPrompt(availableTools),
                   },
                 ]);
 
                 const finalRepairDecision = shouldRepairProviderResponse(
                   response,
-                  context.tools,
+                  availableTools,
                 );
                 if (finalRepairDecision.shouldRepair) {
                   const recoveredText = recoverPlainTextFromProtocolFailure(

@@ -1,6 +1,15 @@
 import { describe, expect, it } from "vitest";
 import { buildApp } from "../../src/helper/app";
 
+function messageResponse(content: string) {
+  return {
+    mode: "text" as const,
+    outputText: JSON.stringify({ type: "message", content }),
+    rawOutputText: JSON.stringify({ type: "message", content }),
+    modelLabel: "DeepSeek Web",
+  };
+}
+
 describe("internal pi routes", () => {
   it("returns MODEL_BUSY for concurrent turns on the same pi session/provider without opening a second tab", async () => {
     const bindCalls: Array<Record<string, unknown>> = [];
@@ -41,11 +50,7 @@ describe("internal pi routes", () => {
             resolvePrompt = resolve;
           });
 
-          return {
-            mode: "text",
-            outputText: `reply:${prompt}`,
-            modelLabel: "DeepSeek Web",
-          };
+          return messageResponse(`reply:${prompt}`);
         },
       } as never,
     });
@@ -138,11 +143,8 @@ describe("internal pi routes", () => {
         },
         startNewChat: async () => undefined,
         resetProvider: async () => undefined,
-        sendChatPrompt: async ({ prompt }: { prompt: string }) => ({
-          mode: "text",
-          outputText: `reply:${prompt}`,
-          modelLabel: "DeepSeek Web",
-        }),
+        sendChatPrompt: async ({ prompt }: { prompt: string }) =>
+          messageResponse(`reply:${prompt}`),
       } as never,
     });
 
@@ -237,11 +239,7 @@ describe("internal pi routes", () => {
           await bothStarted;
           currentConcurrent -= 1;
 
-          return {
-            mode: "text",
-            outputText: `reply:${prompt}`,
-            modelLabel: "DeepSeek Web",
-          };
+          return messageResponse(`reply:${prompt}`);
         },
       } as never,
     });

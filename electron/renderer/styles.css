@@ -27,7 +27,8 @@ body {
 }
 
 button,
-input {
+input,
+select {
   font: inherit;
 }
 
@@ -81,6 +82,19 @@ input {
   align-items: center;
 }
 
+.hero-select {
+  display: grid;
+  gap: 6px;
+}
+
+.hero-select span {
+  font-family: "Menlo", "SFMono-Regular", monospace;
+  font-size: 12px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
 .grid {
   display: grid;
   grid-template-columns: repeat(12, minmax(0, 1fr));
@@ -115,7 +129,7 @@ input {
 
 .status-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 14px;
 }
 
@@ -184,7 +198,19 @@ input {
   color: var(--muted);
 }
 
-input {
+.field-note {
+  margin: -2px 0 0;
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--muted);
+}
+
+.field-note code {
+  font-family: "Menlo", "SFMono-Regular", monospace;
+}
+
+input,
+select {
   width: 100%;
   padding: 13px 16px;
   border: 1px solid var(--line);
@@ -279,6 +305,25 @@ input {
   font-size: 12px;
   line-height: 1.6;
   word-break: break-all;
+}
+
+.debug-panel {
+  margin-top: 18px;
+  border-top: 1px solid var(--line);
+  padding-top: 16px;
+}
+
+.debug-panel summary {
+  cursor: pointer;
+  font-family: "Menlo", "SFMono-Regular", monospace;
+  font-size: 12px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.debug-list {
+  margin-top: 14px;
 }
 
 @media (max-width: 980px) {

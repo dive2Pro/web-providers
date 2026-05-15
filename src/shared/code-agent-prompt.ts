@@ -28,6 +28,20 @@ export const JSON_PROTOCOL_REPAIR_REQUIREMENT =
 export const JSON_PROTOCOL_REPAIR_ACTION_RULE =
   "每次回复只能返回一种最终动作：message、tool_call 或 tool_calls。";
 
+export const JSON_PROTOCOL_RESPONSE_FORMAT_DECLARATION = [
+  JSON_PROTOCOL_REPAIR_REQUIREMENT,
+  JSON_PROTOCOL_REPAIR_ACTION_RULE,
+  `普通回复使用：${RESPONSE_MESSAGE_EXAMPLE}`,
+  `工具调用使用：${RESPONSE_TOOL_CALL_EXAMPLE}`,
+  `多工具并行调用使用：${RESPONSE_TOOL_CALLS_EXAMPLE}`,
+  "不要在 JSON 前后输出任何额外文本，禁止使用 Markdown 或代码块包裹。",
+  `不要忘记, 你是 deepseek web, 你能使用自带的 web search search the web when necessary`,
+  `Reasoning Effort: Absolute maximum with no shortcuts permitted.
+You MUST be very thorough in your thinking and comprehensively decompose the problem to resolve the root cause, rigorously stress-testing your logic against all potential
+paths, edge cases, and adversarial scenarios.
+Explicitly write out your entire deliberation process, documenting every intermediate step, considered alternative, and rejected hypothesis to ensure absolutely no assumption is left unchecked.`
+].join("\n");
+
 export const JSON_PROTOCOL_MINIMAL_REPEAT_RULE =
   "不要重复这些指令。";
 

@@ -3,18 +3,15 @@ import { listPublicModels } from "../openai-adapter/models";
 
 export const DEFAULT_HELPER_PORT = 4318;
 export const DEFAULT_GATEWAY_PORT = 4321;
+const DEFAULT_CLAUDE_CODE_MODEL = "deepseek-web-pro";
+const DEFAULT_CLAUDE_CODE_FAST_MODEL = "deepseek-web-flash";
 
 export type DesktopConfig = {
-  helperPort: number;
-  gatewayPort: number;
   gatewayToken: string;
   helperToken: string;
 };
 
-export type DesktopPublicConfig = Pick<
-  DesktopConfig,
-  "helperPort" | "gatewayPort" | "gatewayToken"
->;
+export type DesktopPublicConfig = Pick<DesktopConfig, "gatewayToken">;
 
 export type DesktopSettingsInput = Partial<DesktopPublicConfig>;
 
@@ -26,18 +23,25 @@ export type ClaudeCodeGuide = {
   steps: string[];
 };
 
+export type ClaudeCodeLaunchConfig = {
+  ANTHROPIC_API_KEY: string;
+  ANTHROPIC_BASE_URL: string;
+  ANTHROPIC_DEFAULT_HAIKU_MODEL: string;
+  ANTHROPIC_DEFAULT_OPUS_MODEL: string;
+  ANTHROPIC_DEFAULT_SONNET_MODEL: string;
+  CLAUDE_CODE_SUBAGENT_MODEL: string;
+  ANTHROPIC_MODEL: string;
+};
+
+export type ShellCommandFormat = "multiline";
+
 export function createDesktopConfig(
   input?: Partial<DesktopConfig>,
 ): DesktopConfig {
-  const config: DesktopConfig = {
-    helperPort: normalizePort(input?.helperPort, DEFAULT_HELPER_PORT),
-    gatewayPort: normalizePort(input?.gatewayPort, DEFAULT_GATEWAY_PORT),
+  return {
     gatewayToken: normalizeToken(input?.gatewayToken, createSecret("gateway")),
     helperToken: normalizeToken(input?.helperToken, createSecret("helper")),
   };
-
-  assertDistinctPorts(config);
-  return config;
 }
 
 export function deserializeDesktopConfig(raw: unknown): DesktopConfig {
@@ -52,79 +56,83 @@ export function mergeDesktopSettings(
   current: DesktopConfig,
   input: DesktopSettingsInput,
 ): DesktopConfig {
-  const next: DesktopConfig = {
+  return {
     ...current,
-    helperPort:
-      input.helperPort === undefined
-        ? current.helperPort
-        : normalizeStrictPort(input.helperPort, "Helper port"),
-    gatewayPort:
-      input.gatewayPort === undefined
-        ? current.gatewayPort
-        : normalizeStrictPort(input.gatewayPort, "Gateway port"),
     gatewayToken:
       input.gatewayToken === undefined
         ? current.gatewayToken
         : normalizeStrictToken(input.gatewayToken, "Gateway token"),
   };
-
-  assertDistinctPorts(next);
-  return next;
 }
 
 export function toPublicDesktopConfig(
   config: DesktopConfig,
 ): DesktopPublicConfig {
   return {
-    helperPort: config.helperPort,
-    gatewayPort: config.gatewayPort,
     gatewayToken: config.gatewayToken,
   };
 }
 
 export function buildClaudeCodeGuide(
-  config: DesktopPublicConfig,
+  input: {
+    gatewayUrl: string;
+    gatewayToken: string;
+  },
 ): ClaudeCodeGuide {
-  const baseUrl = `http://127.0.0.1:${config.gatewayPort}`;
-
   return {
     protocol: "Anthropic",
-    baseUrl,
-    apiKey: config.gatewayToken,
+    baseUrl: input.gatewayUrl,
+    apiKey: input.gatewayToken,
     models: listPublicModels().map((model) => model.id),
     steps: [
       "Start Web Providers Desktop and keep the service status green.",
-      "In `cc switch`, set Protocol to `Anthropic`.",
-      `Set Base URL to \`${baseUrl}\`.`,
-      "Set API Key to the gateway token shown in the desktop app.",
+      "Choose a model next to `Copy Claude Command`.",
+      "Click `Copy Claude Command` and paste the command into your terminal.",
+      "The copied command maps all Claude Code modes to the selected model.",
+      "If you configure Claude Code manually, use the Protocol / Base URL / API Key shown here.",
     ],
   };
 }
 
+export function buildClaudeCodeLaunchConfig(input: {
+  gatewayUrl: string;
+  gatewayToken: string;
+  modelId: string;
+}): ClaudeCodeLaunchConfig {
+  const modelId = normalizeClaudeCodeModel(input.modelId, DEFAULT_CLAUDE_CODE_MODEL);
+
+  return {
+    ANTHROPIC_API_KEY: input.gatewayToken,
+    ANTHROPIC_BASE_URL: input.gatewayUrl,
+    ANTHROPIC_DEFAULT_HAIKU_MODEL: modelId,
+    ANTHROPIC_DEFAULT_OPUS_MODEL: modelId,
+    ANTHROPIC_DEFAULT_SONNET_MODEL: modelId,
+    CLAUDE_CODE_SUBAGENT_MODEL: modelId,
+    ANTHROPIC_MODEL: modelId,
+  };
+}
+
+export function buildClaudeCodeStartupCommand(
+  env: Record<string, string>,
+  format: ShellCommandFormat = "multiline",
+) {
+  if (format === "multiline") {
+    const assignments = Object.entries(env).map(
+      ([key, value]) => `  ${key}=${quoteShellValue(value)} \\`,
+    );
+
+    return [
+      "env \\",
+      ...assignments,
+      "  claude",
+    ].join("\n");
+  }
+
+  return "claude";
+}
+
 function createSecret(prefix: string) {
   return `${prefix}-${randomBytes(12).toString("hex")}`;
-}
-
-function normalizePort(value: unknown, fallback: number) {
-  if (value === undefined || value === null || value === "") {
-    return fallback;
-  }
-
-  const parsed = Number(value);
-  if (Number.isInteger(parsed) && parsed >= 1 && parsed <= 65535) {
-    return parsed;
-  }
-
-  return fallback;
-}
-
-function normalizeStrictPort(value: unknown, label: string) {
-  const parsed = Number(value);
-  if (!Number.isInteger(parsed) || parsed < 1 || parsed > 65535) {
-    throw new Error(`${label} must be an integer between 1 and 65535.`);
-  }
-
-  return parsed;
 }
 
 function normalizeToken(value: unknown, fallback: string) {
@@ -144,8 +152,19 @@ function normalizeStrictToken(value: unknown, label: string) {
   return value.trim();
 }
 
-function assertDistinctPorts(config: Pick<DesktopConfig, "helperPort" | "gatewayPort">) {
-  if (config.helperPort === config.gatewayPort) {
-    throw new Error("Helper port and gateway port must be different.");
+function normalizeClaudeCodeModel(value: unknown, fallback: string) {
+  if (typeof value !== "string") {
+    return fallback;
   }
+
+  const trimmed = value.trim();
+  if (trimmed.length === 0) {
+    return fallback;
+  }
+
+  return listPublicModels().some((model) => model.id === trimmed) ? trimmed : fallback;
+}
+
+function quoteShellValue(value: string) {
+  return `'${value.replace(/'/g, `'\"'\"'`)}'`;
 }

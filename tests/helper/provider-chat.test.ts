@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { buildApp } from "../../src/helper/app";
 import { HelperError } from "../../src/helper/errors";
 import {
+  JSON_PROTOCOL_RESPONSE_FORMAT_DECLARATION,
   JSON_PROTOCOL_REPAIR_ACTION_RULE,
   JSON_PROTOCOL_REPAIR_HEADER,
   JSON_PROTOCOL_REPAIR_REQUIREMENT,
@@ -24,6 +25,13 @@ function messageResponse(
       : {}),
     ...(input?.debug ? { debug: input.debug } : {}),
   };
+}
+
+function expectedChatPrompt(userPrompt: string, sessionInit?: string) {
+  const prompt = [userPrompt.trim(), "------ \n", JSON_PROTOCOL_RESPONSE_FORMAT_DECLARATION].join(
+    "\n\n",
+  );
+  return sessionInit ? `${sessionInit}\n\n${prompt}` : prompt;
 }
 
 describe("provider chat route", () => {
@@ -168,7 +176,7 @@ describe("provider chat route", () => {
     ]);
   });
 
-  it("does not reopen a new tab when rebinding the existing session fails with a non-stale error", async () => {
+  it("reopens the remembered url when rebinding the existing session reports NOT_BOUND", async () => {
     const bindCalls: Array<Record<string, unknown>> = [];
 
     const app = buildApp({
@@ -239,14 +247,15 @@ describe("provider chat route", () => {
     });
 
     expect(firstResponse.statusCode).toBe(200);
-    expect(secondResponse.statusCode).toBe(409);
-    expect(secondResponse.json()).toEqual({
-      error: "NOT_BOUND",
-      message: "DeepSeek tab is still loading. Wait for the page to finish loading and retry.",
-    });
+    expect(secondResponse.statusCode).toBe(200);
     expect(bindCalls).toEqual([
       expect.objectContaining({ provider: "deepseek-web", openNew: true }),
       expect.objectContaining({ provider: "deepseek-web", tabId: "tab-1" }),
+      expect.objectContaining({
+        provider: "deepseek-web",
+        openNew: true,
+        openUrl: "https://chat.deepseek.com/",
+      }),
     ]);
   });
 
@@ -582,6 +591,104 @@ describe("provider chat route", () => {
     ]);
   });
 
+  it("reopens the remembered chat url when the existing tab is no longer ready during bind", async () => {
+    const bindCalls: Array<{
+      provider: string;
+      tabId?: string;
+      openNew?: boolean;
+      openUrl?: string;
+    }> = [];
+    const sendCalls: Array<{ tabId: string; prompt: string }> = [];
+
+    const app = buildApp({
+      token: "test-token",
+      browserClient: {
+        getConnectionStatus: async () => "connected",
+        bindProviderTab: async (input: {
+          provider: string;
+          tabId?: string;
+          openNew?: boolean;
+          openUrl?: string;
+          passive?: boolean;
+        }) => {
+          bindCalls.push(input);
+
+          if (input.tabId) {
+            return {
+              tabId: input.tabId,
+              url: "https://chat.deepseek.com/a/chat/s/session-1",
+              loginState: "logged_out",
+              bridgeInjected: true,
+              pageState: {
+                inputReady: false,
+                busy: false,
+                latestAssistantPreview: null,
+                assistantCount: 0,
+                blockingMessage:
+                  "DeepSeek tab is still loading. Wait for the page to finish loading and retry.",
+              },
+            };
+          }
+
+          return {
+            tabId:
+              input.openNew && input.openUrl
+                ? "tab-2"
+                : "tab-1",
+            url: input.openUrl ?? "https://chat.deepseek.com/a/chat/s/session-1",
+            loginState: "logged_in",
+            bridgeInjected: true,
+            pageState: {
+              inputReady: true,
+              busy: false,
+              latestAssistantPreview: null,
+              assistantCount: 0,
+              blockingMessage: null,
+            },
+          };
+        },
+        resetProvider: async () => undefined,
+        startNewChat: async () => undefined,
+        sendChatPrompt: async (input: { tabId: string; prompt: string }) => {
+          sendCalls.push(input);
+          return messageResponse(`reply:${input.prompt}`);
+        },
+      } as never,
+    });
+
+    for (const prompt of ["one", "two"]) {
+      const response = await app.inject({
+        method: "POST",
+        url: "/v1/provider/chat",
+        headers: {
+          authorization: "Bearer test-token",
+          "x-web-providers-session-id": "public-session-rebind-by-url",
+        },
+        payload: {
+          provider: "deepseek-web",
+          model: "deepseek-web-chat",
+          messages: [{ role: "user", content: prompt }],
+        },
+      });
+
+      expect(response.statusCode).toBe(200);
+    }
+
+    expect(bindCalls).toEqual([
+      expect.objectContaining({ provider: "deepseek-web", openNew: true }),
+      expect.objectContaining({ provider: "deepseek-web", tabId: "tab-1" }),
+      expect.objectContaining({
+        provider: "deepseek-web",
+        openNew: true,
+        openUrl: "https://chat.deepseek.com/a/chat/s/session-1",
+      }),
+    ]);
+    expect(sendCalls).toEqual([
+      expect.objectContaining({ tabId: "tab-1", prompt: expectedChatPrompt("one") }),
+      expect.objectContaining({ tabId: "tab-2", prompt: expectedChatPrompt("two") }),
+    ]);
+  });
+
   it("accepts provider messages and returns structured text output", async () => {
     const app = buildApp({
       token: "test-token",
@@ -637,7 +744,7 @@ describe("provider chat route", () => {
     expect(response.statusCode).toBe(200);
     expect(response.json()).toEqual({
       mode: "text",
-      outputText: "reply:hello",
+      outputText: `reply:${expectedChatPrompt("hello")}`,
       finishReason: "stop",
       modelLabel: "DeepSeek Web",
     });
@@ -836,7 +943,7 @@ describe("provider chat route", () => {
       modelLabel: "DeepSeek Web",
     });
     expect(freshChatCount).toBe(1);
-    expect(prompts[0]).toBe("You are terse.\n\nhello");
+    expect(prompts[0]).toBe(expectedChatPrompt("hello", "You are terse."));
     expect(prompts[1]).toContain(JSON_PROTOCOL_REPAIR_HEADER);
     expect(prompts[1]).toContain(JSON_PROTOCOL_REPAIR_REQUIREMENT);
     expect(prompts[1]).toContain(JSON_PROTOCOL_REPAIR_ACTION_RULE);
@@ -968,7 +1075,7 @@ describe("provider chat route", () => {
       },
     });
 
-    expect(capturedPrompt).toBe("continue");
+    expect(capturedPrompt).toBe(expectedChatPrompt("continue"));
   });
 
   it("starts a fresh provider chat and prepends initialization prompt on first turn", async () => {
@@ -1022,7 +1129,7 @@ describe("provider chat route", () => {
     });
 
     expect(freshChatCount).toBe(1);
-    expect(capturedPrompt).toBe("You are terse.\n\nhello");
+    expect(capturedPrompt).toBe(expectedChatPrompt("hello", "You are terse."));
   });
 
   it("starts a fresh DeepSeek pro chat on the first turn even without sessionInit", async () => {
@@ -1084,7 +1191,7 @@ describe("provider chat route", () => {
     });
 
     expect(startNewChatCalls).toEqual(["tab-1"]);
-    expect(capturedPrompt).toBe("hello");
+    expect(capturedPrompt).toBe(expectedChatPrompt("hello"));
   });
 
   it("reuses the current provider chat on repeated initialized requests", async () => {
@@ -1151,7 +1258,10 @@ describe("provider chat route", () => {
     });
 
     expect(freshChatCount).toBe(1);
-    expect(prompts).toEqual(["You are terse.\n\nhello", "continue"]);
+    expect(prompts).toEqual([
+      expectedChatPrompt("hello", "You are terse."),
+      expectedChatPrompt("continue"),
+    ]);
   });
 
   it("does not start a fresh provider chat when later requests change the initialization prompt", async () => {
@@ -1218,7 +1328,10 @@ describe("provider chat route", () => {
     });
 
     expect(freshChatCount).toBe(1);
-    expect(prompts).toEqual(["You are terse.\n\nhello", "hello again"]);
+    expect(prompts).toEqual([
+      expectedChatPrompt("hello", "You are terse."),
+      expectedChatPrompt("hello again"),
+    ]);
   });
 
   it("preserves provider initialization across repeated binds on the same tab", async () => {
@@ -1291,7 +1404,10 @@ describe("provider chat route", () => {
     });
 
     expect(freshChatCount).toBe(1);
-    expect(prompts).toEqual(["You are terse.\n\nhello", "continue"]);
+    expect(prompts).toEqual([
+      expectedChatPrompt("hello", "You are terse."),
+      expectedChatPrompt("continue"),
+    ]);
   });
 
   it("preserves provider initialization when the same tab URL changes between binds", async () => {
@@ -1371,7 +1487,10 @@ describe("provider chat route", () => {
     });
 
     expect(freshChatCount).toBe(1);
-    expect(prompts).toEqual(["You are terse.\n\nhello", "continue"]);
+    expect(prompts).toEqual([
+      expectedChatPrompt("hello", "You are terse."),
+      expectedChatPrompt("continue"),
+    ]);
   });
 
   it("records the latest provider request for debugging", async () => {
@@ -1446,14 +1565,14 @@ describe("provider chat route", () => {
         { role: "system", content: "You are terse." },
         { role: "user", content: "hello" },
       ],
-      prompt: "hello",
+      prompt: expectedChatPrompt("hello"),
       session: {
         tabId: "tab-1",
         url: "https://chat.deepseek.com/",
       },
       response: {
         mode: "text",
-        outputText: "reply:hello",
+        outputText: `reply:${expectedChatPrompt("hello")}`,
         finishReason: "stop",
         modelLabel: "DeepSeek Web",
       },
@@ -1521,7 +1640,7 @@ describe("provider chat route", () => {
         model: "deepseek-web-chat",
         messages: [{ role: "user", content: "hey" }],
       },
-      prompt: "hey",
+      prompt: expectedChatPrompt("hey"),
       response: null,
       error: {
         code: "AUTOMATION_DESYNC",
@@ -1647,7 +1766,7 @@ describe("provider chat route", () => {
     expect(debugResponse.statusCode).toBe(200);
     expect(debugResponse.json()).toMatchObject({
       status: "failed",
-      prompt: "hey",
+      prompt: expectedChatPrompt("hey"),
       automation: {
         source: "client_error",
         freshSession: false,

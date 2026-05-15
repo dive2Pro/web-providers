@@ -4,6 +4,7 @@ import {
   buildProviderResponseRepairPrompt,
   getProviderResponseRepairDecision,
 } from "./provider-response";
+import { JSON_PROTOCOL_RESPONSE_FORMAT_DECLARATION } from "../shared/code-agent-prompt";
 import type { SessionBindingStore } from "./session-binding-store";
 import { HelperState } from "./state";
 import {
@@ -20,6 +21,15 @@ import type {
 
 const MAX_PROVIDER_RESPONSE_REPAIR_ATTEMPTS = 3;
 
+function appendResponseFormatDeclaration(content: string) {
+  const trimmed = content.trim();
+  if (trimmed.length === 0) {
+    return trimmed;
+  }
+
+  return [trimmed, `------ \n`, JSON_PROTOCOL_RESPONSE_FORMAT_DECLARATION].join("\n\n");
+}
+
 function buildProviderPrompt(input: {
   messages: ProviderChatRequest["messages"];
   sessionInit?: ProviderChatRequest["sessionInit"];
@@ -30,18 +40,21 @@ function buildProviderPrompt(input: {
     .find((message) => message.role === "user");
 
   const userPrompt = currentUser?.content ?? "";
+  const promptWithDeclaration = appendResponseFormatDeclaration(userPrompt);
   const initPrompt = input.sessionInit?.prompt.trim() ?? "";
   const shouldStartFresh = initPrompt.length > 0 && !input.providerInitialized;
 
   if (!shouldStartFresh) {
     return {
-      prompt: userPrompt,
+      prompt: promptWithDeclaration,
       shouldStartFresh: false,
     };
   }
 
   return {
-    prompt: [initPrompt, userPrompt].filter((part) => part.length > 0).join("\n\n"),
+    prompt: [initPrompt, promptWithDeclaration]
+      .filter((part) => part.length > 0)
+      .join("\n\n"),
     shouldStartFresh: true,
   };
 }
@@ -168,6 +181,17 @@ function isRecoverableTabLookupError(error: unknown) {
   );
 }
 
+function isRecoverableSessionError(error: unknown) {
+  if (isRecoverableTabLookupError(error)) {
+    return true;
+  }
+
+  return (
+    error instanceof HelperError &&
+    (error.code === "NOT_BOUND" || error.code === "PAGE_UNAVAILABLE")
+  );
+}
+
 export class HelperRuntime {
   constructor(
     private readonly browserClient: BrowserAutomationClient,
@@ -182,6 +206,22 @@ export class HelperRuntime {
 
     await this.sessionBindingStore.save({
       sessions: this.state.exportSessionBindings(),
+    });
+  }
+
+  private async reopenBoundSessionByUrl(input: {
+    sessionId: string;
+    provider: ProviderId;
+    modelId?: string | null;
+    previousSession: BoundSession;
+  }) {
+    return this.bindProvider({
+      sessionId: input.sessionId,
+      provider: input.provider,
+      modelId: input.modelId,
+      openNew: true,
+      openUrl: input.previousSession.tabUrl,
+      previousSession: input.previousSession,
     });
   }
 
@@ -319,16 +359,14 @@ export class HelperRuntime {
         previousSession: fallback,
       }));
     } catch (error) {
-      if (!isRecoverableTabLookupError(error)) {
+      if (!isRecoverableSessionError(error)) {
         throw error;
       }
 
-      return finalizePromotedBinding(await this.bindProvider({
+      return finalizePromotedBinding(await this.reopenBoundSessionByUrl({
         sessionId: input.sessionId,
         provider: input.provider,
         modelId,
-        openNew: true,
-        openUrl: fallback.tabUrl,
         previousSession: fallback,
       }));
     }
@@ -349,9 +387,9 @@ export class HelperRuntime {
     let activeTabId: string | null = null;
     let baseDebugRecord: ProviderRequestDebugRecord | null = null;
     let repairSummary: ProviderRequestDebugRecord["repair"] = null;
+    let recoveredCurrentPrompt = false;
 
-    try {
-      const session = await this.ensureBound({ sessionId, provider, modelId });
+    const executeOnBoundSession = async (session: BoundSession) => {
       activeTabId = session.tabId;
 
       if (this.state.hasRunningRequest(session.tabId)) {
@@ -368,20 +406,37 @@ export class HelperRuntime {
       const shouldStartFreshSession =
         promptInput.shouldStartFresh || shouldInitializeDeepSeekSession;
       const prompt = promptInput.prompt;
-      const debugSeed = createBaseDebugRecord(
-        sessionId,
-        session,
-        { ...input.body, provider },
-        prompt,
-      );
-      baseDebugRecord = debugSeed.record;
+      if (!baseDebugRecord) {
+        baseDebugRecord = createBaseDebugRecord(
+          sessionId,
+          session,
+          { ...input.body, provider },
+          prompt,
+        ).record;
+      } else {
+        baseDebugRecord = {
+          ...baseDebugRecord,
+          prompt,
+          session: {
+            tabId: session.tabId,
+            url: session.tabUrl,
+          },
+          completedAt: null,
+          status: "running",
+          response: null,
+          automation: null,
+          repair: null,
+          error: null,
+        };
+      }
+
       this.state.setLastProviderRequest(sessionId, provider, baseDebugRecord);
       this.state.setActiveRequest(session.tabId, {
-        requestId: debugSeed.requestId,
+        requestId: baseDebugRecord.requestId,
         prompt,
         accumulatedReply: "",
-        startedAt: debugSeed.startedAt,
-        lastEventAt: debugSeed.startedAt,
+        startedAt: baseDebugRecord.startedAt,
+        lastEventAt: baseDebugRecord.startedAt,
         status: "running",
         finalErrorCode: null,
       });
@@ -516,6 +571,33 @@ export class HelperRuntime {
       }
 
       return response;
+    };
+
+    try {
+      const session = await this.ensureBound({ sessionId, provider, modelId });
+
+      try {
+        return await executeOnBoundSession(session);
+      } catch (error) {
+        const canRecoverCurrentPrompt =
+          !recoveredCurrentPrompt &&
+          session.providerInitialized &&
+          isRecoverableSessionError(error);
+
+        if (!canRecoverCurrentPrompt) {
+          throw error;
+        }
+
+        this.state.setActiveRequest(session.tabId, null);
+        const recoveredSession = await this.reopenBoundSessionByUrl({
+          sessionId,
+          provider,
+          modelId,
+          previousSession: session,
+        });
+        recoveredCurrentPrompt = true;
+        return await executeOnBoundSession(recoveredSession);
+      }
     } catch (error) {
       if (activeTabId) {
         this.state.setActiveRequest(activeTabId, null);

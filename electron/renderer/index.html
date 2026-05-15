@@ -22,6 +22,13 @@
         </div>
         <div class="hero-status">
           <span id="status-pill" class="status-pill">Checking</span>
+          <label class="hero-select">
+            <span>Model</span>
+            <select id="claude-model"></select>
+          </label>
+          <button id="copy-claude-command" class="primary-button" type="button">
+            Copy Claude Command
+          </button>
           <button id="restart-button" class="ghost-button" type="button">
             Restart Services
           </button>
@@ -42,10 +49,6 @@
               <strong id="gateway-url">-</strong>
             </article>
             <article class="metric">
-              <span class="metric-label">Helper URL</span>
-              <strong id="helper-url">-</strong>
-            </article>
-            <article class="metric">
               <span class="metric-label">Started At</span>
               <strong id="started-at">-</strong>
             </article>
@@ -59,23 +62,19 @@
           <div class="card-header">
             <div>
               <p class="card-kicker">Settings</p>
-              <h2>Gateway Configuration</h2>
+              <h2>Gateway Token</h2>
             </div>
           </div>
           <form id="settings-form" class="form-stack">
             <label>
-              <span>Gateway Port</span>
-              <input id="gateway-port" name="gatewayPort" type="number" min="1" max="65535" required />
-            </label>
-            <label>
-              <span>Helper Port</span>
-              <input id="helper-port" name="helperPort" type="number" min="1" max="65535" required />
-            </label>
-            <label>
               <span>Gateway Token</span>
               <input id="gateway-token" name="gatewayToken" type="text" required />
             </label>
-            <button class="primary-button" type="submit">Save And Restart</button>
+            <p class="field-note">
+              Helper and gateway start from ports <code>4318</code> and <code>4321</code>.
+              If either port is busy, desktop will move to the next free port automatically.
+            </p>
+            <button class="primary-button" type="submit">Save Token And Restart</button>
           </form>
         </section>
 
@@ -139,6 +138,15 @@
               <dd id="config-path">-</dd>
             </div>
           </dl>
+          <details class="debug-panel">
+            <summary>Debug Details</summary>
+            <dl class="path-list debug-list">
+              <div>
+                <dt>Helper URL</dt>
+                <dd id="helper-url">-</dd>
+              </div>
+            </dl>
+          </details>
         </section>
       </main>
     </div>

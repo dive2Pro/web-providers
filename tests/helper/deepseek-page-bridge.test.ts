@@ -126,6 +126,7 @@ function createBridgeTestContext(options?: {
   initialUrl?: string;
   newChatTargetUrl?: string;
   newChatNavigatesAfterMs?: number;
+  includeContinueButton?: boolean;
 }) {
   const createdAt = Date.now();
   const unrelatedPageIcon = new FakeElement({
@@ -159,6 +160,13 @@ function createBridgeTestContext(options?: {
   const composerRoot = new FakeElement();
   const composerInputWrapper = new FakeElement();
   const modeGroupRoot = new FakeElement();
+  const stoppedReplyCard = new FakeElement();
+  const continueButton = new FakeElement({
+    attributes: {
+      role: "button",
+      "aria-disabled": "false",
+    },
+  });
   const textarea = new FakeTextarea(composerSend);
   const newChatButton = new FakeElement({
     attributes: {
@@ -187,8 +195,10 @@ function createBridgeTestContext(options?: {
   });
   expertModeButton.textContent = options?.expertModeLabel ?? "Expert";
   flashModeButton.textContent = options?.flashModeLabel ?? "Flash";
+  continueButton.textContent = "Continue";
   expertModeButton.parentElement = modeGroupRoot;
   flashModeButton.parentElement = modeGroupRoot;
+  continueButton.parentElement = stoppedReplyCard;
   expertModeButton.click = () => {
     expertModeButton.clicked += 1;
     expertModeButton.setAttribute("aria-checked", "true");
@@ -224,6 +234,12 @@ function createBridgeTestContext(options?: {
     };
   }
 
+  let continueVisible = options?.includeContinueButton === true;
+  const syncContinueCard = () => {
+    stoppedReplyCard.textContent = continueVisible ? "Stopped\nContinue" : "";
+  };
+  syncContinueCard();
+
   composerRoot.querySelectorAll = (selector: string) => {
     if (
       selector === "div[role='button'], button" ||
@@ -247,7 +263,7 @@ function createBridgeTestContext(options?: {
 
   const document = {
     body: {
-      innerText: "",
+      innerText: continueVisible ? "Stopped\nContinue" : "",
     },
     querySelector(selector: string) {
       if (selector === "textarea") {
@@ -282,6 +298,7 @@ function createBridgeTestContext(options?: {
         return [
           ...(options?.includeNewChatButton ? [newChatButton] : []),
           ...modeControls,
+          ...(continueVisible ? [continueButton] : []),
           unrelatedPageIcon,
           composerToggle,
           composerAttach,
@@ -303,6 +320,17 @@ function createBridgeTestContext(options?: {
 
       return [];
     },
+  };
+
+  const setContinueVisible = (nextValue: boolean) => {
+    continueVisible = nextValue;
+    document.body.innerText = nextValue ? "Stopped\nContinue" : "";
+    syncContinueCard();
+  };
+
+  continueButton.click = () => {
+    continueButton.clicked += 1;
+    setContinueVisible(false);
   };
 
   class FakeXmlHttpRequest {
@@ -377,6 +405,8 @@ function createBridgeTestContext(options?: {
     flashModeButton,
     latestAssistantMarkdown,
     latestAssistantMessage,
+    continueButton,
+    setContinueVisible,
   };
 }
 
@@ -813,6 +843,119 @@ describe("deepseek page bridge", () => {
     });
     expect(composerSend.clicked).toBe(1);
     expect(keyboardSubmitCount).toBe(1);
+  });
+
+  it("auto-clicks Continue and waits for the resumed DeepSeek reply to finish", async () => {
+    const { context, composerSend, continueButton, setContinueVisible } =
+      createBridgeTestContext();
+    let streamStage = 0;
+
+    class FakeInterruptedXmlHttpRequest {
+      public readyState = 0;
+      public responseText = "";
+      private readonly listeners = new Map<string, Array<() => void>>();
+
+      addEventListener(type: string, handler: () => void) {
+        const current = this.listeners.get(type) ?? [];
+        current.push(handler);
+        this.listeners.set(type, current);
+      }
+
+      open(_method?: string, _url?: string) {
+        return undefined;
+      }
+
+      send() {
+        if (streamStage === 0) {
+          streamStage += 1;
+          setTimeout(() => {
+            this.pushChunk(
+              [
+                "event: ready",
+                "data: {\"request_message_id\":21,\"response_message_id\":22,\"model_type\":\"default\"}",
+                "",
+                "data: {\"v\":{\"response\":{\"message_id\":22,\"status\":\"WIP\",\"fragments\":[{\"type\":\"RESPONSE\",\"content\":\"hello\"}]}}}",
+                "",
+                "event: close",
+                "data: {\"click_behavior\":\"none\",\"auto_resume\":false}",
+                "",
+              ].join("\n"),
+              4,
+            );
+            setContinueVisible(true);
+          }, 50);
+          return undefined;
+        }
+
+        streamStage += 1;
+        setTimeout(() => {
+          this.pushChunk(
+            [
+              "event: ready",
+              "data: {\"request_message_id\":21,\"response_message_id\":22,\"model_type\":\"default\"}",
+              "",
+              "data: {\"p\":\"response/fragments/-1/content\",\"o\":\"APPEND\",\"v\":\" world\"}",
+              "",
+              "data: {\"p\":\"response/status\",\"o\":\"SET\",\"v\":\"FINISHED\"}",
+              "",
+              "event: close",
+              "data: {\"click_behavior\":\"none\",\"auto_resume\":false}",
+              "",
+            ].join("\n"),
+            4,
+          );
+        }, 50);
+        return undefined;
+      }
+
+      private pushChunk(chunk: string, readyState: number) {
+        this.responseText += chunk;
+        this.readyState = readyState;
+        for (const handler of this.listeners.get("readystatechange") ?? []) {
+          handler();
+        }
+      }
+    }
+
+    context.XMLHttpRequest = FakeInterruptedXmlHttpRequest;
+    (context.window as Record<string, unknown>).XMLHttpRequest =
+      FakeInterruptedXmlHttpRequest;
+
+    composerSend.click = () => {
+      const xhr = new FakeInterruptedXmlHttpRequest();
+      xhr.open("POST", "/api/v0/chat/completion");
+      xhr.send();
+      composerSend.clicked += 1;
+    };
+
+    const originalContinueClick = continueButton.click.bind(continueButton);
+    continueButton.click = () => {
+      originalContinueClick();
+      const xhr = new FakeInterruptedXmlHttpRequest();
+      xhr.open("POST", "/api/v0/chat/completion");
+      xhr.send();
+    };
+
+    vm.runInNewContext(INJECTED_BRIDGE_SOURCE, context);
+
+    const bridge = (context.window as Record<string, any>).__piDeepSeekBridge;
+    expect(bridge).toBeTruthy();
+
+    const result = await bridge.sendPrompt({ prompt: "hello", timeoutMs: 3_000 });
+
+    expect(result).toEqual({
+      ok: true,
+      turn: {
+        mode: "text",
+        outputText: "hello world",
+      },
+      meta: {
+        source: "bridge_stream",
+        completionObserved: true,
+      },
+    });
+    expect(composerSend.clicked).toBe(1);
+    expect(continueButton.clicked).toBe(1);
   });
 
   it("does not return the previous assistant reply when no fresh reply arrives", async () => {

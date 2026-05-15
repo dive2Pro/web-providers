@@ -1,5 +1,6 @@
 const state = {
   latest: null,
+  selectedClaudeModel: null,
 };
 
 const desktopApp = window.desktopApp;
@@ -10,9 +11,8 @@ const elements = {
   gatewayUrl: document.querySelector("#gateway-url"),
   helperUrl: document.querySelector("#helper-url"),
   startedAt: document.querySelector("#started-at"),
-  gatewayPort: document.querySelector("#gateway-port"),
-  helperPort: document.querySelector("#helper-port"),
   gatewayToken: document.querySelector("#gateway-token"),
+  claudeModel: document.querySelector("#claude-model"),
   protocol: document.querySelector("#protocol"),
   baseUrl: document.querySelector("#base-url"),
   apiKey: document.querySelector("#api-key"),
@@ -22,6 +22,7 @@ const elements = {
   bindingsPath: document.querySelector("#bindings-path"),
   configPath: document.querySelector("#config-path"),
   settingsForm: document.querySelector("#settings-form"),
+  copyClaudeCommand: document.querySelector("#copy-claude-command"),
   restartButton: document.querySelector("#restart-button"),
   openLogs: document.querySelector("#open-logs"),
   openBindings: document.querySelector("#open-bindings"),
@@ -64,8 +65,6 @@ function render(nextState) {
     ? new Date(nextState.service.startedAt).toLocaleString()
     : "-";
 
-  elements.gatewayPort.value = String(nextState.config.gatewayPort);
-  elements.helperPort.value = String(nextState.config.helperPort);
   elements.gatewayToken.value = nextState.config.gatewayToken;
 
   elements.protocol.textContent = nextState.claudeCode.protocol;
@@ -86,10 +85,30 @@ function render(nextState) {
       return pill;
     }),
   );
+  renderClaudeModelOptions(nextState.claudeCode.models);
 
   elements.logsPath.textContent = nextState.service.requestLogDir;
   elements.bindingsPath.textContent = nextState.service.sessionBindingDir;
   elements.configPath.textContent = nextState.service.configPath;
+}
+
+function renderClaudeModelOptions(modelIds) {
+  const nextModel =
+    state.selectedClaudeModel && modelIds.includes(state.selectedClaudeModel)
+      ? state.selectedClaudeModel
+      : modelIds[0] ?? "";
+
+  state.selectedClaudeModel = nextModel;
+
+  elements.claudeModel.replaceChildren(
+    ...modelIds.map((modelId) => {
+      const option = document.createElement("option");
+      option.value = modelId;
+      option.textContent = modelId;
+      option.selected = modelId === nextModel;
+      return option;
+    }),
+  );
 }
 
 function renderError(error) {
@@ -104,12 +123,26 @@ elements.settingsForm.addEventListener("submit", async (event) => {
 
   try {
     const nextState = await requireDesktopApp().saveSettings({
-      gatewayPort: Number(elements.gatewayPort.value),
-      helperPort: Number(elements.helperPort.value),
       gatewayToken: elements.gatewayToken.value,
     });
     state.latest = nextState;
     render(nextState);
+  } catch (error) {
+    renderError(error);
+  }
+});
+
+elements.claudeModel.addEventListener("change", () => {
+  state.selectedClaudeModel = elements.claudeModel.value;
+});
+
+elements.copyClaudeCommand.addEventListener("click", async () => {
+  try {
+    const modelId = elements.claudeModel.value;
+    const command = await requireDesktopApp().getClaudeCommand(modelId);
+    requireDesktopApp().copyText(command);
+    elements.statusMessage.textContent =
+      `Claude Code command copied for ${modelId}. Paste it into your terminal to start \`claude\`.`;
   } catch (error) {
     renderError(error);
   }

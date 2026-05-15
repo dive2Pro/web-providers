@@ -1,5 +1,6 @@
 import type { PublicModel } from "./models";
 import { unsupportedFeatureError } from "./errors";
+import { shouldDropToolForProvider } from "../shared/tool-filter";
 import type {
   NormalizedMessage,
   NormalizedRequest,
@@ -175,6 +176,29 @@ function normalizeResponsesToolChoice(input: unknown): NormalizedToolChoice {
   return "none";
 }
 
+function filterToolsForModel(model: PublicModel, tools: NormalizedTool[]) {
+  return tools.filter((tool) => !shouldDropToolForProvider(model.provider, tool.name));
+}
+
+function normalizeToolChoiceForAvailableTools(
+  toolChoice: NormalizedToolChoice,
+  tools: NormalizedTool[],
+): NormalizedToolChoice {
+  if (toolChoice === "none") {
+    return "none";
+  }
+
+  if (tools.length === 0) {
+    return "none";
+  }
+
+  if (toolChoice === "required" || toolChoice === "auto") {
+    return toolChoice;
+  }
+
+  return tools.some((tool) => tool.name === toolChoice.name) ? toolChoice : "auto";
+}
+
 function assertToolSupport(input: {
   model: PublicModel;
   tools: NormalizedTool[];
@@ -215,8 +239,11 @@ export function normalizeChatCompletionsRequest(
 ): NormalizedRequest {
   const mode = options.mode ?? "json";
   assertStreamingSupport(body.stream, mode);
-  const normalizedTools = normalizeChatTools(body.tools);
-  const normalizedToolChoice = normalizeChatToolChoice(body.tool_choice);
+  const normalizedTools = filterToolsForModel(model, normalizeChatTools(body.tools));
+  const normalizedToolChoice = normalizeToolChoiceForAvailableTools(
+    normalizeChatToolChoice(body.tool_choice),
+    normalizedTools,
+  );
   assertToolSupport({
     model,
     tools: normalizedTools,
@@ -254,8 +281,11 @@ export function normalizeResponsesRequest(
 ): NormalizedRequest {
   const mode = options.mode ?? "json";
   assertStreamingSupport(body.stream, mode);
-  const normalizedTools = normalizeResponsesTools(body.tools);
-  const normalizedToolChoice = normalizeResponsesToolChoice(body.tool_choice);
+  const normalizedTools = filterToolsForModel(model, normalizeResponsesTools(body.tools));
+  const normalizedToolChoice = normalizeToolChoiceForAvailableTools(
+    normalizeResponsesToolChoice(body.tool_choice),
+    normalizedTools,
+  );
   assertToolSupport({
     model,
     tools: normalizedTools,

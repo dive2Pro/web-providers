@@ -1,5 +1,6 @@
 import type { PublicModel } from "../openai-adapter/models";
 import { invalidRequestError, unsupportedFeatureError } from "./errors";
+import { shouldDropToolForProvider } from "../shared/tool-filter";
 import type {
   NormalizedMessage,
   NormalizedRequest,
@@ -215,6 +216,29 @@ function normalizeToolChoice(toolChoice: AnthropicToolChoice): NormalizedToolCho
   return "auto";
 }
 
+function filterToolsForModel(model: PublicModel, tools: NormalizedTool[]) {
+  return tools.filter((tool) => !shouldDropToolForProvider(model.provider, tool.name));
+}
+
+function normalizeToolChoiceForAvailableTools(
+  toolChoice: NormalizedToolChoice,
+  tools: NormalizedTool[],
+): NormalizedToolChoice {
+  if (toolChoice === "none") {
+    return "none";
+  }
+
+  if (tools.length === 0) {
+    return "none";
+  }
+
+  if (toolChoice === "required" || toolChoice === "auto") {
+    return toolChoice;
+  }
+
+  return tools.some((tool) => tool.name === toolChoice.name) ? toolChoice : "auto";
+}
+
 function assertToolSupport(input: {
   model: PublicModel;
   tools: NormalizedTool[];
@@ -423,8 +447,11 @@ export function normalizeMessagesRequest(
   validateMessages(body.messages);
   const normalizedMessages = normalizeMessages(body.messages);
   const systemPrompt = normalizeSystem(body.system);
-  const normalizedTools = normalizeTools(body.tools);
-  const normalizedToolChoice = normalizeToolChoice(body.tool_choice);
+  const normalizedTools = filterToolsForModel(model, normalizeTools(body.tools));
+  const normalizedToolChoice = normalizeToolChoiceForAvailableTools(
+    normalizeToolChoice(body.tool_choice),
+    normalizedTools,
+  );
   assertToolSupport({
     model,
     tools: normalizedTools,

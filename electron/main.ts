@@ -11,7 +11,11 @@ import {
   createBbBrowserTransport,
 } from "../src/helper/browser/bb-browser-client";
 import {
+  buildClaudeCodeLaunchConfig,
   buildClaudeCodeGuide,
+  buildClaudeCodeStartupCommand,
+  DEFAULT_GATEWAY_PORT,
+  DEFAULT_HELPER_PORT,
   createDesktopConfig,
   deserializeDesktopConfig,
   mergeDesktopSettings,
@@ -21,7 +25,7 @@ import {
 } from "../src/shared/desktop-config";
 import { logServiceStarted } from "../src/shared/startup-log";
 
-const { app, BrowserWindow, ipcMain, shell } = electron;
+const { app, BrowserWindow, clipboard, ipcMain, shell } = electron;
 
 type RunningServices = {
   helperApp: FastifyInstance;
@@ -86,6 +90,12 @@ function registerIpcHandlers() {
     },
   );
   ipcMain.handle("desktop:restart-services", async () => restartServices());
+  ipcMain.handle("desktop:get-claude-command", async (_event, modelId: string) =>
+    getClaudeCodeCommand(modelId),
+  );
+  ipcMain.handle("desktop:copy-text", async (_event, value: string) => {
+    clipboard.writeText(value);
+  });
   ipcMain.handle("desktop:open-path", async (_event, kind: "logs" | "bindings" | "config") => {
     const paths = getRuntimePaths();
     const targetPath =
@@ -177,20 +187,20 @@ async function startServices(config: DesktopConfig): Promise<RunningServices> {
   const { requestLogDir, sessionBindingDir } = getRuntimePaths();
   await mkdir(requestLogDir, { recursive: true });
   await mkdir(sessionBindingDir, { recursive: true });
-  const helperPort = await resolveAvailablePort(config.helperPort);
+  const helperPort = await resolveAvailablePort(DEFAULT_HELPER_PORT);
   const gatewayPort = await resolveAvailablePort(
-    config.gatewayPort,
-    helperPort === config.gatewayPort ? helperPort + 1 : config.gatewayPort,
+    DEFAULT_GATEWAY_PORT,
+    helperPort === DEFAULT_GATEWAY_PORT ? helperPort + 1 : DEFAULT_GATEWAY_PORT,
   );
   const fallbackMessages: string[] = [];
-  if (helperPort !== config.helperPort) {
+  if (helperPort !== DEFAULT_HELPER_PORT) {
     fallbackMessages.push(
-      `Helper port ${config.helperPort} was busy, using ${helperPort} instead.`,
+      `Helper port ${DEFAULT_HELPER_PORT} was busy, using ${helperPort} instead.`,
     );
   }
-  if (gatewayPort !== config.gatewayPort) {
+  if (gatewayPort !== DEFAULT_GATEWAY_PORT) {
     fallbackMessages.push(
-      `Gateway port ${config.gatewayPort} was busy, using ${gatewayPort} instead.`,
+      `Gateway port ${DEFAULT_GATEWAY_PORT} was busy, using ${gatewayPort} instead.`,
     );
   }
 
@@ -245,19 +255,8 @@ async function startServices(config: DesktopConfig): Promise<RunningServices> {
 
 function getDesktopState() {
   const { requestLogDir, sessionBindingDir, configPath } = getRuntimePaths();
-  const runtimeConfig = toPublicDesktopConfig({
-    ...desktopConfig,
-    helperPort: runningServices
-      ? new URL(runningServices.helperUrl).port
-        ? Number(new URL(runningServices.helperUrl).port)
-        : desktopConfig.helperPort
-      : desktopConfig.helperPort,
-    gatewayPort: runningServices
-      ? new URL(runningServices.gatewayUrl).port
-        ? Number(new URL(runningServices.gatewayUrl).port)
-        : desktopConfig.gatewayPort
-      : desktopConfig.gatewayPort,
-  });
+  const gatewayUrl =
+    runningServices?.gatewayUrl ?? `http://127.0.0.1:${DEFAULT_GATEWAY_PORT}`;
 
   return {
     config: toPublicDesktopConfig(desktopConfig),
@@ -272,8 +271,25 @@ function getDesktopState() {
       sessionBindingDir,
       configPath,
     },
-    claudeCode: buildClaudeCodeGuide(runtimeConfig),
+    claudeCode: buildClaudeCodeGuide({
+      gatewayUrl,
+      gatewayToken: desktopConfig.gatewayToken,
+    }),
   };
+}
+
+async function getClaudeCodeCommand(modelId: string) {
+  if (!runningServices?.gatewayUrl) {
+    throw new Error("Start the desktop services before copying the Claude Code command.");
+  }
+
+  const launchConfig = buildClaudeCodeLaunchConfig({
+    gatewayUrl: runningServices.gatewayUrl,
+    gatewayToken: desktopConfig.gatewayToken,
+    modelId,
+  });
+
+  return buildClaudeCodeStartupCommand(launchConfig);
 }
 
 function toErrorMessage(error: unknown) {

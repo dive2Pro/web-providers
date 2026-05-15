@@ -1233,6 +1233,90 @@ describe("pi provider extension", () => {
     expect(String(providerSessionInit?.prompt ?? "")).not.toContain("参数 JSON Schema：{}");
   });
 
+  it("filters WebSearch from DeepSeek first-turn session init", async () => {
+    let config: ProviderConfig | undefined;
+
+    const calls: Array<{ path: string; body: Record<string, unknown> }> = [];
+
+    registerDeepSeekExtension(
+      {
+        registerProvider(_name, providerConfig) {
+          config = providerConfig as ProviderConfig;
+        },
+        on() {},
+      },
+      {
+        spawnHelper: async () => ({
+          baseUrl: "http://127.0.0.1:4318",
+          token: "token-123",
+          stop: async () => undefined,
+        }),
+        helperClient: {
+          post: async <T>(
+            _baseUrl: string,
+            path: string,
+            body: Record<string, unknown>,
+          ) => {
+            calls.push({ path, body });
+            return {
+              mode: "text",
+              outputText: "{\"type\":\"message\",\"content\":\"done\"}",
+              finishReason: "stop",
+            } as T;
+          },
+        },
+        createServer: () => ({ listen: vi.fn(), close: vi.fn() }) as unknown as ReturnType<
+          typeof import("node:net").createServer
+        >,
+        randomToken: () => "token-123",
+      },
+    );
+
+    const stream = config?.streamSimple?.(
+      {
+        id: "deepseek-web-chat",
+        api: "deepseek-web-api",
+        provider: "deepseek-web",
+      },
+      {
+        messages: [
+          {
+            role: "user",
+            content: "inspect the project",
+            timestamp: Date.now(),
+          },
+        ],
+        tools: [
+          {
+            name: "WebSearch",
+            description: "Search the web",
+          },
+          {
+            name: "read",
+            description: "Read a file",
+          },
+        ],
+      },
+      {
+        signal: new AbortController().signal,
+      },
+    );
+
+    for await (const _event of stream as AssistantMessageEventStreamLike) {
+      // Drain the stream so the provider request completes and `calls` is populated.
+    }
+
+    const providerChatCall = calls.find(
+      (call) => call.path === "/internal/pi/provider/chat",
+    );
+    const providerSessionInit =
+      (providerChatCall?.body as { sessionInit?: { prompt?: string } } | undefined)?.sessionInit;
+    const prompt = String(providerSessionInit?.prompt ?? "");
+
+    expect(prompt).toContain("工具名：read");
+    expect(prompt).not.toContain("工具名：WebSearch");
+  });
+
   it("converts a text-mode protocol tool_call envelope even when the provider reports finishReason length", async () => {
     let config: ProviderConfig | undefined;
 

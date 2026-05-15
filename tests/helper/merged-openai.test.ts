@@ -1,6 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
 import { buildApp } from "../../src/helper/app";
 import { HelperError } from "../../src/helper/errors";
+import { JSON_PROTOCOL_RESPONSE_FORMAT_DECLARATION } from "../../src/shared/code-agent-prompt";
+
+function expectedChatPrompt(userPrompt: string) {
+  return [userPrompt.trim(), "------ \n", JSON_PROTOCOL_RESPONSE_FORMAT_DECLARATION].join(
+    "\n\n",
+  );
+}
 
 describe("merged helper openai routes", () => {
   it("serves the public model list from the merged app", async () => {
@@ -158,6 +165,135 @@ describe("merged helper openai routes", () => {
     });
     expect(bindCalls).toEqual([
       expect.objectContaining({ provider: "deepseek-web", openNew: true }),
+    ]);
+  });
+
+  it("recovers anthropic messages by reopening the remembered chat url and resending the current prompt once", async () => {
+    const bindCalls: Array<Record<string, unknown>> = [];
+    const sendCalls: Array<{ tabId: string; prompt: string }> = [];
+
+    const app = buildApp({
+      token: "test-token",
+      browserClient: {
+        getConnectionStatus: async () => "connected",
+        bindProviderTab: async (input: {
+          provider: string;
+          tabId?: string;
+          openNew?: boolean;
+          openUrl?: string;
+        }) => {
+          bindCalls.push(input);
+          if (input.tabId) {
+            return {
+              tabId: input.tabId,
+              url: "https://chat.deepseek.com/a/chat/s/original-session",
+              loginState: "logged_in",
+              bridgeInjected: true,
+              pageState: {
+                inputReady: true,
+                busy: false,
+                latestAssistantPreview: null,
+                assistantCount: 0,
+              },
+            };
+          }
+
+          return {
+            tabId:
+              input.openNew && input.openUrl
+                ? "tab-2"
+                : "tab-1",
+            url: input.openUrl ?? "https://chat.deepseek.com/a/chat/s/original-session",
+            loginState: "logged_in",
+            bridgeInjected: true,
+            pageState: {
+              inputReady: true,
+              busy: false,
+              latestAssistantPreview: null,
+              assistantCount: 0,
+            },
+          };
+        },
+        startNewChat: async () => undefined,
+        sendChatPrompt: async (input: { tabId: string; prompt: string }) => {
+          sendCalls.push(input);
+
+          if (input.tabId === "tab-1" && input.prompt === expectedChatPrompt("two")) {
+            throw new HelperError(
+              "PAGE_UNAVAILABLE",
+              "DeepSeek requires manual verification in the browser tab before chatting",
+            );
+          }
+
+          return {
+            mode: "text",
+            outputText: `reply:${input.prompt}`,
+            rawOutputText: JSON.stringify({
+              type: "message",
+              content: `reply:${input.prompt}`,
+            }),
+            modelLabel: "DeepSeek Web",
+          };
+        },
+      } as never,
+    });
+
+    const firstResponse = await app.inject({
+      method: "POST",
+      url: "/v1/messages?beta=true",
+      headers: {
+        "x-api-key": "test-token",
+        "x-claude-code-session-id": "claude-session-recover-current-prompt",
+      },
+      payload: {
+        model: "deepseek-web-chat",
+        max_tokens: 64,
+        messages: [{ role: "user", content: "one" }],
+      },
+    });
+
+    const secondResponse = await app.inject({
+      method: "POST",
+      url: "/v1/messages?beta=true",
+      headers: {
+        "x-api-key": "test-token",
+        "x-claude-code-session-id": "claude-session-recover-current-prompt",
+      },
+      payload: {
+        model: "deepseek-web-chat",
+        max_tokens: 64,
+        messages: [{ role: "user", content: "two" }],
+      },
+    });
+
+    expect(firstResponse.statusCode).toBe(200);
+    expect(secondResponse.statusCode).toBe(200);
+    expect(secondResponse.json()).toMatchObject({
+      type: "message",
+      content: [
+        expect.objectContaining({
+          type: "text",
+          text: `reply:${expectedChatPrompt("two")}`,
+        }),
+      ],
+    });
+
+    expect(bindCalls).toEqual([
+      expect.objectContaining({ provider: "deepseek-web", openNew: true }),
+      expect.objectContaining({ provider: "deepseek-web", tabId: "tab-1" }),
+      expect.objectContaining({
+        provider: "deepseek-web",
+        openNew: true,
+        openUrl: "https://chat.deepseek.com/a/chat/s/original-session",
+      }),
+    ]);
+    expect(sendCalls).toEqual([
+      expect.objectContaining({
+        tabId: "tab-1",
+        prompt: expect.stringContaining(expectedChatPrompt("one")),
+      }),
+      expect.objectContaining({ tabId: "tab-1", prompt: expectedChatPrompt("two") }),
+      expect.objectContaining({ tabId: "tab-2", prompt: expectedChatPrompt("two") }),
     ]);
   });
 

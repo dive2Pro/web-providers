@@ -391,7 +391,7 @@ export function classifyCompletionTurn(input: {
 export const INJECTED_BRIDGE_SOURCE = `
 (() => {
   const KEY = "__piDeepSeekBridge";
-  const VERSION = 15;
+  const VERSION = 16;
   const __name = (target, _value) => target;
   const detectNativeToolCalls = ${detectNativeToolCalls.toString()};
   const detectJsonEnvelope = ${detectJsonEnvelope.toString()};
@@ -432,6 +432,8 @@ export const INJECTED_BRIDGE_SOURCE = `
       lastPatchPath: null,
       lastPatchOp: null,
       activeFragmentType: null,
+      continueAttempts: 0,
+      lastContinueAt: 0,
     };
   }
 
@@ -887,6 +889,121 @@ export const INJECTED_BRIDGE_SOURCE = `
     );
   }
 
+  function getNodeText(node) {
+    if (!node) {
+      return "";
+    }
+
+    if (typeof node.innerText === "string" && node.innerText.trim().length > 0) {
+      return node.innerText.trim();
+    }
+
+    if (typeof node.textContent === "string" && node.textContent.trim().length > 0) {
+      return node.textContent.trim();
+    }
+
+    return "";
+  }
+
+  function isVisibleNode(node) {
+    if (!node) {
+      return false;
+    }
+
+    if (node.getAttribute?.("aria-hidden") === "true") {
+      return false;
+    }
+
+    if (node.hidden === true) {
+      return false;
+    }
+
+    return true;
+  }
+
+  function isContinueLabel(label) {
+    const normalized = (label || "").trim().toLowerCase();
+    return (
+      normalized === "continue" ||
+      normalized === "继续" ||
+      normalized === "续写"
+    );
+  }
+
+  function containsStoppedMarker(text) {
+    const normalized = (text || "").trim().toLowerCase();
+    return (
+      normalized.includes("stopped") ||
+      normalized.includes("已停止") ||
+      normalized.includes("中断")
+    );
+  }
+
+  function findContinueButton() {
+    const clickableNodes = Array.from(
+      document.querySelectorAll("button, a, div[role='button']")
+    );
+    const matches = clickableNodes.filter((node) => {
+      if (!isVisibleNode(node) || isClickableNodeDisabled(node)) {
+        return false;
+      }
+
+      return isContinueLabel(getNodeLabel(node));
+    });
+
+    return matches.at(-1) || null;
+  }
+
+  function findRecoverableContinueButton() {
+    if (findStopButton()) {
+      return null;
+    }
+
+    const continueButton = findContinueButton();
+    if (!(continueButton instanceof HTMLElement)) {
+      return null;
+    }
+
+    let current = continueButton.parentElement || null;
+    for (let depth = 0; depth < 6 && current; depth += 1) {
+      if (containsStoppedMarker(getNodeText(current))) {
+        return continueButton;
+      }
+      current = current.parentElement;
+    }
+
+    const pageText =
+      document.body?.innerText ||
+      document.body?.textContent ||
+      "";
+    if (containsStoppedMarker(pageText)) {
+      return continueButton;
+    }
+
+    return null;
+  }
+
+  async function maybeAutoContinueInterruptedReply(continueButton) {
+    if (!(continueButton instanceof HTMLElement)) {
+      return false;
+    }
+
+    const now = Date.now();
+    if (completionState.continueAttempts >= 2) {
+      return false;
+    }
+
+    if (now - completionState.lastContinueAt < 1_200) {
+      return false;
+    }
+
+    completionState.continueAttempts += 1;
+    completionState.lastContinueAt = now;
+    continueButton.click();
+    await sleep(350);
+    return true;
+  }
+
   function findNewChatButton() {
     const directMatch =
       document.querySelector("button[aria-label='New Chat']") ||
@@ -1327,7 +1444,21 @@ export const INJECTED_BRIDGE_SOURCE = `
         };
       }
 
-      if (terminalObserved && streamedTurn) {
+      const recoverableContinueButton = findRecoverableContinueButton();
+      if (recoverableContinueButton instanceof HTMLElement) {
+        const continued = await maybeAutoContinueInterruptedReply(
+          recoverableContinueButton,
+        );
+        if (continued) {
+          continue;
+        }
+      }
+
+      if (
+        terminalObserved &&
+        streamedTurn &&
+        !(recoverableContinueButton instanceof HTMLElement)
+      ) {
         return {
           ok: true,
           turn: streamedTurn,
@@ -1342,7 +1473,10 @@ export const INJECTED_BRIDGE_SOURCE = `
     }
 
     const streamedReply = completionState.streamReply.trim();
-    if (streamedReply.length > 0) {
+    if (
+      streamedReply.length > 0 &&
+      !(findRecoverableContinueButton() instanceof HTMLElement)
+    ) {
       return {
         ok: true,
         turn: classifyCompletionTurn({

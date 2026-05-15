@@ -82,15 +82,17 @@ npm run desktop:start
 
 桌面应用会持久化以下内容：
 
-- 端口与网关 token：Electron 的 `userData/desktop-config.json`
+- 网关 token：Electron 的 `userData/desktop-config.json`
 - 请求日志：Electron 的 `userData/desktop-runtime/request-logs/`
 - 会话绑定：Electron 的 `userData/desktop-runtime/session-bindings/`
 
 在桌面应用中使用 `Claude Code` 时，继续按以下信息配置即可：
 
 - `Protocol`: `Anthropic`
-- `Base URL`: 桌面应用里显示的网关地址，默认 `http://127.0.0.1:4321`
+- `Base URL`: 桌面应用里显示的网关地址，默认从 `http://127.0.0.1:4321` 开始；如果端口被占用会自动切到下一个可用端口
 - `API Key`: 桌面应用里显示的 gateway token
+
+桌面应用也提供 model 选择器和 `Copy Claude Command` 按钮。选择一个支持的 model 后，复制出的命令会把 Claude Code 的所有模式统一映射到该 model；粘贴到终端即可启动。
 
 ## 🛠️ 技术栈
 
