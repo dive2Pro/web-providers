@@ -2,14 +2,20 @@
   "name": "web-providers",
   "version": "1.0.2",
   "type": "module",
+  "main": "electron-bootstrap.cjs",
   "files": [
     "src",
-    "README.md"
+    "README.md",
+    "electron-bootstrap.cjs"
   ],
   "scripts": {
     "dev": "tsx src/helper/main.ts",
     "test": "vitest run",
     "build": "rm -rf dist && tsc -p tsconfig.json",
+    "desktop:build": "rm -rf dist-electron && node scripts/build-desktop.mjs",
+    "desktop:start": "npm run desktop:build && electron .",
+    "desktop:pack": "npm run desktop:build && CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --dir",
+    "desktop:dist": "npm run desktop:build && CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder",
     "prepublishOnly": "npm run build",
     "publish:wsf": "npm publish --registry=http://static-repo.wanshifu.com:8007/",
     "slides:dev": "slidev slides/web-providers.md",
@@ -25,8 +31,36 @@
     "@slidev/cli": "^52.14.2",
     "@slidev/theme-default": "^0.25.0",
     "@types/node": "^24.0.0",
+    "electron": "^42.1.0",
+    "electron-builder": "^26.8.1",
+    "esbuild": "^0.28.0",
     "tsx": "^4.19.2",
     "typescript": "^5.8.3",
     "vitest": "^3.2.4"
+  },
+  "build": {
+    "appId": "com.webproviders.desktop",
+    "productName": "Web Providers Desktop",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist-electron/**/*",
+      "electron-bootstrap.cjs",
+      "package.json",
+      "README.md"
+    ],
+    "asarUnpack": [
+      "node_modules/bb-browser/**/*"
+    ],
+    "extraMetadata": {
+      "main": "electron-bootstrap.cjs"
+    },
+    "mac": {
+      "category": "public.app-category.developer-tools"
+    },
+    "linux": {
+      "category": "Utility"
+    }
   }
 }

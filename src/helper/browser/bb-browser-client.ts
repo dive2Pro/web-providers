@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { existsSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { HelperError } from "../errors";
@@ -44,9 +45,10 @@ export function resolveBbBrowserInvocation(input?: {
         : packageJson.bin?.["bb-browser"];
 
     if (typeof bin === "string" && bin.length > 0) {
+      const packageRoot = toExecutablePackageRoot(dirname(packageJsonPath));
       return {
         command: process.execPath,
-        argsPrefix: [join(dirname(packageJsonPath), bin)],
+        argsPrefix: [join(packageRoot, bin)],
       };
     }
   } catch {
@@ -57,6 +59,18 @@ export function resolveBbBrowserInvocation(input?: {
     command: "bb-browser",
     argsPrefix: [],
   };
+}
+
+function toExecutablePackageRoot(packageRoot: string) {
+  if (!packageRoot.includes(".asar/") && !packageRoot.includes(".asar\\")) {
+    return packageRoot;
+  }
+
+  const unpackedRoot = packageRoot.replace(
+    /\.asar([\\/])/,
+    ".asar.unpacked$1",
+  );
+  return existsSync(unpackedRoot) ? unpackedRoot : packageRoot;
 }
 
 const BB_BROWSER_INVOCATION = resolveBbBrowserInvocation();
