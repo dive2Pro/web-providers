@@ -24,7 +24,8 @@ export type ClaudeCodeGuide = {
 };
 
 export type ClaudeCodeLaunchConfig = {
-  ANTHROPIC_API_KEY: string;
+  CLAUDE_CONFIG_DIR: string;
+  ANTHROPIC_AUTH_TOKEN: string;
   ANTHROPIC_BASE_URL: string;
   ANTHROPIC_DEFAULT_HAIKU_MODEL: string;
   ANTHROPIC_DEFAULT_OPUS_MODEL: string;
@@ -95,6 +96,7 @@ export function buildClaudeCodeGuide(
 }
 
 export function buildClaudeCodeLaunchConfig(input: {
+  claudeConfigDir: string;
   gatewayUrl: string;
   gatewayToken: string;
   modelId: string;
@@ -102,7 +104,8 @@ export function buildClaudeCodeLaunchConfig(input: {
   const modelId = normalizeClaudeCodeModel(input.modelId, DEFAULT_CLAUDE_CODE_MODEL);
 
   return {
-    ANTHROPIC_API_KEY: input.gatewayToken,
+    CLAUDE_CONFIG_DIR: input.claudeConfigDir,
+    ANTHROPIC_AUTH_TOKEN: input.gatewayToken,
     ANTHROPIC_BASE_URL: input.gatewayUrl,
     ANTHROPIC_DEFAULT_HAIKU_MODEL: modelId,
     ANTHROPIC_DEFAULT_OPUS_MODEL: modelId,
@@ -116,19 +119,21 @@ export function buildClaudeCodeStartupCommand(
   env: Record<string, string>,
   format: ShellCommandFormat = "multiline",
 ) {
+  const model = env.ANTHROPIC_MODEL ?? DEFAULT_CLAUDE_CODE_MODEL;
+
   if (format === "multiline") {
     const assignments = Object.entries(env).map(
-      ([key, value]) => `  ${key}=${quoteShellValue(value)} \\`,
+      ([key, value]) => `  ${key}=${quoteShellValueForCommand(key, value)} \\`,
     );
 
     return [
       "env \\",
       ...assignments,
-      "  claude",
+      `  claude --model ${quoteShellValue(model)}`,
     ].join("\n");
   }
 
-  return "claude";
+  return `claude --model ${quoteShellValue(model)}`;
 }
 
 function createSecret(prefix: string) {
@@ -167,4 +172,12 @@ function normalizeClaudeCodeModel(value: unknown, fallback: string) {
 
 function quoteShellValue(value: string) {
   return `'${value.replace(/'/g, `'\"'\"'`)}'`;
+}
+
+function quoteShellValueForCommand(key: string, value: string) {
+  if (key === "CLAUDE_CONFIG_DIR" && value.includes("$PWD")) {
+    return `"${value.replace(/["\\`]/g, "\\$&")}"`;
+  }
+
+  return quoteShellValue(value);
 }

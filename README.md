@@ -92,7 +92,7 @@ npm run desktop:start
 - `Base URL`: 桌面应用里显示的网关地址，默认从 `http://127.0.0.1:4321` 开始；如果端口被占用会自动切到下一个可用端口
 - `API Key`: 桌面应用里显示的 gateway token
 
-桌面应用也提供 model 选择器和 `Copy Claude Command` 按钮。选择一个支持的 model 后，复制出的命令会把 Claude Code 的所有模式统一映射到该 model；粘贴到终端即可启动。
+桌面应用也提供 model 选择器和 `Copy Claude Command` 按钮。选择一个支持的 model 后，复制出的命令会把 `CLAUDE_CONFIG_DIR` 设为当前执行目录下的 `.claude-web-providers`，并用 `ANTHROPIC_AUTH_TOKEN`、`ANTHROPIC_BASE_URL` 和 `claude --model ...` 把 Claude Code 的所有模式统一映射到该 model；粘贴到终端即可启动。
 
 ## 🛠️ 技术栈
 

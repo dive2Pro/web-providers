@@ -284,6 +284,7 @@ async function getClaudeCodeCommand(modelId: string) {
   }
 
   const launchConfig = buildClaudeCodeLaunchConfig({
+    claudeConfigDir: "$PWD/.claude-web-providers",
     gatewayUrl: runningServices.gatewayUrl,
     gatewayToken: desktopConfig.gatewayToken,
     modelId,

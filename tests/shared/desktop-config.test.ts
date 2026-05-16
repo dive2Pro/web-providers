@@ -39,13 +39,15 @@ describe("desktop-config", () => {
 
   it("builds launch env for claude code", () => {
     const launchConfig = buildClaudeCodeLaunchConfig({
+      claudeConfigDir: "$PWD/.claude-web-providers",
       gatewayUrl: "http://127.0.0.1:5321",
       gatewayToken: "desktop-token",
       modelId: "qwen-web-tools",
     });
 
+    expect(launchConfig.CLAUDE_CONFIG_DIR).toBe("$PWD/.claude-web-providers");
     expect(launchConfig.ANTHROPIC_BASE_URL).toBe("http://127.0.0.1:5321");
-    expect(launchConfig.ANTHROPIC_API_KEY).toBe("desktop-token");
+    expect(launchConfig.ANTHROPIC_AUTH_TOKEN).toBe("desktop-token");
     expect(launchConfig.ANTHROPIC_MODEL).toBe("qwen-web-tools");
     expect(launchConfig.ANTHROPIC_DEFAULT_SONNET_MODEL).toBe("qwen-web-tools");
     expect(launchConfig.ANTHROPIC_DEFAULT_HAIKU_MODEL).toBe("qwen-web-tools");
@@ -54,14 +56,16 @@ describe("desktop-config", () => {
 
   it("builds a copyable claude startup command", () => {
     const command = buildClaudeCodeStartupCommand({
-      ANTHROPIC_API_KEY: "desktop-token",
+      CLAUDE_CONFIG_DIR: "$PWD/.claude-web-providers",
+      ANTHROPIC_AUTH_TOKEN: "desktop-token",
       ANTHROPIC_BASE_URL: "http://127.0.0.1:5321",
-      ANTHROPIC_MODEL: "sonnet",
+      ANTHROPIC_MODEL: "deepseek-web-pro",
     });
 
     expect(command).toContain("env \\");
-    expect(command).toContain("ANTHROPIC_API_KEY='desktop-token' \\");
+    expect(command).toContain('CLAUDE_CONFIG_DIR="$PWD/.claude-web-providers" \\');
+    expect(command).toContain("ANTHROPIC_AUTH_TOKEN='desktop-token' \\");
     expect(command).toContain("ANTHROPIC_BASE_URL='http://127.0.0.1:5321' \\");
-    expect(command).toContain("  claude");
+    expect(command).toContain("  claude --model 'deepseek-web-pro'");
   });
 });
