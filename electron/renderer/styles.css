@@ -281,6 +281,131 @@ select {
   margin-bottom: 18px;
 }
 
+.browser-tabbar {
+  display: flex;
+  gap: 14px;
+  align-items: flex-start;
+  justify-content: space-between;
+  margin-bottom: 14px;
+}
+
+.browser-tabs {
+  display: flex;
+  gap: 10px;
+  flex: 1;
+  min-width: 0;
+  overflow-x: auto;
+  padding-bottom: 4px;
+}
+
+.browser-tab {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  max-width: 260px;
+  padding: 6px 8px 6px 14px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.72);
+}
+
+.browser-tab.active {
+  background: rgba(17, 100, 102, 0.14);
+  border-color: rgba(17, 100, 102, 0.35);
+}
+
+.browser-tab-button,
+.browser-tab-close {
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  color: inherit;
+}
+
+.browser-tab-button {
+  min-width: 0;
+  padding: 0;
+  flex: 1;
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.browser-tab-close {
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border-radius: 999px;
+  color: var(--muted);
+}
+
+.browser-tab-close:hover {
+  background: rgba(31, 28, 22, 0.08);
+}
+
+.browser-tab-actions {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.browser-toolbar {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 14px;
+  align-items: end;
+  margin-bottom: 14px;
+}
+
+.browser-actions {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.browser-address {
+  display: grid;
+  gap: 8px;
+}
+
+.browser-address span {
+  color: var(--muted);
+}
+
+.browser-meta {
+  display: flex;
+  gap: 14px;
+  align-items: center;
+  margin-bottom: 14px;
+}
+
+.browser-meta strong {
+  flex: 1;
+  min-width: 0;
+  font-size: 18px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.browser-error {
+  min-height: 20px;
+  color: var(--warning);
+  font-size: 14px;
+}
+
+.browser-host {
+  min-height: 540px;
+  border-radius: 24px;
+  border: 1px solid rgba(17, 100, 102, 0.18);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.72), rgba(255, 255, 255, 0.44)),
+    radial-gradient(circle at top left, rgba(17, 100, 102, 0.1), transparent 28%);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.35);
+}
+
 .path-list {
   margin: 0;
   display: grid;
@@ -342,6 +467,28 @@ select {
   .card-large,
   .card-wide {
     grid-column: span 12;
+  }
+
+  .browser-toolbar {
+    grid-template-columns: 1fr;
+  }
+
+  .browser-tabbar {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .browser-tab-actions {
+    width: 100%;
+  }
+
+  .browser-meta {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .browser-host {
+    min-height: 420px;
   }
 
   .status-grid,

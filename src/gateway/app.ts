@@ -61,6 +61,14 @@ function isGatewayAuthorized(input: {
   return isOpenAiModelsAuthorized(input);
 }
 
+function shouldStoreGatewayRequestLog(routePath: string | null) {
+  return (
+    routePath === "/v1/messages" ||
+    routePath === "/v1/chat/completions" ||
+    routePath === "/v1/responses"
+  );
+}
+
 export function buildGatewayApp(input: {
   openAiToken?: string;
   anthropicToken?: string;
@@ -84,6 +92,7 @@ export function buildGatewayApp(input: {
     scope: "gateway",
     logger: input.requestLogger,
     store: requestLogStore ?? undefined,
+    shouldStore: (entry) => shouldStoreGatewayRequestLog(entry.routePath),
   });
   const openAiExecutionClient: OpenAiExecutionClient = createOpenAiHelperClient({
     helperBaseUrl: input.helperBaseUrl,

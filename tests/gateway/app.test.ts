@@ -246,6 +246,77 @@ describe("gateway app", () => {
     );
   });
 
+  it("stores only main-flow gateway access logs", async () => {
+    const requestLogDir = await mkdtemp(
+      join(tmpdir(), "web-providers-gateway-logs-main-flow-"),
+    );
+    requestLogDirs.push(requestLogDir);
+
+    const app = buildGatewayApp({
+      openAiToken: "openai-token",
+      anthropicToken: "anthropic-token",
+      helperBaseUrl: "http://127.0.0.1:4318",
+      helperToken: "helper-token",
+      requestLogDir,
+      fetchImpl: vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          mode: "text",
+          outputText: "hello from helper",
+          finishReason: "stop",
+        }),
+      }),
+    });
+
+    const countTokensResponse = await app.inject({
+      method: "POST",
+      url: "/v1/messages/count_tokens",
+      headers: {
+        "x-api-key": "anthropic-token",
+      },
+      payload: {
+        model: "deepseek-web-chat",
+        messages: [{ role: "user", content: "hello" }],
+      },
+    });
+
+    expect(countTokensResponse.statusCode).toBe(200);
+
+    const chatResponse = await app.inject({
+      method: "POST",
+      url: "/v1/chat/completions",
+      headers: {
+        authorization: "Bearer openai-token",
+        "x-web-providers-session-id": "session-123",
+      },
+      payload: {
+        model: "deepseek-web-chat",
+        messages: [{ role: "user", content: "hello" }],
+      },
+    });
+
+    expect(chatResponse.statusCode).toBe(200);
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/v1/debug/request-logs?limit=10",
+      headers: {
+        authorization: "Bearer openai-token",
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      logs: [
+        expect.objectContaining({
+          url: "/v1/chat/completions",
+          routePath: "/v1/chat/completions",
+        }),
+      ],
+    });
+    expect(response.json().logs).toHaveLength(1);
+  });
+
   it("returns a unified model list", async () => {
     const app = buildGatewayApp({
       openAiToken: "openai-token",

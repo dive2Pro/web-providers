@@ -12,6 +12,7 @@ import {
   type BoundSession,
   type ProviderRequestDebugRecord,
 } from "./types";
+import type { PageStateSummary } from "./browser/types";
 import type {
   ProviderChatRequest,
   ProviderChatResponse,
@@ -20,6 +21,40 @@ import type {
 } from "../shared/contracts";
 
 const MAX_PROVIDER_RESPONSE_REPAIR_ATTEMPTS = 3;
+
+export interface HelperRuntimeEvent {
+  scope: "helper-runtime";
+  event:
+    | "bind_attempt"
+    | "bind_result"
+    | "bind_rejected"
+    | "ensure_bound_open_new"
+    | "ensure_bound_recover"
+    | "reopen_bound_session"
+    | "chat_recover_current_prompt"
+    | "chat_fresh_session_begin"
+    | "chat_fresh_session_ready"
+    | "chat_send_prompt_begin"
+    | "chat_send_prompt_end";
+  sessionId: string;
+  provider: ProviderId;
+  modelId: string | null;
+  tabId?: string;
+  tabUrl?: string;
+  previousTabId?: string;
+  previousTabUrl?: string;
+  openNew?: boolean;
+  openUrl?: string;
+  loginState?: "logged_in" | "logged_out";
+  reason?: string;
+  errorCode?: string;
+  errorMessage?: string;
+  pageState?: PageStateSummary;
+}
+
+export interface HelperRuntimeEventStore {
+  append(entry: HelperRuntimeEvent): Promise<void>;
+}
 
 function appendResponseFormatDeclaration(content: string) {
   const trimmed = content.trim();
@@ -186,10 +221,7 @@ function isRecoverableSessionError(error: unknown) {
     return true;
   }
 
-  return (
-    error instanceof HelperError &&
-    (error.code === "NOT_BOUND" || error.code === "PAGE_UNAVAILABLE")
-  );
+  return error instanceof HelperError && error.code === "PAGE_UNAVAILABLE";
 }
 
 export class HelperRuntime {
@@ -197,7 +229,23 @@ export class HelperRuntime {
     private readonly browserClient: BrowserAutomationClient,
     private readonly state: HelperState,
     private readonly sessionBindingStore?: SessionBindingStore,
+    private readonly eventStore?: HelperRuntimeEventStore,
   ) {}
+
+  private async appendEvent(entry: Omit<HelperRuntimeEvent, "scope">) {
+    if (!this.eventStore) {
+      return;
+    }
+
+    try {
+      await this.eventStore.append({
+        scope: "helper-runtime",
+        ...entry,
+      });
+    } catch {
+      // Logging is best-effort and should never break the main flow.
+    }
+  }
 
   private async persistSessionBindings() {
     if (!this.sessionBindingStore) {
@@ -215,6 +263,18 @@ export class HelperRuntime {
     modelId?: string | null;
     previousSession: BoundSession;
   }) {
+    await this.appendEvent({
+      event: "reopen_bound_session",
+      sessionId: input.sessionId,
+      provider: input.provider,
+      modelId: normalizeBoundModelId(input.provider, input.modelId),
+      previousTabId: input.previousSession.tabId,
+      previousTabUrl: input.previousSession.tabUrl,
+      openNew: true,
+      openUrl: input.previousSession.tabUrl,
+      reason: "rebind previous conversation URL after a recoverable session error",
+    });
+
     return this.bindProvider({
       sessionId: input.sessionId,
       provider: input.provider,
@@ -272,7 +332,22 @@ export class HelperRuntime {
     previousSession?: BoundSession | null;
   }) {
     const sessionId = input.sessionId;
+    const normalizedModelId = normalizeBoundModelId(input.provider, input.modelId);
     this.state.touchSession(sessionId);
+    await this.appendEvent({
+      event: "bind_attempt",
+      sessionId,
+      provider: input.provider,
+      modelId: normalizedModelId,
+      tabId: input.tabId,
+      previousTabId: input.previousSession?.tabId,
+      previousTabUrl: input.previousSession?.tabUrl,
+      openNew: input.openNew,
+      openUrl: input.openUrl,
+      reason: input.openNew
+        ? "attempting a fresh bind that may open a new provider tab"
+        : "attempting to bind the existing provider session",
+    });
     const result =
       this.browserClient.bindProviderTab
         ? await this.browserClient.bindProviderTab({
@@ -284,7 +359,51 @@ export class HelperRuntime {
           })
         : await this.browserClient.bindDeepSeekTab();
 
+    await this.appendEvent({
+      event: "bind_result",
+      sessionId,
+      provider: input.provider,
+      modelId: normalizedModelId,
+      tabId: result.tabId,
+      tabUrl: result.url,
+      previousTabId: input.previousSession?.tabId,
+      previousTabUrl: input.previousSession?.tabUrl,
+      openNew: input.openNew,
+      openUrl: input.openUrl,
+      loginState: result.loginState,
+      pageState: result.pageState,
+      reason: input.openNew
+        ? "fresh bind resolved to a provider tab"
+        : "existing bind resolved to a provider tab",
+    });
+
     if (result.loginState === "logged_out") {
+      this.storeBoundSession({
+        sessionId,
+        provider: input.provider,
+        modelId: input.modelId,
+        previousSession: input.previousSession,
+        result,
+      });
+      await this.persistSessionBindings();
+      await this.appendEvent({
+        event: "bind_rejected",
+        sessionId,
+        provider: input.provider,
+        modelId: normalizedModelId,
+        tabId: result.tabId,
+        tabUrl: result.url,
+        openNew: input.openNew,
+        openUrl: input.openUrl,
+        loginState: result.loginState,
+        pageState: result.pageState,
+        errorCode: "NOT_BOUND",
+        errorMessage:
+          input.provider === "qwen-web"
+            ? "Open Qwen in the browser tab, sign in on that page, then retry."
+            : result.pageState.blockingMessage ??
+              "DeepSeek tab is still loading. Wait for the page to finish loading and retry.",
+      });
       throw new HelperError(
         "NOT_BOUND",
         input.provider === "qwen-web"
@@ -332,6 +451,14 @@ export class HelperRuntime {
       fallback.modelId === null;
 
     if (!fallback) {
+      await this.appendEvent({
+        event: "ensure_bound_open_new",
+        sessionId: input.sessionId,
+        provider: input.provider,
+        modelId,
+        openNew: true,
+        reason: "no reusable bound session was found for this provider/model",
+      });
       return this.bindProvider({
         sessionId: input.sessionId,
         provider: input.provider,
@@ -362,6 +489,18 @@ export class HelperRuntime {
       if (!isRecoverableSessionError(error)) {
         throw error;
       }
+
+      await this.appendEvent({
+        event: "ensure_bound_recover",
+        sessionId: input.sessionId,
+        provider: input.provider,
+        modelId,
+        previousTabId: fallback.tabId,
+        previousTabUrl: fallback.tabUrl,
+        errorCode: error instanceof HelperError ? error.code : "AUTOMATION_DESYNC",
+        errorMessage: error instanceof Error ? error.message : String(error),
+        reason: "recoverable error while rebinding an existing session",
+      });
 
       return finalizePromotedBinding(await this.reopenBoundSessionByUrl({
         sessionId: input.sessionId,
@@ -442,6 +581,17 @@ export class HelperRuntime {
       });
 
       if (shouldStartFreshSession) {
+        await this.appendEvent({
+          event: "chat_fresh_session_begin",
+          sessionId,
+          provider,
+          modelId,
+          tabId: session.tabId,
+          tabUrl: session.tabUrl,
+          reason: shouldInitializeDeepSeekSession
+            ? "preparing a fresh DeepSeek session before the first prompt"
+            : "starting a fresh provider session from sessionInit",
+        });
         const startNewChatTarget = this.browserClient.bindProviderTab
           ? {
               provider,
@@ -452,11 +602,31 @@ export class HelperRuntime {
         await this.browserClient.startNewChat(
           startNewChatTarget,
         );
+        await this.appendEvent({
+          event: "chat_fresh_session_ready",
+          sessionId,
+          provider,
+          modelId,
+          tabId: session.tabId,
+          tabUrl: session.tabUrl,
+          reason: "fresh provider session is ready for prompt submission",
+        });
       }
 
       const repairIssues: string[][] = [];
       let latestAutomationDebug: ProviderRequestDebugRecord["automation"] = null;
       const sendPrompt = async (nextPrompt: string, freshSession: boolean) => {
+        await this.appendEvent({
+          event: "chat_send_prompt_begin",
+          sessionId,
+          provider,
+          modelId,
+          tabId: session.tabId,
+          tabUrl: session.tabUrl,
+          reason: freshSession
+            ? "sending prompt on a freshly initialized provider session"
+            : "sending prompt on an existing provider session",
+        });
         const result = await this.browserClient.sendChatPrompt({
           provider,
           tabId: session.tabId,
@@ -464,6 +634,15 @@ export class HelperRuntime {
           timeoutMs: 30_000,
           freshSession,
           signal: input.signal,
+        });
+        await this.appendEvent({
+          event: "chat_send_prompt_end",
+          sessionId,
+          provider,
+          modelId,
+          tabId: session.tabId,
+          tabUrl: session.tabUrl,
+          reason: `provider returned a ${result.mode} response`,
         });
         latestAutomationDebug = result.debug ?? null;
         return toProviderResponse(result);
@@ -589,6 +768,17 @@ export class HelperRuntime {
         }
 
         this.state.setActiveRequest(session.tabId, null);
+        await this.appendEvent({
+          event: "chat_recover_current_prompt",
+          sessionId,
+          provider,
+          modelId,
+          previousTabId: session.tabId,
+          previousTabUrl: session.tabUrl,
+          errorCode: error instanceof HelperError ? error.code : "AUTOMATION_DESYNC",
+          errorMessage: error instanceof Error ? error.message : String(error),
+          reason: "recoverable error during provider chat execution; reopening the previous session URL",
+        });
         const recoveredSession = await this.reopenBoundSessionByUrl({
           sessionId,
           provider,

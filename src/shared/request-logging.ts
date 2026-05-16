@@ -21,6 +21,7 @@ export function registerRequestLogging(
     scope: string;
     logger?: RequestLogger;
     store?: RequestLogStore;
+    shouldStore?: (entry: RequestLogEntry) => boolean;
   },
 ) {
   const requestLogger = input.logger;
@@ -49,7 +50,7 @@ export function registerRequestLogging(
 
     requestLogger?.(entry);
 
-    if (input.store) {
+    if (input.store && (input.shouldStore?.(entry) ?? true)) {
       await input.store.append(entry);
     }
 

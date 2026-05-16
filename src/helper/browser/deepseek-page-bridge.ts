@@ -780,13 +780,60 @@ export const INJECTED_BRIDGE_SOURCE = `
   installNetworkHook();
 
   function findComposer() {
-    return document.querySelector("textarea");
+    return (
+      document.querySelector("textarea") ||
+      document.querySelector("[contenteditable='true'][role='textbox']") ||
+      document.querySelector("[contenteditable='plaintext-only'][role='textbox']") ||
+      document.querySelector("[contenteditable='true']") ||
+      document.querySelector("[contenteditable='plaintext-only']") ||
+      document.querySelector("div[role='textbox']")
+    );
+  }
+
+  function hasInteractiveComposer() {
+    const composer = findComposer();
+    if (!composer) {
+      return false;
+    }
+
+    return (
+      composer instanceof HTMLElement &&
+      (findSendButton(composer) instanceof HTMLElement ||
+        findComposerControlsRoot(composer) instanceof HTMLElement)
+    );
+  }
+
+  function hasLikelyDeepSeekAppShell() {
+    if (hasInteractiveComposer() || findNewChatButton() || findStopButton()) {
+      return true;
+    }
+
+    if (assistantMessageCount() > 0) {
+      return true;
+    }
+
+    return getModeControlNodes().some((node) => {
+      const label = getNodeLabel(node);
+      const className = (node?.className || "").toString().toLowerCase();
+      return (
+        label.includes("new chat") ||
+        label.includes("new conversation") ||
+        label.includes("新对话") ||
+        label.includes("新建对话") ||
+        label.includes("expert") ||
+        label.includes("deepthink") ||
+        label.includes("flash") ||
+        label.includes("search")
+      );
+    });
   }
 
   function detectBlockingMessage() {
     const pageText = (document.body?.innerText || "").trim();
     const path = (window.location?.pathname || "").toLowerCase();
     const normalizedText = pageText.toLowerCase();
+    const composer = findComposer();
+    const shellReady = hasLikelyDeepSeekAppShell();
 
     if (pageText.includes("One more step before you proceed")) {
       return "One more step before you proceed...";
@@ -812,7 +859,20 @@ export const INJECTED_BRIDGE_SOURCE = `
       return "Please sign in to DeepSeek in the browser tab.";
     }
 
-    if (document.readyState !== "complete" && !findComposer()) {
+    const readyState = typeof document.readyState === "string"
+      ? document.readyState
+      : "complete";
+    const pageLooksBlank = normalizedText.length === 0;
+
+    if ((readyState === "loading" || readyState === "interactive") && !composer && !shellReady) {
+      return "DeepSeek tab is still loading. Wait for the page to finish loading.";
+    }
+
+    if (pageLooksBlank && readyState === "complete" && !composer && !shellReady) {
+      return "DeepSeek finished loading an empty page in the embedded browser. Reload the page or sign in manually, then retry.";
+    }
+
+    if (pageLooksBlank && !composer && !shellReady) {
       return "DeepSeek tab is still loading. Wait for the page to finish loading.";
     }
 
@@ -1012,9 +1072,7 @@ export const INJECTED_BRIDGE_SOURCE = `
       document.querySelector("button[aria-label='新建对话']") ||
       document.querySelector("a[aria-label='New Chat']") ||
       document.querySelector("a[aria-label='新对话']") ||
-      document.querySelector("[data-testid='new-chat']") ||
-      document.querySelector("a[href='/']") ||
-      document.querySelector("a[href='/chat']");
+      document.querySelector("[data-testid='new-chat']");
 
     if (directMatch) {
       return directMatch;
@@ -1212,12 +1270,28 @@ export const INJECTED_BRIDGE_SOURCE = `
     return candidates.find((node) => isModeNodeSelected(node)) || candidates[0] || null;
   }
 
+  function getVisibleModeLabels() {
+    const labels = [];
+    for (const node of getModeControlNodes()) {
+      const label = getNodeLabel(node);
+      if (label.length === 0 || labels.includes(label)) {
+        continue;
+      }
+      labels.push(label);
+      if (labels.length >= 8) {
+        break;
+      }
+    }
+
+    return labels;
+  }
+
   async function ensureModelType(targetModelType) {
     if (targetModelType !== "expert" && targetModelType !== "default") {
       return { ok: true };
     }
 
-    const timeoutMs = 4_000;
+    const timeoutMs = 8_000;
     const pollMs = 100;
     const startedAt = Date.now();
     let sawModeButton = false;
@@ -1253,7 +1327,15 @@ export const INJECTED_BRIDGE_SOURCE = `
       error: "AUTOMATION_DESYNC",
       message: sawModeButton
         ? "DeepSeek " + targetModelType + " mode switch did not stick"
-        : "DeepSeek " + targetModelType + " mode control not found",
+        : "DeepSeek " +
+          targetModelType +
+          " mode control not found" +
+          (() => {
+            const labels = getVisibleModeLabels();
+            return labels.length > 0
+              ? " (visible controls: " + labels.join(" | ") + ")"
+              : "";
+          })(),
     };
   }
 
@@ -1299,6 +1381,14 @@ export const INJECTED_BRIDGE_SOURCE = `
   }
 
   function setComposerValue(composer, nextValue) {
+    if (composer && composer.tagName !== "TEXTAREA") {
+      composer.textContent = nextValue;
+      if ("innerText" in composer) {
+        composer.innerText = nextValue;
+      }
+      return;
+    }
+
     const prototype = Object.getPrototypeOf(composer);
     const valueDescriptor =
       prototype ? Object.getOwnPropertyDescriptor(prototype, "value") : null;
@@ -1502,11 +1592,14 @@ export const INJECTED_BRIDGE_SOURCE = `
     __version: VERSION,
     getPageState() {
       const composer = findComposer();
+      const interactiveComposerReady = hasInteractiveComposer();
       const latestAssistant = latestAssistantNode();
+      const shellReady = hasLikelyDeepSeekAppShell();
       const blockingMessage = detectBlockingMessage();
       const domReply = latestAssistant ? (latestAssistant.textContent || "").trim() || null : null;
+      const bodyText = (document.body?.innerText || "").trim();
       return {
-        inputReady: Boolean(!blockingMessage && composer),
+        inputReady: Boolean(!blockingMessage && (interactiveComposerReady || shellReady)),
         busy: Boolean(findStopButton()) || completionState.status === "streaming",
         latestAssistantPreview: domReply,
         assistantCount:
@@ -1515,7 +1608,22 @@ export const INJECTED_BRIDGE_SOURCE = `
             completionState.responseMessageId !== null)
             ? Math.max(assistantMessageCount(), 1)
             : assistantMessageCount(),
+        shellReady,
         blockingMessage,
+        diagnostics: {
+          readyState:
+            typeof document.readyState === "string" ? document.readyState : "unknown",
+          title: typeof document.title === "string" ? document.title : "",
+          locationHref:
+            typeof window.location?.href === "string" ? window.location.href : "",
+          locationPath:
+            typeof window.location?.pathname === "string" ? window.location.pathname : "",
+          bodyTextLength: bodyText.length,
+          composerFound: Boolean(composer),
+          interactiveComposerReady,
+          newChatButtonFound: Boolean(findNewChatButton()),
+          modeControlLabels: getVisibleModeLabels(),
+        },
       };
     },
     getCompletionState() {
@@ -1586,17 +1694,41 @@ export const INJECTED_BRIDGE_SOURCE = `
         baselineState,
       };
     },
-    async startNewChat(input = {}) {
+    openFreshChat() {
       const previousUrl = window.location?.href || "";
+      const currentPathname = (window.location?.pathname || "").toLowerCase();
       const newChatButton = findNewChatButton();
 
       if (newChatButton instanceof HTMLElement) {
         newChatButton.click();
-        await sleep(750);
-      } else {
-        window.location.href = "https://chat.deepseek.com/";
-        await sleep(1_500);
+        return {
+          ok: true,
+          previousUrl,
+          action: "click_new_chat",
+        };
       }
+
+      if (isDeepSeekConversationPath(currentPathname)) {
+        window.location.href = "https://chat.deepseek.com/";
+        return {
+          ok: true,
+          previousUrl,
+          action: "navigate_home",
+        };
+      }
+
+      return {
+        ok: true,
+        previousUrl,
+        action: "reuse_home",
+      };
+    },
+    async startNewChat(input = {}) {
+      const opened = window[KEY].openFreshChat();
+      const previousUrl =
+        opened && typeof opened === "object" && typeof opened.previousUrl === "string"
+          ? opened.previousUrl
+          : window.location?.href || "";
 
       const readyResult = await waitForFreshChat(previousUrl);
       if (!readyResult.ok) {

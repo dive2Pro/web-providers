@@ -20,10 +20,11 @@ export function registerChatRoute(app: FastifyInstance, ctx: AppContext) {
     }
 
     const session = ctx.state.getSessionBoundSession(sessionId, "deepseek-web", null);
-    if (!session) {
+    if (!session || session.loginState !== "logged_in") {
       return reply.code(409).send({
         error: "NOT_BOUND",
-        message: "Bind a DeepSeek tab before chatting",
+        message:
+          session?.pageState.blockingMessage ?? "Bind a DeepSeek tab before chatting",
       });
     }
 

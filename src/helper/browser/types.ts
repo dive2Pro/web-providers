@@ -9,7 +9,19 @@ export interface PageStateSummary {
   busy: boolean;
   latestAssistantPreview: string | null;
   assistantCount: number;
+  shellReady?: boolean;
   blockingMessage?: string | null;
+  diagnostics?: {
+    readyState?: string;
+    title?: string;
+    locationHref?: string;
+    locationPath?: string;
+    bodyTextLength?: number;
+    composerFound?: boolean;
+    interactiveComposerReady?: boolean;
+    newChatButtonFound?: boolean;
+    modeControlLabels?: string[];
+  };
 }
 
 export interface BindResult {

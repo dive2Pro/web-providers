@@ -176,7 +176,7 @@ describe("provider chat route", () => {
     ]);
   });
 
-  it("reopens the remembered url when rebinding the existing session reports NOT_BOUND", async () => {
+  it("reuses the remembered tab when rebinding reports the page is still loading", async () => {
     const bindCalls: Array<Record<string, unknown>> = [];
 
     const app = buildApp({
@@ -247,15 +247,14 @@ describe("provider chat route", () => {
     });
 
     expect(firstResponse.statusCode).toBe(200);
-    expect(secondResponse.statusCode).toBe(200);
+    expect(secondResponse.statusCode).toBe(409);
+    expect(secondResponse.json()).toEqual({
+      error: "NOT_BOUND",
+      message: "DeepSeek tab is still loading. Wait for the page to finish loading and retry.",
+    });
     expect(bindCalls).toEqual([
       expect.objectContaining({ provider: "deepseek-web", openNew: true }),
       expect.objectContaining({ provider: "deepseek-web", tabId: "tab-1" }),
-      expect.objectContaining({
-        provider: "deepseek-web",
-        openNew: true,
-        openUrl: "https://chat.deepseek.com/",
-      }),
     ]);
   });
 
@@ -591,7 +590,7 @@ describe("provider chat route", () => {
     ]);
   });
 
-  it("reopens the remembered chat url when the existing tab is no longer ready during bind", async () => {
+  it("does not open another tab when the existing tab is still loading during bind", async () => {
     const bindCalls: Array<{
       provider: string;
       tabId?: string;
@@ -656,13 +655,99 @@ describe("provider chat route", () => {
       } as never,
     });
 
+    const firstResponse = await app.inject({
+      method: "POST",
+      url: "/v1/provider/chat",
+      headers: {
+        authorization: "Bearer test-token",
+        "x-web-providers-session-id": "public-session-rebind-by-url",
+      },
+      payload: {
+        provider: "deepseek-web",
+        model: "deepseek-web-chat",
+        messages: [{ role: "user", content: "one" }],
+      },
+    });
+
+    const secondResponse = await app.inject({
+      method: "POST",
+      url: "/v1/provider/chat",
+      headers: {
+        authorization: "Bearer test-token",
+        "x-web-providers-session-id": "public-session-rebind-by-url",
+      },
+      payload: {
+        provider: "deepseek-web",
+        model: "deepseek-web-chat",
+        messages: [{ role: "user", content: "two" }],
+      },
+    });
+
+    expect(firstResponse.statusCode).toBe(200);
+    expect(secondResponse.statusCode).toBe(409);
+    expect(secondResponse.json()).toEqual({
+      error: "NOT_BOUND",
+      message: "DeepSeek tab is still loading. Wait for the page to finish loading and retry.",
+    });
+    expect(bindCalls).toEqual([
+      expect.objectContaining({ provider: "deepseek-web", openNew: true }),
+      expect.objectContaining({ provider: "deepseek-web", tabId: "tab-1" }),
+    ]);
+    expect(sendCalls).toEqual([
+      expect.objectContaining({ tabId: "tab-1", prompt: expectedChatPrompt("one") }),
+    ]);
+  });
+
+  it("retries the same opened tab after an initial loading response instead of opening another tab", async () => {
+    const bindCalls: Array<{
+      provider: string;
+      tabId?: string;
+      openNew?: boolean;
+      openUrl?: string;
+    }> = [];
+
+    const app = buildApp({
+      token: "test-token",
+      browserClient: {
+        getConnectionStatus: async () => "connected",
+        bindProviderTab: async (input: {
+          provider: string;
+          tabId?: string;
+          openNew?: boolean;
+          openUrl?: string;
+          passive?: boolean;
+        }) => {
+          bindCalls.push(input);
+
+          return {
+            tabId: input.tabId ?? "tab-loading",
+            url: "https://chat.deepseek.com/",
+            loginState: "logged_out",
+            bridgeInjected: true,
+            pageState: {
+              inputReady: false,
+              busy: false,
+              latestAssistantPreview: null,
+              assistantCount: 0,
+              blockingMessage:
+                "DeepSeek tab is still loading. Wait for the page to finish loading and retry.",
+            },
+          };
+        },
+        resetProvider: async () => undefined,
+        startNewChat: async () => undefined,
+        sendChatPrompt: async ({ prompt }: { prompt: string }) =>
+          messageResponse(`reply:${prompt}`),
+      } as never,
+    });
+
     for (const prompt of ["one", "two"]) {
       const response = await app.inject({
         method: "POST",
         url: "/v1/provider/chat",
         headers: {
           authorization: "Bearer test-token",
-          "x-web-providers-session-id": "public-session-rebind-by-url",
+          "x-web-providers-session-id": "public-session-loading-tab",
         },
         payload: {
           provider: "deepseek-web",
@@ -671,21 +756,16 @@ describe("provider chat route", () => {
         },
       });
 
-      expect(response.statusCode).toBe(200);
+      expect(response.statusCode).toBe(409);
+      expect(response.json()).toEqual({
+        error: "NOT_BOUND",
+        message: "DeepSeek tab is still loading. Wait for the page to finish loading and retry.",
+      });
     }
 
     expect(bindCalls).toEqual([
       expect.objectContaining({ provider: "deepseek-web", openNew: true }),
-      expect.objectContaining({ provider: "deepseek-web", tabId: "tab-1" }),
-      expect.objectContaining({
-        provider: "deepseek-web",
-        openNew: true,
-        openUrl: "https://chat.deepseek.com/a/chat/s/session-1",
-      }),
-    ]);
-    expect(sendCalls).toEqual([
-      expect.objectContaining({ tabId: "tab-1", prompt: expectedChatPrompt("one") }),
-      expect.objectContaining({ tabId: "tab-2", prompt: expectedChatPrompt("two") }),
+      expect.objectContaining({ provider: "deepseek-web", tabId: "tab-loading" }),
     ]);
   });
 

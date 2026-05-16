@@ -115,6 +115,46 @@
         <section class="card card-wide">
           <div class="card-header">
             <div>
+              <p class="card-kicker">Embedded</p>
+              <h2>Browser Tabs</h2>
+            </div>
+          </div>
+          <div class="browser-tabbar">
+            <div id="browser-tabs" class="browser-tabs"></div>
+            <div class="browser-tab-actions">
+              <button id="new-deepseek-tab" class="ghost-button" type="button">+ DeepSeek</button>
+              <button id="new-qwen-tab" class="ghost-button" type="button">+ Qwen</button>
+            </div>
+          </div>
+          <form id="browser-form" class="browser-toolbar">
+            <div class="browser-actions">
+              <button id="browser-back" class="ghost-button" type="button">Back</button>
+              <button id="browser-forward" class="ghost-button" type="button">Forward</button>
+              <button id="browser-reload" class="ghost-button" type="button">Reload</button>
+            </div>
+            <label class="browser-address">
+              <span>Address</span>
+              <input
+                id="browser-url"
+                name="browserUrl"
+                type="text"
+                value="https://chat.deepseek.com/"
+                spellcheck="false"
+              />
+            </label>
+            <button class="primary-button" type="submit">Open</button>
+          </form>
+          <div class="browser-meta">
+            <span id="browser-loading" class="status-pill">Idle</span>
+            <strong id="browser-title">Embedded Browser</strong>
+            <span id="browser-error" class="browser-error"></span>
+          </div>
+          <div id="browser-host" class="browser-host" aria-label="Embedded browser surface"></div>
+        </section>
+
+        <section class="card card-wide">
+          <div class="card-header">
+            <div>
               <p class="card-kicker">Workspace</p>
               <h2>Runtime Files</h2>
             </div>

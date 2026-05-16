@@ -105,6 +105,14 @@ export interface BbBrowserTransport {
   submitPrompt(tabId: string, prompt: string): Promise<void>;
 }
 
+function isTransientDeepSeekBlockingMessage(message: string | null | undefined) {
+  return (
+    message === "DeepSeek tab is still loading. Wait for the page to finish loading." ||
+    message ===
+      "DeepSeek finished loading an empty page in the embedded browser. Reload the page or sign in manually, then retry."
+  );
+}
+
 function unwrapEnvelope<T>(value: unknown): T {
   if (
     value &&
@@ -627,10 +635,14 @@ export class BbBrowserClient implements BrowserAutomationClient {
     const tabId = typeof input === "string" ? input : input.tabId;
     const targetModelType =
       typeof input === "string" ? null : resolveDeepSeekPageMode(input.modelId);
-    const startNewChatScript =
-      targetModelType
-        ? `${INJECTED_BRIDGE_SOURCE}; window.__piDeepSeekBridge.startNewChat(${JSON.stringify({ targetModelType })})`
-        : `${INJECTED_BRIDGE_SOURCE}; window.__piDeepSeekBridge.startNewChat()`;
+    const previousTab = this.transport.getTab
+      ? await this.transport.getTab(tabId).catch(() => null)
+      : null;
+    const previousUrl = previousTab?.url ?? "";
+    const openFreshChatScript =
+      `${INJECTED_BRIDGE_SOURCE}; window.__piDeepSeekBridge.openFreshChat()`;
+    const pageStateScript =
+      `${INJECTED_BRIDGE_SOURCE}; window.__piDeepSeekBridge.getPageState()`;
     try {
       const result = await this.transport.evaluate<{
         ok?: boolean;
@@ -638,7 +650,7 @@ export class BbBrowserClient implements BrowserAutomationClient {
         message?: string;
       }>(
         tabId,
-        startNewChatScript,
+        openFreshChatScript,
       );
       if (result?.ok === false) {
         throw new HelperError(
@@ -646,7 +658,6 @@ export class BbBrowserClient implements BrowserAutomationClient {
           result.message ?? result.error ?? "Failed to start a new DeepSeek chat",
         );
       }
-      return;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       const isExpectedNavigation =
@@ -658,8 +669,54 @@ export class BbBrowserClient implements BrowserAutomationClient {
       }
     }
 
-    await new Promise((resolve) => setTimeout(resolve, 1_000));
-    await this.transport.evaluate(tabId, INJECTED_BRIDGE_SOURCE);
+    const previousPathname = (() => {
+      try {
+        return new URL(previousUrl).pathname.toLowerCase();
+      } catch {
+        return "";
+      }
+    })();
+    const shouldRequireRouteChange =
+      previousPathname.startsWith("/a/chat/s/");
+    const startedAt = Date.now();
+    const timeoutMs = 12_000;
+    let lastPageState: PageStateSummary | null = null;
+
+    while (Date.now() - startedAt <= timeoutMs) {
+      const pageState = await this.transport.evaluate<PageStateSummary | undefined>(
+        tabId,
+        pageStateScript,
+      );
+      if (!pageState || typeof pageState !== "object") {
+        await new Promise((resolve) => setTimeout(resolve, 150));
+        continue;
+      }
+      lastPageState = pageState;
+
+      if (
+        pageState.blockingMessage &&
+        !isTransientDeepSeekBlockingMessage(pageState.blockingMessage)
+      ) {
+        throw new HelperError("PAGE_UNAVAILABLE", pageState.blockingMessage);
+      }
+
+      const currentPathname = pageState.diagnostics?.locationPath?.toLowerCase() ?? "";
+      const routeChanged =
+        !shouldRequireRouteChange || currentPathname !== previousPathname;
+      if (pageState.inputReady && !pageState.busy && routeChanged) {
+        break;
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, 150));
+    }
+
+    if (!(lastPageState?.inputReady && !lastPageState.busy)) {
+      throw new HelperError(
+        "AUTOMATION_DESYNC",
+        "DeepSeek new chat did not finish resetting the page",
+      );
+    }
+
     if (targetModelType) {
       const result = await this.transport.evaluate<{
         ok?: boolean;

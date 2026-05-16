@@ -256,6 +256,18 @@ export class HelperState {
     return false;
   }
 
+  hasAnyReadyBoundSession() {
+    for (const bindings of this.boundSessionsBySession.values()) {
+      for (const session of bindings.values()) {
+        if (session.loginState === "logged_in") {
+          return true;
+        }
+      }
+    }
+
+    return false;
+  }
+
   getActiveRequest(tabId?: string) {
     if (tabId) {
       return this.activeRequestsByTabId.get(tabId) ?? null;

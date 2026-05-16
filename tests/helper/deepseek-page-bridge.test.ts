@@ -14,6 +14,8 @@ class FakeEvent {
 
 class FakeElement {
   public className = "";
+  public tagName = "DIV";
+  public innerText = "";
   public parentElement: FakeElement | null = null;
   public textContent = "";
   public clicked = 0;
@@ -68,6 +70,7 @@ class FakeTextarea extends FakeElement {
 
   constructor(private readonly sendButton: FakeElement) {
     super();
+    this.tagName = "TEXTAREA";
     Object.defineProperty(this, "value", {
       configurable: true,
       writable: true,
@@ -118,6 +121,7 @@ function createBridgeTestContext(options?: {
   assistantVisible?: boolean;
   includeNewChatButton?: boolean;
   includeModeButtons?: boolean;
+  composerKind?: "textarea" | "contenteditable" | "none";
   modeControlsAsRadios?: boolean;
   selectedMode?: "expert" | "default";
   modeButtonsAppearAfterMs?: number;
@@ -127,6 +131,7 @@ function createBridgeTestContext(options?: {
   newChatTargetUrl?: string;
   newChatNavigatesAfterMs?: number;
   includeContinueButton?: boolean;
+  documentReadyState?: "loading" | "interactive" | "complete";
 }) {
   const createdAt = Date.now();
   const unrelatedPageIcon = new FakeElement({
@@ -168,6 +173,13 @@ function createBridgeTestContext(options?: {
     },
   });
   const textarea = new FakeTextarea(composerSend);
+  const contenteditableComposer = new FakeElement({
+    attributes: {
+      role: "textbox",
+      contenteditable: "true",
+    },
+  });
+  contenteditableComposer.tagName = "DIV";
   const newChatButton = new FakeElement({
     attributes: {
       "aria-label": "New Chat",
@@ -262,12 +274,28 @@ function createBridgeTestContext(options?: {
   composerInputWrapper.parentElement = composerRoot;
 
   const document = {
+    readyState: options?.documentReadyState ?? "complete",
     body: {
       innerText: continueVisible ? "Stopped\nContinue" : "",
     },
     querySelector(selector: string) {
-      if (selector === "textarea") {
+      const composerKind = options?.composerKind ?? "textarea";
+
+      if (selector === "textarea" && composerKind === "textarea") {
         return textarea;
+      }
+
+      if (
+        composerKind === "contenteditable" &&
+        (
+          selector === "[contenteditable='true'][role='textbox']" ||
+          selector === "[contenteditable='plaintext-only'][role='textbox']" ||
+          selector === "[contenteditable='true']" ||
+          selector === "[contenteditable='plaintext-only']" ||
+          selector === "div[role='textbox']"
+        )
+      ) {
+        return contenteditableComposer;
       }
 
       if (
@@ -398,6 +426,7 @@ function createBridgeTestContext(options?: {
   return {
     context,
     textarea,
+    contenteditableComposer,
     unrelatedPageIcon,
     composerSend,
     newChatButton,
@@ -558,6 +587,112 @@ describe("deepseek page bridge", () => {
 
     expect(bridge.getPageState()).toMatchObject({
       latestAssistantPreview: "final answer",
+    });
+  });
+
+  it("treats a contenteditable DeepSeek composer as input-ready", () => {
+    const { context, contenteditableComposer } = createBridgeTestContext({
+      composerKind: "contenteditable",
+    });
+
+    contenteditableComposer.parentElement = new FakeElement();
+
+    vm.runInNewContext(INJECTED_BRIDGE_SOURCE, context);
+
+    const bridge = (context.window as Record<string, any>).__piDeepSeekBridge;
+    expect(bridge.getPageState()).toMatchObject({
+      inputReady: true,
+      shellReady: true,
+      blockingMessage: null,
+    });
+  });
+
+  it("does not report loading when the DeepSeek app shell is visible before the composer mounts", () => {
+    const { context } = createBridgeTestContext({
+      composerKind: "none",
+      includeNewChatButton: true,
+      includeModeButtons: true,
+      documentReadyState: "interactive",
+    });
+
+    vm.runInNewContext(INJECTED_BRIDGE_SOURCE, context);
+
+    const bridge = (context.window as Record<string, any>).__piDeepSeekBridge;
+    expect(bridge.getPageState()).toMatchObject({
+      inputReady: true,
+      shellReady: true,
+      blockingMessage: null,
+    });
+  });
+
+  it("reports an empty embedded page separately from an in-flight load", () => {
+    const { context } = createBridgeTestContext({
+      composerKind: "none",
+      documentReadyState: "complete",
+    });
+
+    context.document.body.innerText = "";
+    context.document.querySelectorAll = () => [];
+
+    vm.runInNewContext(INJECTED_BRIDGE_SOURCE, context);
+
+    const bridge = (context.window as Record<string, any>).__piDeepSeekBridge;
+    expect(bridge.getPageState()).toMatchObject({
+      inputReady: false,
+      shellReady: false,
+      blockingMessage:
+        "DeepSeek finished loading an empty page in the embedded browser. Reload the page or sign in manually, then retry.",
+    });
+  });
+
+  it("does not treat a bare home link and generic icon buttons as the DeepSeek app shell", () => {
+    const { context } = createBridgeTestContext({
+      composerKind: "none",
+      documentReadyState: "interactive",
+    });
+    const homeLink = new FakeElement({
+      attributes: {
+        href: "/",
+      },
+    });
+    homeLink.tagName = "A";
+    const genericIconButton = new FakeElement({
+      className: "ds-icon-button",
+      attributes: {
+        role: "button",
+      },
+    });
+    const originalQuerySelector = context.document.querySelector.bind(context.document);
+    const originalQuerySelectorAll = context.document.querySelectorAll.bind(context.document);
+    context.document.querySelector = (selector: string) => {
+      if (selector === "a[href='/']") {
+        return homeLink;
+      }
+
+      return originalQuerySelector(selector);
+    };
+    context.document.querySelectorAll = (selector: string) => {
+      if (
+        selector === "button, a, div[role='button']" ||
+        selector ===
+          "button, a, div[role='button'], [role='radio'], input[type='radio']"
+      ) {
+        return [homeLink, genericIconButton];
+      }
+
+      return originalQuerySelectorAll(selector);
+    };
+
+    vm.runInNewContext(INJECTED_BRIDGE_SOURCE, context);
+
+    const bridge = (context.window as Record<string, any>).__piDeepSeekBridge;
+    expect(bridge.getPageState()).toMatchObject({
+      inputReady: false,
+      shellReady: false,
+      blockingMessage: "DeepSeek tab is still loading. Wait for the page to finish loading.",
+      diagnostics: {
+        interactiveComposerReady: false,
+      },
     });
   });
 

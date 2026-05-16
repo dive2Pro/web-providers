@@ -14,6 +14,18 @@ function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function isTransientLoadingBlockingMessage(message: string | null | undefined) {
+  if (!message) {
+    return false;
+  }
+
+  return (
+    message === "DeepSeek tab is still loading. Wait for the page to finish loading." ||
+    message ===
+      "DeepSeek finished loading an empty page in the embedded browser. Reload the page or sign in manually, then retry."
+  );
+}
+
 export function createDeepSeekAdapter(
   transport: BbBrowserTransport,
 ): ProviderAdapter {
@@ -62,7 +74,8 @@ export function createDeepSeekAdapter(
   }
 
   async function waitForReadyPageState(tabId: string) {
-    const timeoutMs = 10_000;
+    const timeoutMs = 90_000;
+    const noStateTimeoutMs = 2_000;
     const pollMs = 250;
     const startedAt = Date.now();
     let lastState: BindResult["pageState"] | null = null;
@@ -72,6 +85,14 @@ export function createDeepSeekAdapter(
       latestAssistantPreview: null,
       assistantCount: 0,
       blockingMessage: "DeepSeek tab is still loading. Wait for the page to finish loading.",
+      diagnostics: {
+        readyState: "unknown",
+        title: "",
+        locationHref: "",
+        locationPath: "",
+        bodyTextLength: 0,
+        composerFound: false,
+      },
     } satisfies BindResult["pageState"];
 
     while (Date.now() - startedAt <= timeoutMs) {
@@ -89,13 +110,23 @@ export function createDeepSeekAdapter(
           : null;
 
       if (!pageState) {
+        if (!lastState && Date.now() - startedAt >= noStateTimeoutMs) {
+          return fallbackState;
+        }
         await sleep(pollMs);
         continue;
       }
 
       lastState = pageState;
 
-      if (pageState.inputReady || pageState.blockingMessage) {
+      if (pageState.inputReady) {
+        return pageState;
+      }
+
+      if (
+        pageState.blockingMessage &&
+        !isTransientLoadingBlockingMessage(pageState.blockingMessage)
+      ) {
         return pageState;
       }
 

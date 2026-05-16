@@ -36,11 +36,13 @@ import {
   LocalRequestLogStore,
   type RequestLogStore,
 } from "../shared/request-log-store";
+import { LocalJsonlStore, type JsonlStore } from "../shared/jsonl-store";
 import { registerRequestLogRoutes } from "../shared/request-log-routes";
 import {
   buildSessionTitleResponse,
   isSessionTitleRequest,
 } from "../shared/session-title";
+import { type HelperRuntimeEvent } from "./runtime";
 
 export interface AppDeps {
   token?: string;
@@ -48,6 +50,7 @@ export interface AppDeps {
   requestLogger?: RequestLogger;
   requestLogDir?: string;
   requestLogStore?: RequestLogStore;
+  runtimeEventStore?: JsonlStore<HelperRuntimeEvent>;
   sessionBindingDir?: string;
   sessionBindingStore?: SessionBindingStore;
 }
@@ -80,6 +83,14 @@ function isAnthropicPath(pathname: string) {
   return pathname === "/v1/messages" || pathname === "/v1/messages/count_tokens";
 }
 
+function shouldStoreHelperRequestLog(routePath: string | null) {
+  return (
+    routePath === "/v1/provider/chat" ||
+    routePath === "/v1/bind" ||
+    routePath === "/v1/reset"
+  );
+}
+
 export function buildApp(deps: AppDeps) {
   const app = Fastify();
   const requestLogStore =
@@ -87,6 +98,14 @@ export function buildApp(deps: AppDeps) {
     (deps.requestLogDir
       ? new LocalRequestLogStore({
           scope: "helper",
+          dir: deps.requestLogDir,
+        })
+      : null);
+  const runtimeEventStore =
+    deps.runtimeEventStore ??
+    (deps.requestLogDir
+      ? new LocalJsonlStore<HelperRuntimeEvent>({
+          scope: "helper-events",
           dir: deps.requestLogDir,
         })
       : null);
@@ -102,12 +121,14 @@ export function buildApp(deps: AppDeps) {
     scope: "helper",
     logger: deps.requestLogger,
     store: requestLogStore ?? undefined,
+    shouldStore: (entry) => shouldStoreHelperRequestLog(entry.routePath),
   });
   const state = new HelperState();
   const runtime = new HelperRuntime(
     deps.browserClient,
     state,
     sessionBindingStore ?? undefined,
+    runtimeEventStore ?? undefined,
   );
   const ctx: AppContext = {
     browserClient: deps.browserClient,

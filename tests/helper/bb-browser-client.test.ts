@@ -282,14 +282,7 @@ describe("BbBrowserClient", () => {
       submitPrompt: async () => undefined,
       evaluate: async <T>(_tabId: string, script: string) => {
         if (script.includes("getPageState()")) {
-          return {
-            inputReady: false,
-            busy: false,
-            latestAssistantPreview: null,
-            assistantCount: 0,
-            blockingMessage:
-              "DeepSeek tab is still loading. Wait for the page to finish loading.",
-          } as T;
+          return undefined as T;
         }
         return undefined as T;
       },
@@ -530,14 +523,27 @@ describe("BbBrowserClient", () => {
           throw new Error("Runtime.evaluate: Inspected target navigated or closed");
         }
 
+        if (script.includes("getPageState()")) {
+          return {
+            inputReady: true,
+            busy: false,
+            latestAssistantPreview: null,
+            assistantCount: 0,
+            blockingMessage: null,
+            diagnostics: {
+              locationPath: "/",
+            },
+          } as T;
+        }
+
         return undefined as T;
       },
     });
 
     await expect(client.startNewChat("tab-1")).resolves.toBeUndefined();
     expect(evaluations).toHaveLength(2);
-    expect(evaluations[0]?.script).toContain("startNewChat()");
-    expect(evaluations[1]?.script).toContain("__piDeepSeekBridge");
+    expect(evaluations[0]?.script).toContain("openFreshChat()");
+    expect(evaluations[1]?.script).toContain("getPageState()");
   });
 
   it("starts a Qwen new chat through provider-specific DOM actions", async () => {
@@ -577,6 +583,19 @@ describe("BbBrowserClient", () => {
       submitPrompt: async () => undefined,
       evaluate: async <T>(tabId: string, script: string) => {
         evaluations.push({ tabId, script });
+        if (script.includes("getPageState()")) {
+          return {
+            inputReady: true,
+            busy: false,
+            latestAssistantPreview: null,
+            assistantCount: 0,
+            blockingMessage: null,
+            diagnostics: {
+              locationPath: "/",
+            },
+          } as T;
+        }
+
         return { ok: true } as T;
       },
     });
@@ -588,7 +607,9 @@ describe("BbBrowserClient", () => {
         modelId: "deepseek-web-pro",
       }),
     ).resolves.toBeUndefined();
-    expect(evaluations[0]?.script).toContain('"targetModelType":"expert"');
+    expect(evaluations[0]?.script).toContain("openFreshChat()");
+    expect(evaluations[1]?.script).toContain("getPageState()");
+    expect(evaluations[2]?.script).toContain('setModelType({"targetModelType":"expert"})');
   });
 
   it("reapplies the DeepSeek target mode after expected new-chat navigation", async () => {
@@ -611,6 +632,19 @@ describe("BbBrowserClient", () => {
           throw new Error("Runtime.evaluate: Inspected target navigated or closed");
         }
 
+        if (script.includes("getPageState()")) {
+          return {
+            inputReady: true,
+            busy: false,
+            latestAssistantPreview: null,
+            assistantCount: 0,
+            blockingMessage: null,
+            diagnostics: {
+              locationPath: "/",
+            },
+          } as T;
+        }
+
         return { ok: true } as T;
       },
     });
@@ -624,8 +658,8 @@ describe("BbBrowserClient", () => {
     ).resolves.toBeUndefined();
 
     expect(evaluations).toHaveLength(3);
-    expect(evaluations[0]?.script).toContain('startNewChat({"targetModelType":"expert"})');
-    expect(evaluations[1]?.script).toContain("__piDeepSeekBridge");
+    expect(evaluations[0]?.script).toContain("openFreshChat()");
+    expect(evaluations[1]?.script).toContain("getPageState()");
     expect(evaluations[2]?.script).toContain('setModelType({"targetModelType":"expert"})');
   });
 

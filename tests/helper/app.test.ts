@@ -504,6 +504,81 @@ describe("helper app", () => {
     });
   });
 
+  it("stores only main-flow helper access logs", async () => {
+    const requestLogDir = await mkdtemp(
+      join(tmpdir(), "web-providers-helper-logs-main-flow-"),
+    );
+    requestLogDirs.push(requestLogDir);
+
+    const app = buildApp({
+      token: "test-token",
+      requestLogDir,
+      browserClient: {
+        getConnectionStatus: async () => "connected",
+        bindProviderTab: async () => ({
+          tabId: "tab-1",
+          url: "https://chat.deepseek.com/",
+          loginState: "logged_in",
+          bridgeInjected: true,
+          pageState: {
+            inputReady: true,
+            busy: false,
+            latestAssistantPreview: null,
+            assistantCount: 0,
+          },
+        }),
+        resetPageBridge: async () => undefined,
+      } as never,
+    });
+
+    const countTokensResponse = await app.inject({
+      method: "POST",
+      url: "/v1/messages/count_tokens",
+      headers: {
+        "x-api-key": "test-token",
+      },
+      payload: {
+        model: "deepseek-web-chat",
+        messages: [{ role: "user", content: "hello" }],
+      },
+    });
+
+    expect(countTokensResponse.statusCode).toBe(200);
+
+    const bindResponse = await app.inject({
+      method: "POST",
+      url: "/v1/bind",
+      headers: {
+        authorization: "Bearer test-token",
+        "x-web-providers-session-id": "session-main-flow",
+      },
+      payload: {
+        provider: "deepseek-web",
+      },
+    });
+
+    expect(bindResponse.statusCode).toBe(200);
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/v1/debug/request-logs?limit=10",
+      headers: {
+        authorization: "Bearer test-token",
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      logs: [
+        expect.objectContaining({
+          url: "/v1/bind",
+          routePath: "/v1/bind",
+        }),
+      ],
+    });
+    expect(response.json().logs).toHaveLength(1);
+  });
+
   it("restores persisted session bindings and rebinds by remembered url after restart", async () => {
     const sessionBindingDir = await mkdtemp(
       join(tmpdir(), "web-providers-helper-bindings-"),
