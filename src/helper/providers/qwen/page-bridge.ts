@@ -370,6 +370,7 @@ function createQwenBridge() {
         busy: completionState.status === "streaming",
         latestAssistantPreview: latestAssistantPreview || null,
         assistantCount: countAssistantMessages(),
+        activityAt: completionState.lastEventAt || null,
         blockingMessage,
       };
     }

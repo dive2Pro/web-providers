@@ -139,4 +139,42 @@ describe("serializeResponsesStream", () => {
     });
     expect(events[3].type).toBe("response.completed");
   });
+
+  it("serializes assistant text before SSE function-call events when both are present", () => {
+    const id = "resp_test_4";
+    const created = 1710000003;
+    const model = "test-model";
+
+    const sse = serializeResponsesStream({
+      id,
+      created,
+      model,
+      result: {
+        mode: "native_tool_call",
+        outputText: "I will inspect the stylesheet first.",
+        toolCalls: [
+          {
+            name: "read_file",
+            argumentsJson: "{\"path\":\"src/styles.css\"}",
+          },
+        ],
+        finishReason: "stop",
+      },
+    });
+
+    expect(sse).toHaveLength(4);
+    const events = sse.map(parseSseDataLine) as any[];
+
+    expect(events[1]).toMatchObject({
+      type: "response.output_text.delta",
+      delta: "I will inspect the stylesheet first.",
+    });
+    expect(events[2]).toMatchObject({
+      type: "response.function_call_arguments.delta",
+      item_id: `${id}-tool-1`,
+      name: "read_file",
+      delta: "{\"path\":\"src/styles.css\"}",
+    });
+    expect(events[3].type).toBe("response.completed");
+  });
 });

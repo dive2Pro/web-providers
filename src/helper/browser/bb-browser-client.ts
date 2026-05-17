@@ -760,7 +760,78 @@ export class BbBrowserClient implements BrowserAutomationClient {
     let finalReply: string | undefined;
     let completionObserved = false;
     let startMode: SendChatAutomationDebug["startMode"] | undefined;
+    let bridgeStartObserved = false;
+    let sawPostSubmitProgress = false;
     let shouldFallbackToTransportSubmit = false;
+    const readProgressSnapshot = async () => {
+      const progress = await this.transport.evaluate<{
+        pageState: {
+          inputReady: boolean;
+          busy: boolean;
+          latestAssistantPreview: string | null;
+          assistantCount: number;
+          blockingMessage?: string | null;
+        };
+        completionState: {
+          observed?: boolean;
+          status?: string;
+          closed?: boolean;
+          terminalAt?: number | null;
+          turn?: SendChatResult | null;
+        };
+        inputReady?: boolean;
+        busy?: boolean;
+        latestAssistantPreview?: string | null;
+        assistantCount?: number;
+        blockingMessage?: string | null;
+      }>(input.tabId, progressScript);
+      const pageState =
+        progress &&
+        typeof progress === "object" &&
+        "pageState" in progress &&
+        progress.pageState
+          ? progress.pageState
+          : progress &&
+              typeof progress === "object" &&
+              "inputReady" in progress &&
+              "busy" in progress &&
+              "latestAssistantPreview" in progress &&
+              "assistantCount" in progress
+            ? {
+                inputReady: Boolean(progress.inputReady),
+                busy: Boolean(progress.busy),
+                latestAssistantPreview:
+                  typeof progress.latestAssistantPreview === "string" ||
+                  progress.latestAssistantPreview === null
+                    ? progress.latestAssistantPreview
+                    : null,
+                assistantCount:
+                  typeof progress.assistantCount === "number" ? progress.assistantCount : 0,
+                blockingMessage:
+                  typeof progress.blockingMessage === "string" ||
+                  progress.blockingMessage === null
+                    ? progress.blockingMessage
+                    : null,
+              }
+            : await this.transport.evaluate<{
+                inputReady: boolean;
+                busy: boolean;
+                latestAssistantPreview: string | null;
+                assistantCount: number;
+                blockingMessage?: string | null;
+              }>(input.tabId, pageStateScript);
+      const completionState =
+        progress &&
+        typeof progress === "object" &&
+        "completionState" in progress
+          ? progress.completionState
+          : null;
+
+      return {
+        pageState,
+        completionState,
+      };
+    };
     const buildFailure = (
       code: HelperError["code"],
       message: string,
@@ -779,6 +850,63 @@ export class BbBrowserClient implements BrowserAutomationClient {
           trace,
         }),
       );
+    const waitForTransportSubmissionStart = async (baselineAssistantCount: number) => {
+      const startedAt = Date.now();
+      const timeoutMs = 1_200;
+
+      while (Date.now() - startedAt < timeoutMs) {
+        throwIfAborted(input.signal);
+        const { pageState, completionState } = await readProgressSnapshot();
+        completionObserved = completionObserved || completionState?.observed === true;
+
+        pushAutomationTrace(trace, {
+          phase: "confirm_start",
+          pageBusy: pageState.busy,
+          pageReplyPreview: previewDebugText(pageState.latestAssistantPreview),
+          assistantCount: pageState.assistantCount,
+          completionStatus:
+            completionState && typeof completionState.status === "string"
+              ? completionState.status
+              : null,
+          completionClosed:
+            completionState && typeof completionState.closed === "boolean"
+              ? completionState.closed
+              : false,
+          completionObserved:
+            completionState && typeof completionState.observed === "boolean"
+              ? completionState.observed
+              : false,
+          completionTurnMode:
+            completionState?.turn && typeof completionState.turn.mode === "string"
+              ? completionState.turn.mode
+              : null,
+        });
+
+        if (pageState.blockingMessage) {
+          throw buildFailure(
+            "PAGE_UNAVAILABLE",
+            "DeepSeek requires manual verification in the browser tab before chatting",
+          );
+        }
+
+        if (
+          completionState?.observed === true ||
+          (typeof completionState?.status === "string" &&
+            completionState.status !== "idle") ||
+          pageState.busy ||
+          pageState.assistantCount > baselineAssistantCount
+        ) {
+          return;
+        }
+
+        await abortableDelay(100, input.signal);
+      }
+
+      throw buildFailure(
+        "AUTOMATION_DESYNC",
+        "Prompt submission did not start a DeepSeek response",
+      );
+    };
 
     try {
       throwIfAborted(input.signal);
@@ -789,8 +917,11 @@ export class BbBrowserClient implements BrowserAutomationClient {
           busy?: boolean;
           latestAssistantPreview?: string | null;
           assistantCount?: number;
+          activityAt?: number | null;
           blockingMessage?: string | null;
         };
+        startObserved?: boolean;
+        submissionMethod?: string;
         error?: string;
         message?: string;
       }>(input.tabId, startPromptScript);
@@ -828,6 +959,7 @@ export class BbBrowserClient implements BrowserAutomationClient {
             busy: startResult.baselineState.busy ?? false,
             latestAssistantPreview: startResult.baselineState.latestAssistantPreview ?? null,
             assistantCount: startResult.baselineState.assistantCount ?? 0,
+            activityAt: startResult.baselineState.activityAt ?? null,
             blockingMessage: startResult.baselineState.blockingMessage ?? null,
           }
         : await this.transport.evaluate<{
@@ -835,8 +967,14 @@ export class BbBrowserClient implements BrowserAutomationClient {
             busy: boolean;
             latestAssistantPreview: string | null;
             assistantCount: number;
+            activityAt?: number | null;
             blockingMessage?: string | null;
           }>(input.tabId, pageStateScript);
+
+      bridgeStartObserved =
+        startResult && typeof startResult === "object" && startResult.ok === true
+          ? startResult.startObserved === true
+          : false;
 
       if (baselineState.blockingMessage) {
         throw buildFailure(
@@ -864,6 +1002,7 @@ export class BbBrowserClient implements BrowserAutomationClient {
       if (startMode === "transport_submit") {
         throwIfAborted(input.signal);
         await this.transport.submitPrompt(input.tabId, input.prompt);
+        await waitForTransportSubmissionStart(baselineState.assistantCount);
       }
 
       baselineReply = (baselineState.latestAssistantPreview ?? "").trim();
@@ -872,69 +1011,18 @@ export class BbBrowserClient implements BrowserAutomationClient {
       const idleTimeoutMs = input.timeoutMs;
       const hardTimeoutMs = Math.max(input.timeoutMs * 4, 120_000);
       let lastProgressAt = startedAt;
+      let lastHardProgressAt = startedAt;
       let previousReply = baselineReply;
       let previousAssistantCount = baselineAssistantCount;
+      let previousActivityAt =
+        typeof baselineState.activityAt === "number" ? baselineState.activityAt : 0;
+      let previousCompletionStatus: string | null = null;
+      let previousCompletionClosed: boolean | null = null;
+      let previousCompletionTurnPreview = "";
 
-      while (Date.now() - startedAt < hardTimeoutMs) {
+      while (Date.now() - lastHardProgressAt < hardTimeoutMs) {
         throwIfAborted(input.signal);
-        const progress = await this.transport.evaluate<{
-          pageState: {
-            inputReady: boolean;
-            busy: boolean;
-            latestAssistantPreview: string | null;
-            assistantCount: number;
-            blockingMessage?: string | null;
-          };
-          completionState: {
-            observed?: boolean;
-            status?: string;
-            closed?: boolean;
-            terminalAt?: number | null;
-            turn?: SendChatResult | null;
-          };
-        }>(input.tabId, progressScript);
-        const state =
-          progress &&
-          typeof progress === "object" &&
-          "pageState" in progress &&
-          progress.pageState
-            ? progress.pageState
-            : progress &&
-                typeof progress === "object" &&
-                "inputReady" in progress &&
-                "busy" in progress &&
-                "latestAssistantPreview" in progress &&
-                "assistantCount" in progress
-              ? {
-                  inputReady: Boolean(progress.inputReady),
-                  busy: Boolean(progress.busy),
-                  latestAssistantPreview:
-                    typeof progress.latestAssistantPreview === "string" ||
-                    progress.latestAssistantPreview === null
-                      ? progress.latestAssistantPreview
-                      : null,
-                  assistantCount:
-                    typeof progress.assistantCount === "number" ? progress.assistantCount : 0,
-                  blockingMessage:
-                    "blockingMessage" in progress &&
-                    (typeof progress.blockingMessage === "string" ||
-                      progress.blockingMessage === null)
-                      ? progress.blockingMessage
-                      : null,
-                }
-              : await this.transport.evaluate<{
-                  inputReady: boolean;
-                  busy: boolean;
-                  latestAssistantPreview: string | null;
-                  assistantCount: number;
-                  blockingMessage?: string | null;
-                }>(input.tabId, pageStateScript);
-        const completionState =
-          progress &&
-          typeof progress === "object" &&
-          "completionState" in progress
-            ? progress.completionState
-            : null;
+        const { pageState: state, completionState } = await readProgressSnapshot();
         completionObserved = completionObserved || completionState?.observed === true;
 
         pushAutomationTrace(trace, {
@@ -1014,12 +1102,41 @@ export class BbBrowserClient implements BrowserAutomationClient {
         const nextReply = (state.latestAssistantPreview ?? "").trim();
         const assistantCountIncreased = state.assistantCount > previousAssistantCount;
         const replyChanged = nextReply !== previousReply;
-        const hasProgress = assistantCountIncreased || replyChanged || state.busy;
+        const nextActivityAt = typeof state.activityAt === "number" ? state.activityAt : 0;
+        const nextCompletionStatus =
+          typeof completionState?.status === "string" ? completionState.status : null;
+        const nextCompletionClosed =
+          typeof completionState?.closed === "boolean" ? completionState.closed : null;
+        const nextCompletionTurnPreview =
+          typeof streamedTurn?.outputText === "string" ? streamedTurn.outputText : "";
+        const completionStatusAdvanced =
+          nextCompletionStatus !== previousCompletionStatus &&
+          !(previousCompletionStatus === null && nextCompletionStatus === "idle");
+        const completionClosedAdvanced =
+          nextCompletionClosed !== previousCompletionClosed &&
+          !(previousCompletionClosed === null && nextCompletionClosed === false);
+        const pageActivityAdvanced = nextActivityAt > previousActivityAt;
+        const completionProgressChanged =
+          completionStatusAdvanced ||
+          completionClosedAdvanced ||
+          nextCompletionTurnPreview !== previousCompletionTurnPreview;
+        const hasProgress =
+          assistantCountIncreased ||
+          replyChanged ||
+          pageActivityAdvanced ||
+          completionProgressChanged;
         if (hasProgress) {
-          lastProgressAt = Date.now();
+          const now = Date.now();
+          lastProgressAt = now;
+          lastHardProgressAt = now;
+          sawPostSubmitProgress = true;
           previousAssistantCount = state.assistantCount;
           previousReply = nextReply;
         }
+        previousActivityAt = Math.max(previousActivityAt, nextActivityAt);
+        previousCompletionStatus = nextCompletionStatus;
+        previousCompletionClosed = nextCompletionClosed;
+        previousCompletionTurnPreview = nextCompletionTurnPreview;
 
         if (
           terminalObserved &&
@@ -1066,6 +1183,12 @@ export class BbBrowserClient implements BrowserAutomationClient {
         }
 
         if (Date.now() - lastProgressAt >= idleTimeoutMs) {
+          if (!bridgeStartObserved && !completionObserved && !sawPostSubmitProgress) {
+            throw buildFailure(
+              "AUTOMATION_DESYNC",
+              "Prompt submission did not start a DeepSeek response",
+            );
+          }
           break;
         }
 

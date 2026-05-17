@@ -68,4 +68,44 @@ describe("chat completions serializer", () => {
       ],
     });
   });
+
+  it("serializes tool call output that also includes assistant text", () => {
+    expect(
+      serializeChatCompletions({
+        id: "resp-3",
+        created: 1710000000,
+        model: "qwen-web-tools",
+        result: {
+          mode: "json_fallback",
+          outputText: "I will inspect the main stylesheet first.",
+          toolCalls: [
+            {
+              name: "read_file",
+              argumentsJson: "{\"path\":\"src/styles.css\"}",
+            },
+          ],
+          finishReason: "stop",
+        },
+      }),
+    ).toMatchObject({
+      choices: [
+        {
+          finish_reason: "tool_calls",
+          message: {
+            role: "assistant",
+            content: "I will inspect the main stylesheet first.",
+            tool_calls: [
+              {
+                type: "function",
+                function: {
+                  name: "read_file",
+                  arguments: "{\"path\":\"src/styles.css\"}",
+                },
+              },
+            ],
+          },
+        },
+      ],
+    });
+  });
 });

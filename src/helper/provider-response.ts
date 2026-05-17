@@ -16,11 +16,13 @@ type ProtocolEnvelope =
     }
   | {
       type: "tool_call";
+      content?: string;
       name: string;
       arguments: Record<string, unknown>;
     }
   | {
       type: "tool_calls";
+      content?: string;
       calls: Array<{
         name: string;
         arguments: Record<string, unknown>;
@@ -46,8 +48,9 @@ function parseStrictProtocolEnvelope(text: string): {
 
     if (candidate.type === "tool_call") {
       if (
-        Object.keys(candidate).length !== 3 ||
+        ![3, 4].includes(Object.keys(candidate).length) ||
         typeof candidate.name !== "string" ||
+        ("content" in candidate && typeof candidate.content !== "string") ||
         !candidate.arguments ||
         typeof candidate.arguments !== "object" ||
         Array.isArray(candidate.arguments)
@@ -58,13 +61,17 @@ function parseStrictProtocolEnvelope(text: string): {
       return {
         type: "tool_call",
         name: candidate.name,
+        ...(typeof candidate.content === "string"
+          ? { content: candidate.content }
+          : {}),
         arguments: candidate.arguments as Record<string, unknown>,
       };
     }
 
     if (candidate.type === "tool_calls") {
       if (
-        Object.keys(candidate).length !== 2 ||
+        ![2, 3].includes(Object.keys(candidate).length) ||
+        ("content" in candidate && typeof candidate.content !== "string") ||
         !Array.isArray(candidate.calls) ||
         candidate.calls.length === 0
       ) {
@@ -104,6 +111,9 @@ function parseStrictProtocolEnvelope(text: string): {
 
       return {
         type: "tool_calls",
+        ...(typeof candidate.content === "string"
+          ? { content: candidate.content }
+          : {}),
         calls,
       };
     }
@@ -296,7 +306,7 @@ function parseStrictProtocolEnvelope(text: string): {
       envelope: null,
       protocolLike: true,
       error:
-        'Tool calls must match {"type":"tool_call","name":"tool_name","arguments":{...}} exactly.',
+        'Tool calls must match {"type":"tool_call","name":"tool_name","arguments":{...}} exactly, with optional "content":"...".',
     };
   }
 
@@ -305,7 +315,7 @@ function parseStrictProtocolEnvelope(text: string): {
       envelope: null,
       protocolLike: true,
       error:
-        'Multi-tool replies must match {"type":"tool_calls","calls":[{"name":"tool_name","arguments":{...}}]} exactly.',
+        'Multi-tool replies must match {"type":"tool_calls","calls":[{"name":"tool_name","arguments":{...}}]} exactly, with optional "content":"...".',
     };
   }
 
@@ -396,7 +406,9 @@ export function normalizeProviderResponse(
     ...(typeof response.thinkingText === "string"
       ? { thinkingText: response.thinkingText }
       : {}),
-    outputText: response.outputText,
+    ...(typeof parsed.envelope.content === "string"
+      ? { outputText: parsed.envelope.content }
+      : {}),
   };
 }
 
@@ -422,22 +434,29 @@ export function getProviderResponseRepairDecision(
         shouldRepair: false,
         issues: [],
         rawOutput:
-          normalized.outputText ??
-          JSON.stringify(
-            toolCalls.length === 1
-              ? {
-                  type: "tool_call",
-                  name: toolCalls[0]?.name,
-                  arguments: toolCalls[0]?.arguments,
-                }
-              : {
-                  type: "tool_calls",
-                  calls: toolCalls.map((toolCall) => ({
-                    name: toolCall.name,
-                    arguments: toolCall.arguments,
-                  })),
-                },
-          ),
+          response.mode === "text"
+            ? response.outputText ?? ""
+            : JSON.stringify(
+                toolCalls.length === 1
+                  ? {
+                      type: "tool_call",
+                      ...(typeof normalized.outputText === "string"
+                        ? { content: normalized.outputText }
+                        : {}),
+                      name: toolCalls[0]?.name,
+                      arguments: toolCalls[0]?.arguments,
+                    }
+                  : {
+                      type: "tool_calls",
+                      ...(typeof normalized.outputText === "string"
+                        ? { content: normalized.outputText }
+                        : {}),
+                      calls: toolCalls.map((toolCall) => ({
+                        name: toolCall.name,
+                        arguments: toolCall.arguments,
+                      })),
+                    },
+              ),
       };
     } catch (error) {
       return {

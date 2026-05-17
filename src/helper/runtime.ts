@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { BrowserAutomationClient } from "./browser/types";
 import { HelperError } from "./errors";
 import {
@@ -12,7 +13,7 @@ import {
   type BoundSession,
   type ProviderRequestDebugRecord,
 } from "./types";
-import type { PageStateSummary } from "./browser/types";
+import type { PageStateSummary, SendChatAutomationDebug } from "./browser/types";
 import type {
   ProviderChatRequest,
   ProviderChatResponse,
@@ -21,6 +22,19 @@ import type {
 } from "../shared/contracts";
 
 const MAX_PROVIDER_RESPONSE_REPAIR_ATTEMPTS = 3;
+
+type TurnRecoveryStage =
+  | "initial"
+  | "reset_bridge"
+  | "rebind_tab"
+  | "reopen_session"
+  | "fresh_chat";
+
+type TurnContext = {
+  turnId: string;
+  requestFingerprint: string;
+  attemptedStages: TurnRecoveryStage[];
+};
 
 export interface HelperRuntimeEvent {
   scope: "helper-runtime";
@@ -94,11 +108,23 @@ function buildProviderPrompt(input: {
   };
 }
 
+function createTurnId() {
+  return `turn-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function createRequestFingerprint(body: ProviderChatRequest) {
+  return createHash("sha1")
+    .update(JSON.stringify(body))
+    .digest("hex")
+    .slice(0, 12);
+}
+
 function createBaseDebugRecord(
   sessionId: string,
   session: BoundSession,
   body: ProviderChatRequest,
   prompt: string,
+  turnContext: TurnContext,
 ) {
   const startedAt = new Date().toISOString();
   const requestId = `req-${Date.now()}`;
@@ -133,6 +159,8 @@ function createBaseDebugRecord(
       sessionId,
       provider: body.provider,
       requestId,
+      turnId: turnContext.turnId,
+      requestFingerprint: turnContext.requestFingerprint,
       rawRequest,
       normalizedMessages,
       prompt,
@@ -146,6 +174,7 @@ function createBaseDebugRecord(
       response: null,
       automation: null,
       repair: null,
+      turnRecovery: null,
       error: null,
     } satisfies ProviderRequestDebugRecord,
     startedAt,
@@ -222,6 +251,107 @@ function isRecoverableSessionError(error: unknown) {
   }
 
   return error instanceof HelperError && error.code === "PAGE_UNAVAILABLE";
+}
+
+function isManualInterventionError(error: unknown) {
+  if (!(error instanceof HelperError)) {
+    return false;
+  }
+
+  const message = error.message.toLowerCase();
+  return (
+    error.code === "NOT_BOUND" ||
+    message.includes("manual verification") ||
+    message.includes("sign in on that page")
+  );
+}
+
+function isTurnRecoverableError(error: unknown) {
+  if (isManualInterventionError(error)) {
+    return false;
+  }
+
+  if (isRecoverableTabLookupError(error)) {
+    return true;
+  }
+
+  if (!(error instanceof HelperError)) {
+    return false;
+  }
+
+  return (
+    error.code === "AUTOMATION_DESYNC" ||
+    error.code === "TIMEOUT" ||
+    error.code === "PAGE_UNAVAILABLE"
+  );
+}
+
+function hasActiveTurnEvidence(
+  debug: SendChatAutomationDebug | null | undefined,
+) {
+  if (!debug) {
+    return false;
+  }
+
+  if (debug.completionObserved === true) {
+    return true;
+  }
+
+  return (debug.trace ?? []).some((entry) => {
+    if (entry.completionObserved === true) {
+      return true;
+    }
+
+    if (typeof entry.completionStatus === "string" && entry.completionStatus !== "idle") {
+      return true;
+    }
+
+    if (entry.completionClosed === true) {
+      return true;
+    }
+
+    if (typeof entry.completionTurnPreview === "string" && entry.completionTurnPreview.length > 0) {
+      return true;
+    }
+
+    return entry.pageBusy === true;
+  });
+}
+
+function shouldAutoRetryCurrentTurn(error: unknown) {
+  if (isManualInterventionError(error)) {
+    return false;
+  }
+
+  if (isRecoverableTabLookupError(error)) {
+    return true;
+  }
+
+  if (!(error instanceof HelperError)) {
+    return false;
+  }
+
+  if (error.code === "PAGE_UNAVAILABLE") {
+    return true;
+  }
+
+  if (error.code === "TIMEOUT") {
+    return false;
+  }
+
+  if (error.code !== "AUTOMATION_DESYNC") {
+    return false;
+  }
+
+  const normalizedMessage = error.message.toLowerCase();
+  if (
+    normalizedMessage.includes("server is busy") ||
+    normalizedMessage.includes("recover the turn")
+  ) {
+    return false;
+  }
+
+  return !hasActiveTurnEvidence(error.automationDebug);
 }
 
 export class HelperRuntime {
@@ -519,6 +649,11 @@ export class HelperRuntime {
     const sessionId = input.sessionId;
     const provider = (input.body.provider ?? "deepseek-web") as ProviderId;
     const modelId = normalizeBoundModelId(provider, input.body.model);
+    const turnContext: TurnContext = {
+      turnId: createTurnId(),
+      requestFingerprint: createRequestFingerprint(input.body),
+      attemptedStages: [],
+    };
     if (!this.state.tryAcquireBinding(sessionId, provider, modelId)) {
       throw new HelperError("MODEL_BUSY", "Another request is already in progress");
     }
@@ -526,24 +661,79 @@ export class HelperRuntime {
     let activeTabId: string | null = null;
     let baseDebugRecord: ProviderRequestDebugRecord | null = null;
     let repairSummary: ProviderRequestDebugRecord["repair"] = null;
-    let recoveredCurrentPrompt = false;
+    let finalRecoveryStage: TurnRecoveryStage = "initial";
 
-    const executeOnBoundSession = async (session: BoundSession) => {
+    const buildTurnRecoveryRecord = () =>
+      turnContext.attemptedStages.length > 0 || finalRecoveryStage !== "initial"
+        ? {
+            recovered: turnContext.attemptedStages.length > 0,
+            attemptedStages: [...turnContext.attemptedStages],
+            finalStage: finalRecoveryStage,
+          }
+        : null;
+
+    const recordRecoveryStage = async (
+      stage: TurnRecoveryStage,
+      session: BoundSession,
+      error: unknown,
+      reason: string,
+    ) => {
+      if (stage !== "initial" && !turnContext.attemptedStages.includes(stage)) {
+        turnContext.attemptedStages.push(stage);
+      }
+
+      await this.appendEvent({
+        event: "chat_recover_current_prompt",
+        sessionId,
+        provider,
+        modelId,
+        previousTabId: session.tabId,
+        previousTabUrl: session.tabUrl,
+        errorCode: error instanceof HelperError ? error.code : "AUTOMATION_DESYNC",
+        errorMessage: error instanceof Error ? error.message : String(error),
+        reason,
+      });
+    };
+
+    const clearAttemptState = (tabId?: string | null) => {
+      const targetTabId = tabId ?? activeTabId;
+      if (targetTabId) {
+        this.state.setActiveRequest(targetTabId, null);
+      }
+    };
+
+    const executeOnBoundSession = async (
+      session: BoundSession,
+      options?: {
+        forceFreshSession?: boolean;
+        resetBridgeBeforeSend?: boolean;
+        recoveryStage?: TurnRecoveryStage;
+      },
+    ) => {
+      const recoveryStage = options?.recoveryStage ?? "initial";
       activeTabId = session.tabId;
 
       if (this.state.hasRunningRequest(session.tabId)) {
         throw new HelperError("MODEL_BUSY", "Another request is already in progress");
       }
 
+      if (options?.resetBridgeBeforeSend) {
+        await this.browserClient.resetPageBridge(session.tabId);
+      }
+
       const promptInput = buildProviderPrompt({
         messages: input.body.messages,
         sessionInit: input.body.sessionInit,
-        providerInitialized: session.providerInitialized,
+        providerInitialized:
+          options?.forceFreshSession === true ? false : session.providerInitialized,
       });
       const shouldInitializeDeepSeekSession =
-        provider === "deepseek-web" && !session.providerInitialized;
+        provider === "deepseek-web" &&
+        (options?.forceFreshSession === true || !session.providerInitialized);
       const shouldStartFreshSession =
-        promptInput.shouldStartFresh || shouldInitializeDeepSeekSession;
+        options?.forceFreshSession === true ||
+        promptInput.shouldStartFresh ||
+        shouldInitializeDeepSeekSession;
       const prompt = promptInput.prompt;
       if (!baseDebugRecord) {
         baseDebugRecord = createBaseDebugRecord(
@@ -551,6 +741,7 @@ export class HelperRuntime {
           session,
           { ...input.body, provider },
           prompt,
+          turnContext,
         ).record;
       } else {
         baseDebugRecord = {
@@ -565,6 +756,7 @@ export class HelperRuntime {
           response: null,
           automation: null,
           repair: null,
+          turnRecovery: null,
           error: null,
         };
       }
@@ -572,6 +764,9 @@ export class HelperRuntime {
       this.state.setLastProviderRequest(sessionId, provider, baseDebugRecord);
       this.state.setActiveRequest(session.tabId, {
         requestId: baseDebugRecord.requestId,
+        turnId: turnContext.turnId,
+        requestFingerprint: turnContext.requestFingerprint,
+        recoveryStage,
         prompt,
         accumulatedReply: "",
         startedAt: baseDebugRecord.startedAt,
@@ -589,8 +784,12 @@ export class HelperRuntime {
           tabId: session.tabId,
           tabUrl: session.tabUrl,
           reason: shouldInitializeDeepSeekSession
-            ? "preparing a fresh DeepSeek session before the first prompt"
-            : "starting a fresh provider session from sessionInit",
+            ? recoveryStage === "initial"
+              ? "preparing a fresh DeepSeek session before the first prompt"
+              : `preparing a fresh DeepSeek session during ${recoveryStage} recovery`
+            : recoveryStage === "initial"
+              ? "starting a fresh provider session from sessionInit"
+              : `starting a fresh provider session from sessionInit during ${recoveryStage} recovery`,
         });
         const startNewChatTarget = this.browserClient.bindProviderTab
           ? {
@@ -609,7 +808,10 @@ export class HelperRuntime {
           modelId,
           tabId: session.tabId,
           tabUrl: session.tabUrl,
-          reason: "fresh provider session is ready for prompt submission",
+          reason:
+            recoveryStage === "initial"
+              ? "fresh provider session is ready for prompt submission"
+              : `fresh provider session is ready for prompt submission during ${recoveryStage} recovery`,
         });
       }
 
@@ -624,8 +826,12 @@ export class HelperRuntime {
           tabId: session.tabId,
           tabUrl: session.tabUrl,
           reason: freshSession
-            ? "sending prompt on a freshly initialized provider session"
-            : "sending prompt on an existing provider session",
+            ? recoveryStage === "initial"
+              ? "sending prompt on a freshly initialized provider session"
+              : `sending prompt on a freshly initialized provider session during ${recoveryStage} recovery`
+            : recoveryStage === "initial"
+              ? "sending prompt on an existing provider session"
+              : `sending prompt on an existing provider session during ${recoveryStage} recovery`,
         });
         const result = await this.browserClient.sendChatPrompt({
           provider,
@@ -719,6 +925,7 @@ export class HelperRuntime {
         response,
         automation: latestAutomationDebug,
         repair: repairSummary,
+        turnRecovery: buildTurnRecoveryRecord(),
       });
 
       if (input.body.sessionInit?.prompt || shouldInitializeDeepSeekSession) {
@@ -752,46 +959,128 @@ export class HelperRuntime {
       return response;
     };
 
+    const runTurnAttempt = async (
+      session: BoundSession,
+      stage: TurnRecoveryStage,
+      options?: {
+        forceFreshSession?: boolean;
+        resetBridgeBeforeSend?: boolean;
+      },
+    ) => {
+      finalRecoveryStage = stage;
+      try {
+        return await executeOnBoundSession(session, {
+          ...options,
+          recoveryStage: stage,
+        });
+      } catch (error) {
+        clearAttemptState(session.tabId);
+        throw error;
+      }
+    };
+
     try {
-      const session = await this.ensureBound({ sessionId, provider, modelId });
+      const initialSession = await this.ensureBound({ sessionId, provider, modelId });
+      let session = initialSession;
 
       try {
-        return await executeOnBoundSession(session);
+        return await runTurnAttempt(session, "initial");
       } catch (error) {
-        const canRecoverCurrentPrompt =
-          !recoveredCurrentPrompt &&
-          session.providerInitialized &&
-          isRecoverableSessionError(error);
-
-        if (!canRecoverCurrentPrompt) {
+        if (!isTurnRecoverableError(error)) {
           throw error;
         }
 
-        this.state.setActiveRequest(session.tabId, null);
-        await this.appendEvent({
-          event: "chat_recover_current_prompt",
+        let lastError = error;
+        if (!shouldAutoRetryCurrentTurn(lastError)) {
+          await this.appendEvent({
+            event: "chat_recover_current_prompt",
+            sessionId,
+            provider,
+            modelId,
+            previousTabId: session.tabId,
+            previousTabUrl: session.tabUrl,
+            errorCode: lastError instanceof HelperError ? lastError.code : "AUTOMATION_DESYNC",
+            errorMessage: lastError instanceof Error ? lastError.message : String(lastError),
+            reason:
+              "automatic retry of the current prompt was skipped because the page shows evidence that the turn may already be active or waiting on provider-side recovery",
+          });
+          throw lastError;
+        }
+        const shouldSkipInPlaceRecovery =
+          lastError instanceof HelperError && lastError.code === "PAGE_UNAVAILABLE";
+
+        if (!shouldSkipInPlaceRecovery) {
+          try {
+            await recordRecoveryStage(
+              "reset_bridge",
+              session,
+              lastError,
+              "recoverable error during provider chat execution; resetting the browser bridge before retrying the same turn",
+            );
+            return await runTurnAttempt(session, "reset_bridge", {
+              resetBridgeBeforeSend: true,
+            });
+          } catch (nextError) {
+            lastError = nextError;
+          }
+
+          try {
+            await recordRecoveryStage(
+              "rebind_tab",
+              session,
+              lastError,
+              "recoverable error during provider chat execution; rebinding the current browser tab before retrying the same turn",
+            );
+            session = await this.bindProvider({
+              sessionId,
+              provider,
+              modelId,
+              tabId: session.tabId,
+              previousSession: session,
+            });
+            return await runTurnAttempt(session, "rebind_tab");
+          } catch (nextError) {
+            lastError = nextError;
+          }
+        }
+
+        try {
+          await recordRecoveryStage(
+            "reopen_session",
+            session,
+            lastError,
+            "recoverable error during provider chat execution; reopening the previous session URL before retrying the same turn",
+          );
+          session = await this.reopenBoundSessionByUrl({
+            sessionId,
+            provider,
+            modelId,
+            previousSession: session,
+          });
+          return await runTurnAttempt(session, "reopen_session");
+        } catch (nextError) {
+          lastError = nextError;
+        }
+
+        await recordRecoveryStage(
+          "fresh_chat",
+          session,
+          lastError,
+          "recoverable error during provider chat execution; opening a fresh provider chat before retrying the same turn",
+        );
+        session = await this.bindProvider({
           sessionId,
           provider,
           modelId,
-          previousTabId: session.tabId,
-          previousTabUrl: session.tabUrl,
-          errorCode: error instanceof HelperError ? error.code : "AUTOMATION_DESYNC",
-          errorMessage: error instanceof Error ? error.message : String(error),
-          reason: "recoverable error during provider chat execution; reopening the previous session URL",
-        });
-        const recoveredSession = await this.reopenBoundSessionByUrl({
-          sessionId,
-          provider,
-          modelId,
+          openNew: true,
           previousSession: session,
         });
-        recoveredCurrentPrompt = true;
-        return await executeOnBoundSession(recoveredSession);
+        return await runTurnAttempt(session, "fresh_chat", {
+          forceFreshSession: true,
+        });
       }
     } catch (error) {
-      if (activeTabId) {
-        this.state.setActiveRequest(activeTabId, null);
-      }
+      clearAttemptState();
 
       if (input.signal?.aborted) {
         throw error;
@@ -815,6 +1104,7 @@ export class HelperRuntime {
           status: "failed",
           automation: helperError.automationDebug,
           repair: repairSummary,
+          turnRecovery: buildTurnRecoveryRecord(),
           error: {
             code: helperError.code,
             message: helperError.message,

@@ -98,22 +98,11 @@ registerIpcHandlers();
 createMainWindow();
 
 app.on("second-instance", () => {
-  if (!mainWindow) {
-    return;
-  }
-
-  if (mainWindow.isMinimized()) {
-    mainWindow.restore();
-  }
-
-  mainWindow.show();
-  mainWindow.focus();
+  ensureMainWindowVisible();
 });
 
 app.on("activate", () => {
-  if (BrowserWindow.getAllWindows().length === 0) {
-    createMainWindow();
-  }
+  ensureMainWindowVisible();
 });
 
 app.on("before-quit", () => {
@@ -279,6 +268,20 @@ function createMainWindow() {
   mainWindow.on("closed", () => {
     mainWindow = null;
   });
+}
+
+function ensureMainWindowVisible() {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    createMainWindow();
+    return;
+  }
+
+  if (mainWindow.isMinimized()) {
+    mainWindow.restore();
+  }
+
+  mainWindow.show();
+  mainWindow.focus();
 }
 
 function createBrowserTabRecord(input?: { url?: string }) {

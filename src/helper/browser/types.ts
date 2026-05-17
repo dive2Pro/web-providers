@@ -9,6 +9,7 @@ export interface PageStateSummary {
   busy: boolean;
   latestAssistantPreview: string | null;
   assistantCount: number;
+  activityAt?: number | null;
   shellReady?: boolean;
   blockingMessage?: string | null;
   diagnostics?: {

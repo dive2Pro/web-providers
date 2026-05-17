@@ -46,6 +46,9 @@ export function registerChatRoute(app: FastifyInstance, ctx: AppContext) {
 
     ctx.state.setActiveRequest(session.tabId, {
       requestId: `req-${Date.now()}`,
+      turnId: `turn-${Date.now()}`,
+      requestFingerprint: `chat-${Date.now()}`,
+      recoveryStage: "direct_chat",
       prompt: body.prompt,
       accumulatedReply: "",
       startedAt: now,

@@ -119,6 +119,9 @@ Object.defineProperty(FakeTextarea.prototype, "value", {
 function createBridgeTestContext(options?: {
   latestAssistantText?: string;
   assistantVisible?: boolean;
+  extraBodyText?: string;
+  includeVirtualList?: boolean;
+  virtualListText?: string;
   includeNewChatButton?: boolean;
   includeModeButtons?: boolean;
   composerKind?: "textarea" | "contenteditable" | "none";
@@ -131,6 +134,10 @@ function createBridgeTestContext(options?: {
   newChatTargetUrl?: string;
   newChatNavigatesAfterMs?: number;
   includeContinueButton?: boolean;
+  includeRetryButton?: boolean;
+  continueButtonLabel?: string;
+  retryButtonLabel?: string;
+  retryBannerText?: string;
   documentReadyState?: "loading" | "interactive" | "complete";
 }) {
   const createdAt = Date.now();
@@ -172,6 +179,19 @@ function createBridgeTestContext(options?: {
       "aria-disabled": "false",
     },
   });
+  const retryCard = new FakeElement();
+  const retryButton = new FakeElement({
+    attributes: {
+      role: "button",
+      "aria-disabled": "false",
+      "aria-label": options?.retryButtonLabel ?? "Retry",
+    },
+  });
+  const virtualList = new FakeElement({
+    className: "ds-virtual-list-items",
+  });
+  virtualList.textContent = options?.virtualListText ?? "";
+  virtualList.innerText = options?.virtualListText ?? "";
   const textarea = new FakeTextarea(composerSend);
   const contenteditableComposer = new FakeElement({
     attributes: {
@@ -207,10 +227,12 @@ function createBridgeTestContext(options?: {
   });
   expertModeButton.textContent = options?.expertModeLabel ?? "Expert";
   flashModeButton.textContent = options?.flashModeLabel ?? "Flash";
-  continueButton.textContent = "Continue";
+  continueButton.textContent = options?.continueButtonLabel ?? "Continue";
+  retryButton.textContent = "";
   expertModeButton.parentElement = modeGroupRoot;
   flashModeButton.parentElement = modeGroupRoot;
   continueButton.parentElement = stoppedReplyCard;
+  retryButton.parentElement = retryCard;
   expertModeButton.click = () => {
     expertModeButton.clicked += 1;
     expertModeButton.setAttribute("aria-checked", "true");
@@ -247,10 +269,22 @@ function createBridgeTestContext(options?: {
   }
 
   let continueVisible = options?.includeContinueButton === true;
+  const retryButtonAvailable = options?.includeRetryButton !== false;
+  let retryVisible = options?.includeRetryButton === true;
+  const continueButtonLabel = options?.continueButtonLabel ?? "Continue";
+  const retryBannerText =
+    options?.retryBannerText ??
+    "Server is busy. Try again later, or use Instant mode.";
   const syncContinueCard = () => {
-    stoppedReplyCard.textContent = continueVisible ? "Stopped\nContinue" : "";
+    stoppedReplyCard.textContent = continueVisible
+      ? `Stopped\n${continueButtonLabel}`
+      : "";
+  };
+  const syncRetryCard = () => {
+    retryCard.textContent = retryVisible ? retryBannerText : "";
   };
   syncContinueCard();
+  syncRetryCard();
 
   composerRoot.querySelectorAll = (selector: string) => {
     if (
@@ -276,7 +310,13 @@ function createBridgeTestContext(options?: {
   const document = {
     readyState: options?.documentReadyState ?? "complete",
     body: {
-      innerText: continueVisible ? "Stopped\nContinue" : "",
+      innerText: [
+        continueVisible ? `Stopped\n${continueButtonLabel}` : "",
+        retryVisible ? retryBannerText : "",
+        options?.extraBodyText ?? "",
+      ]
+        .filter((value) => value.length > 0)
+        .join("\n"),
     },
     querySelector(selector: string) {
       const composerKind = options?.composerKind ?? "textarea";
@@ -306,6 +346,10 @@ function createBridgeTestContext(options?: {
         return newChatButton;
       }
 
+      if (options?.includeVirtualList && selector === ".ds-virtual-list-items") {
+        return virtualList;
+      }
+
       return null;
     },
     querySelectorAll(selector: string) {
@@ -327,6 +371,7 @@ function createBridgeTestContext(options?: {
           ...(options?.includeNewChatButton ? [newChatButton] : []),
           ...modeControls,
           ...(continueVisible ? [continueButton] : []),
+          ...(retryButtonAvailable && retryVisible ? [retryButton] : []),
           unrelatedPageIcon,
           composerToggle,
           composerAttach,
@@ -352,13 +397,41 @@ function createBridgeTestContext(options?: {
 
   const setContinueVisible = (nextValue: boolean) => {
     continueVisible = nextValue;
-    document.body.innerText = nextValue ? "Stopped\nContinue" : "";
+    document.body.innerText = [
+      nextValue ? `Stopped\n${continueButtonLabel}` : "",
+      retryVisible ? retryBannerText : "",
+      options?.extraBodyText ?? "",
+    ]
+      .filter((value) => value.length > 0)
+      .join("\n");
     syncContinueCard();
+  };
+
+  const setRetryVisible = (nextValue: boolean) => {
+    retryVisible = nextValue;
+    document.body.innerText = [
+      continueVisible ? `Stopped\n${continueButtonLabel}` : "",
+      nextValue ? retryBannerText : "",
+      options?.extraBodyText ?? "",
+    ]
+      .filter((value) => value.length > 0)
+      .join("\n");
+    syncRetryCard();
+  };
+
+  const setVirtualListText = (nextValue: string) => {
+    virtualList.textContent = nextValue;
+    virtualList.innerText = nextValue;
   };
 
   continueButton.click = () => {
     continueButton.clicked += 1;
     setContinueVisible(false);
+  };
+
+  retryButton.click = () => {
+    retryButton.clicked += 1;
+    setRetryVisible(false);
   };
 
   class FakeXmlHttpRequest {
@@ -436,6 +509,10 @@ function createBridgeTestContext(options?: {
     latestAssistantMessage,
     continueButton,
     setContinueVisible,
+    retryButton,
+    setRetryVisible,
+    virtualList,
+    setVirtualListText,
   };
 }
 
@@ -613,6 +690,43 @@ describe("deepseek page bridge", () => {
       includeNewChatButton: true,
       includeModeButtons: true,
       documentReadyState: "interactive",
+    });
+
+    vm.runInNewContext(INJECTED_BRIDGE_SOURCE, context);
+
+    const bridge = (context.window as Record<string, any>).__piDeepSeekBridge;
+    expect(bridge.getPageState()).toMatchObject({
+      inputReady: true,
+      shellReady: true,
+      blockingMessage: null,
+    });
+  });
+
+  it("treats ds-virtual-list-items changes as active generation", () => {
+    const { context, setVirtualListText } = createBridgeTestContext({
+      includeVirtualList: true,
+      virtualListText: "before",
+    });
+
+    vm.runInNewContext(INJECTED_BRIDGE_SOURCE, context);
+
+    const bridge = (context.window as Record<string, any>).__piDeepSeekBridge;
+    expect(bridge.getPageState()).toMatchObject({
+      busy: false,
+    });
+
+    setVirtualListText("before after");
+
+    expect(bridge.getPageState()).toMatchObject({
+      busy: true,
+    });
+  });
+
+  it("does not treat sign-in copy inside an active chat as a logged-out page", () => {
+    const { context } = createBridgeTestContext({
+      assistantVisible: true,
+      latestAssistantText: "final answer",
+      extraBodyText: "Need help? Sign in to DeepSeek on another device.",
     });
 
     vm.runInNewContext(INJECTED_BRIDGE_SOURCE, context);
@@ -892,6 +1006,36 @@ describe("deepseek page bridge", () => {
     expect(composerSend.getAttribute("aria-disabled")).toBe("false");
   });
 
+  it("treats ds-virtual-list-items changes as proof that prompt submission started", async () => {
+    const { context, composerSend, setVirtualListText } = createBridgeTestContext({
+      includeVirtualList: true,
+      virtualListText: "idle",
+    });
+
+    composerSend.click = () => {
+      composerSend.clicked += 1;
+      setTimeout(() => {
+        setVirtualListText("idle streaming");
+      }, 80);
+    };
+
+    vm.runInNewContext(INJECTED_BRIDGE_SOURCE, context);
+
+    const bridge = (context.window as Record<string, any>).__piDeepSeekBridge;
+    expect(bridge).toBeTruthy();
+
+    const result = await bridge.startPrompt({ prompt: "hello" });
+
+    expect(result).toMatchObject({
+      ok: true,
+      baselineState: expect.objectContaining({
+        busy: false,
+      }),
+      startObserved: true,
+      submissionMethod: "button",
+    });
+  });
+
   it("falls back to keyboard submission when clicking send does not start generation", async () => {
     const { context, composerSend, textarea } = createBridgeTestContext();
     let keyboardSubmitCount = 0;
@@ -1093,6 +1237,276 @@ describe("deepseek page bridge", () => {
     expect(continueButton.clicked).toBe(1);
   });
 
+  it("auto-clicks Continue generating variants before finishing the resumed reply", async () => {
+    const { context, composerSend, continueButton, setContinueVisible } =
+      createBridgeTestContext({
+        continueButtonLabel: "Continue generating",
+      });
+    let streamStage = 0;
+
+    class FakeInterruptedXmlHttpRequest {
+      public readyState = 0;
+      public responseText = "";
+      private readonly listeners = new Map<string, Array<() => void>>();
+
+      addEventListener(type: string, handler: () => void) {
+        const current = this.listeners.get(type) ?? [];
+        current.push(handler);
+        this.listeners.set(type, current);
+      }
+
+      open(_method?: string, _url?: string) {
+        return undefined;
+      }
+
+      send() {
+        if (streamStage === 0) {
+          streamStage += 1;
+          setTimeout(() => {
+            this.pushChunk(
+              [
+                "event: ready",
+                "data: {\"request_message_id\":51,\"response_message_id\":52,\"model_type\":\"default\"}",
+                "",
+                "data: {\"v\":{\"response\":{\"message_id\":52,\"status\":\"WIP\",\"fragments\":[{\"type\":\"RESPONSE\",\"content\":\"partial\"}]}}}",
+                "",
+                "event: close",
+                "data: {\"click_behavior\":\"none\",\"auto_resume\":false}",
+                "",
+              ].join("\n"),
+              4,
+            );
+            setContinueVisible(true);
+          }, 50);
+          return undefined;
+        }
+
+        streamStage += 1;
+        setTimeout(() => {
+          this.pushChunk(
+            [
+              "event: ready",
+              "data: {\"request_message_id\":51,\"response_message_id\":52,\"model_type\":\"default\"}",
+              "",
+              "data: {\"p\":\"response/fragments/-1/content\",\"o\":\"APPEND\",\"v\":\" answer\"}",
+              "",
+              "data: {\"p\":\"response/status\",\"o\":\"SET\",\"v\":\"FINISHED\"}",
+              "",
+              "event: close",
+              "data: {\"click_behavior\":\"none\",\"auto_resume\":false}",
+              "",
+            ].join("\n"),
+            4,
+          );
+        }, 50);
+        return undefined;
+      }
+
+      private pushChunk(chunk: string, readyState: number) {
+        this.responseText += chunk;
+        this.readyState = readyState;
+        for (const handler of this.listeners.get("readystatechange") ?? []) {
+          handler();
+        }
+      }
+    }
+
+    context.XMLHttpRequest = FakeInterruptedXmlHttpRequest;
+    (context.window as Record<string, unknown>).XMLHttpRequest =
+      FakeInterruptedXmlHttpRequest;
+
+    composerSend.click = () => {
+      const xhr = new FakeInterruptedXmlHttpRequest();
+      xhr.open("POST", "/api/v0/chat/completion");
+      xhr.send();
+      composerSend.clicked += 1;
+    };
+
+    const originalContinueClick = continueButton.click.bind(continueButton);
+    continueButton.click = () => {
+      originalContinueClick();
+      const xhr = new FakeInterruptedXmlHttpRequest();
+      xhr.open("POST", "/api/v0/chat/completion");
+      xhr.send();
+    };
+
+    vm.runInNewContext(INJECTED_BRIDGE_SOURCE, context);
+
+    const bridge = (context.window as Record<string, any>).__piDeepSeekBridge;
+    expect(bridge).toBeTruthy();
+
+    const result = await bridge.sendPrompt({ prompt: "hello", timeoutMs: 3_000 });
+
+    expect(result).toEqual({
+      ok: true,
+      turn: {
+        mode: "text",
+        outputText: "partial answer",
+      },
+      meta: {
+        source: "bridge_stream",
+        completionObserved: true,
+      },
+    });
+    expect(composerSend.clicked).toBe(1);
+    expect(continueButton.clicked).toBe(1);
+  });
+
+  it("auto-clicks Retry when DeepSeek reports that the server is busy", async () => {
+    const { context, composerSend, retryButton, setRetryVisible } =
+      createBridgeTestContext();
+
+    class FakeRetryXmlHttpRequest {
+      public readyState = 0;
+      public responseText = "";
+      private readonly listeners = new Map<string, Array<() => void>>();
+
+      addEventListener(type: string, handler: () => void) {
+        const current = this.listeners.get(type) ?? [];
+        current.push(handler);
+        this.listeners.set(type, current);
+      }
+
+      open(_method?: string, _url?: string) {
+        return undefined;
+      }
+
+      send() {
+        setTimeout(() => {
+          this.pushChunk(
+            [
+              "event: ready",
+              "data: {\"request_message_id\":31,\"response_message_id\":32,\"model_type\":\"default\"}",
+              "",
+              "data: {\"v\":{\"response\":{\"message_id\":32,\"status\":\"WIP\",\"fragments\":[{\"type\":\"RESPONSE\",\"content\":\"retried\"}]}}}",
+              "",
+              "data: {\"p\":\"response/fragments/-1/content\",\"o\":\"APPEND\",\"v\":\" reply\"}",
+              "",
+              "data: {\"p\":\"response/status\",\"o\":\"SET\",\"v\":\"FINISHED\"}",
+              "",
+              "event: close",
+              "data: {\"click_behavior\":\"none\",\"auto_resume\":false}",
+              "",
+            ].join("\n"),
+            4,
+          );
+        }, 50);
+      }
+
+      private pushChunk(chunk: string, readyState: number) {
+        this.responseText += chunk;
+        this.readyState = readyState;
+        for (const handler of this.listeners.get("readystatechange") ?? []) {
+          handler();
+        }
+      }
+    }
+
+    context.XMLHttpRequest = FakeRetryXmlHttpRequest;
+    (context.window as Record<string, unknown>).XMLHttpRequest =
+      FakeRetryXmlHttpRequest;
+
+    composerSend.click = () => {
+      composerSend.clicked += 1;
+      setRetryVisible(true);
+    };
+
+    const originalRetryClick = retryButton.click.bind(retryButton);
+    retryButton.click = () => {
+      originalRetryClick();
+      const xhr = new FakeRetryXmlHttpRequest();
+      xhr.open("POST", "/api/v0/chat/completion");
+      xhr.send();
+    };
+
+    vm.runInNewContext(INJECTED_BRIDGE_SOURCE, context);
+
+    const bridge = (context.window as Record<string, any>).__piDeepSeekBridge;
+    expect(bridge).toBeTruthy();
+
+    const result = await bridge.sendPrompt({ prompt: "hello", timeoutMs: 3_000 });
+
+    expect(result).toEqual({
+      ok: true,
+      turn: {
+        mode: "text",
+        outputText: "retried reply",
+      },
+      meta: {
+        source: "bridge_stream",
+        completionObserved: true,
+      },
+    });
+    expect(composerSend.clicked).toBe(1);
+    expect(retryButton.clicked).toBe(1);
+  });
+
+  it("surfaces server-busy failures as recoverable automation errors instead of timing out", async () => {
+    const { context, composerSend, setRetryVisible } = createBridgeTestContext({
+      includeRetryButton: false,
+    });
+
+    composerSend.click = () => {
+      composerSend.clicked += 1;
+      setRetryVisible(true);
+    };
+
+    vm.runInNewContext(INJECTED_BRIDGE_SOURCE, context);
+
+    const bridge = (context.window as Record<string, any>).__piDeepSeekBridge;
+    expect(bridge).toBeTruthy();
+
+    const result = await bridge.sendPrompt({ prompt: "hello", timeoutMs: 3_000 });
+
+    expect(result).toEqual({
+      ok: false,
+      error: "AUTOMATION_DESYNC",
+      message:
+        "DeepSeek reported that the server is busy. Retry this turn from the page or recover the turn in the helper runtime.",
+    });
+    expect(composerSend.clicked).toBe(1);
+  });
+
+  it("does not send the same prompt twice when the button submit already changed the composer state", async () => {
+    const { context, composerSend, textarea } = createBridgeTestContext();
+    let keyboardSubmitCount = 0;
+
+    composerSend.click = () => {
+      composerSend.clicked += 1;
+      textarea.value = "";
+    };
+    textarea.dispatchEvent = (event: FakeEvent) => {
+      if (event.type === "keydown" && event.options?.key === "Enter") {
+        keyboardSubmitCount += 1;
+      }
+
+      return true;
+    };
+
+    vm.runInNewContext(INJECTED_BRIDGE_SOURCE, context);
+
+    const bridge = (context.window as Record<string, any>).__piDeepSeekBridge;
+    expect(bridge).toBeTruthy();
+
+    const result = await bridge.startPrompt({ prompt: "hello" });
+
+    expect(result).toMatchObject({
+      ok: true,
+      baselineState: {
+        inputReady: true,
+        busy: false,
+        latestAssistantPreview: null,
+        assistantCount: 0,
+        shellReady: true,
+        blockingMessage: null,
+      },
+      startObserved: false,
+      submissionMethod: "button",
+    });
+    expect(composerSend.clicked).toBe(1);
+    expect(keyboardSubmitCount).toBe(0);
+  });
+
   it("does not return the previous assistant reply when no fresh reply arrives", async () => {
     const { context } = createBridgeTestContext({
       latestAssistantText: "previous assistant reply",
@@ -1107,12 +1521,50 @@ describe("deepseek page bridge", () => {
 
     expect(result).toEqual({
       ok: false,
-      error: "AUTOMATION_DESYNC",
-      message: "Prompt submission did not start a DeepSeek response",
+      error: "TIMEOUT",
+      message: "The page did not finish streaming in time",
     });
   });
 
-  it("does not return text from DOM alone when completion events never arrive", async () => {
+  it("does not treat an older assistant preview change as a started reply", async () => {
+    const {
+      context,
+      latestAssistantMarkdown,
+      latestAssistantMessage,
+    } = createBridgeTestContext({
+      latestAssistantText: "older assistant reply",
+    });
+
+    vm.runInNewContext(INJECTED_BRIDGE_SOURCE, context);
+
+    const bridge = (context.window as Record<string, any>).__piDeepSeekBridge;
+    expect(bridge).toBeTruthy();
+
+    setTimeout(() => {
+      if (latestAssistantMarkdown) {
+        latestAssistantMarkdown.textContent = "older assistant reply (rerendered)";
+      }
+      if (latestAssistantMessage) {
+        latestAssistantMessage.textContent = "older assistant reply (rerendered)";
+      }
+    }, 100);
+
+    const result = await bridge.startPrompt({ prompt: "hello" });
+
+    expect(result).toEqual({
+      ok: true,
+      baselineState: expect.objectContaining({
+        inputReady: true,
+        busy: false,
+        latestAssistantPreview: "older assistant reply",
+        assistantCount: 1,
+      }),
+      startObserved: false,
+      submissionMethod: "keyboard",
+    });
+  });
+
+  it("does not treat DOM-only text as a started reply when completion events never arrive", async () => {
     const {
       context,
       latestAssistantMarkdown,

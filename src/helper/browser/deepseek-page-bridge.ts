@@ -413,6 +413,7 @@ export const INJECTED_BRIDGE_SOURCE = `
 
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   const COMPLETION_PATH = "/api/v0/chat/completion";
+  const VIRTUAL_LIST_ACTIVITY_WINDOW_MS = 1_500;
 
   function createCompletionState() {
     return {
@@ -434,10 +435,16 @@ export const INJECTED_BRIDGE_SOURCE = `
       activeFragmentType: null,
       continueAttempts: 0,
       lastContinueAt: 0,
+      retryAttempts: 0,
+      lastRetryAt: 0,
     };
   }
 
   const completionState = createCompletionState();
+  const virtualListState = {
+    fingerprint: null,
+    lastChangedAt: 0,
+  };
 
   function resetCompletionState() {
     Object.assign(completionState, createCompletionState(), {
@@ -453,6 +460,35 @@ export const INJECTED_BRIDGE_SOURCE = `
   function markCompletionTerminal() {
     completionState.terminalAt = Date.now();
     completionState.lastEventAt = completionState.terminalAt;
+  }
+
+  function findVirtualListNode() {
+    return document.querySelector(".ds-virtual-list-items");
+  }
+
+  function getVirtualListFingerprint(node) {
+    if (!(node instanceof HTMLElement)) {
+      return "";
+    }
+
+    const text = (node.textContent || "").trim();
+    return JSON.stringify({
+      childCount: node.childElementCount,
+      textLength: text.length,
+      textTail: text.slice(-200),
+    });
+  }
+
+  function hasRecentVirtualListActivity() {
+    const nextFingerprint = getVirtualListFingerprint(findVirtualListNode());
+    if (typeof virtualListState.fingerprint !== "string") {
+      virtualListState.fingerprint = nextFingerprint;
+    } else if (virtualListState.fingerprint !== nextFingerprint) {
+      virtualListState.fingerprint = nextFingerprint;
+      virtualListState.lastChangedAt = Date.now();
+    }
+
+    return Date.now() - virtualListState.lastChangedAt < VIRTUAL_LIST_ACTIVITY_WINDOW_MS;
   }
 
   function normalizeCompletionStatus(value) {
@@ -834,6 +870,12 @@ export const INJECTED_BRIDGE_SOURCE = `
     const normalizedText = pageText.toLowerCase();
     const composer = findComposer();
     const shellReady = hasLikelyDeepSeekAppShell();
+    const hasConversationEvidence =
+      Boolean(composer) ||
+      Boolean(latestAssistantNode()) ||
+      assistantMessageCount() > 0 ||
+      Boolean(findStopButton()) ||
+      shellReady;
 
     if (pageText.includes("One more step before you proceed")) {
       return "One more step before you proceed...";
@@ -855,7 +897,7 @@ export const INJECTED_BRIDGE_SOURCE = `
       normalizedText.includes(indicator),
     );
 
-    if (authPath || signInPrompt) {
+    if (authPath || (signInPrompt && !hasConversationEvidence)) {
       return "Please sign in to DeepSeek in the browser tab.";
     }
 
@@ -985,8 +1027,30 @@ export const INJECTED_BRIDGE_SOURCE = `
     const normalized = (label || "").trim().toLowerCase();
     return (
       normalized === "continue" ||
+      normalized === "continue generating" ||
+      normalized === "continue response" ||
+      normalized === "continue answering" ||
       normalized === "继续" ||
-      normalized === "续写"
+      normalized === "续写" ||
+      normalized === "继续生成" ||
+      normalized === "继续回答" ||
+      normalized === "继续输出"
+    );
+  }
+
+  function isRetryLabel(label) {
+    const normalized = (label || "").trim().toLowerCase();
+    return (
+      normalized === "retry" ||
+      normalized === "try again" ||
+      normalized === "retry message" ||
+      normalized === "retry response" ||
+      normalized === "retry generation" ||
+      normalized === "重试" ||
+      normalized === "再试一次" ||
+      normalized === "重新尝试" ||
+      normalized === "重新生成" ||
+      normalized === "重新回答"
     );
   }
 
@@ -996,6 +1060,18 @@ export const INJECTED_BRIDGE_SOURCE = `
       normalized.includes("stopped") ||
       normalized.includes("已停止") ||
       normalized.includes("中断")
+    );
+  }
+
+  function containsServerBusyMarker(text) {
+    const normalized = (text || "").trim().toLowerCase();
+    return (
+      normalized.includes("server is busy") ||
+      (normalized.includes("try again later") && normalized.includes("instant mode")) ||
+      normalized.includes("服务繁忙") ||
+      normalized.includes("服务器繁忙") ||
+      normalized.includes("稍后重试") ||
+      (normalized.includes("稍后再试") && normalized.includes("instant"))
     );
   }
 
@@ -1009,6 +1085,21 @@ export const INJECTED_BRIDGE_SOURCE = `
       }
 
       return isContinueLabel(getNodeLabel(node));
+    });
+
+    return matches.at(-1) || null;
+  }
+
+  function findRetryButton() {
+    const clickableNodes = Array.from(
+      document.querySelectorAll("button, a, div[role='button']")
+    );
+    const matches = clickableNodes.filter((node) => {
+      if (!isVisibleNode(node) || isClickableNodeDisabled(node)) {
+        return false;
+      }
+
+      return isRetryLabel(getNodeLabel(node));
     });
 
     return matches.at(-1) || null;
@@ -1043,6 +1134,22 @@ export const INJECTED_BRIDGE_SOURCE = `
     return null;
   }
 
+  function detectRecoverableBusyFailure() {
+    const pageText =
+      document.body?.innerText ||
+      document.body?.textContent ||
+      "";
+    if (!containsServerBusyMarker(pageText)) {
+      return null;
+    }
+
+    return {
+      retryButton: findRetryButton(),
+      message:
+        "DeepSeek reported that the server is busy. Retry this turn from the page or recover the turn in the helper runtime.",
+    };
+  }
+
   async function maybeAutoContinueInterruptedReply(continueButton) {
     if (!(continueButton instanceof HTMLElement)) {
       return false;
@@ -1060,6 +1167,27 @@ export const INJECTED_BRIDGE_SOURCE = `
     completionState.continueAttempts += 1;
     completionState.lastContinueAt = now;
     continueButton.click();
+    await sleep(350);
+    return true;
+  }
+
+  async function maybeAutoRetryFailedSubmission(retryButton) {
+    if (!(retryButton instanceof HTMLElement)) {
+      return false;
+    }
+
+    const now = Date.now();
+    if (completionState.retryAttempts >= 2) {
+      return false;
+    }
+
+    if (now - completionState.lastRetryAt < 1_200) {
+      return false;
+    }
+
+    completionState.retryAttempts += 1;
+    completionState.lastRetryAt = now;
+    retryButton.click();
     await sleep(350);
     return true;
   }
@@ -1401,6 +1529,50 @@ export const INJECTED_BRIDGE_SOURCE = `
     composer.value = nextValue;
   }
 
+  function normalizeComposerText(value) {
+    return String(value || "").replace(/\\r\\n?/g, "\\n").trim();
+  }
+
+  function getComposerValue(composer) {
+    if (!composer) {
+      return "";
+    }
+
+    if (composer.tagName === "TEXTAREA") {
+      return typeof composer.value === "string" ? composer.value : "";
+    }
+
+    if (typeof composer.innerText === "string" && composer.innerText.length > 0) {
+      return composer.innerText;
+    }
+
+    if (typeof composer.textContent === "string" && composer.textContent.length > 0) {
+      return composer.textContent;
+    }
+
+    return "";
+  }
+
+  function canRetryPromptSubmissionWithKeyboard(prompt) {
+    const composer = findComposer();
+    if (!composer) {
+      return false;
+    }
+
+    const currentPrompt = normalizeComposerText(getComposerValue(composer));
+    const expectedPrompt = normalizeComposerText(prompt);
+    if (expectedPrompt.length === 0 || currentPrompt !== expectedPrompt) {
+      return false;
+    }
+
+    const sendButton = findSendButton(composer);
+    return (
+      sendButton instanceof HTMLElement &&
+      !isClickableNodeDisabled(sendButton) &&
+      !findStopButton()
+    );
+  }
+
   function dispatchPromptSubmission({ prompt, method = "auto" }) {
     const composer = findComposer();
     if (!composer) {
@@ -1437,12 +1609,10 @@ export const INJECTED_BRIDGE_SOURCE = `
 
   async function waitForSubmissionStart({ baselineState, timeoutMs }) {
     const startedAt = Date.now();
-    const baselineReply = (baselineState?.latestAssistantPreview || "").trim();
     const baselineAssistantCount = baselineState?.assistantCount || 0;
 
     while (Date.now() - startedAt < timeoutMs) {
       const pageState = window[KEY].getPageState();
-      const nextText = (pageState.latestAssistantPreview || "").trim();
 
       if (pageState.blockingMessage) {
         return {
@@ -1452,12 +1622,27 @@ export const INJECTED_BRIDGE_SOURCE = `
         };
       }
 
+      const recoverableBusyFailure = detectRecoverableBusyFailure();
+      if (recoverableBusyFailure) {
+        const retried = await maybeAutoRetryFailedSubmission(
+          recoverableBusyFailure.retryButton,
+        );
+        if (retried) {
+          continue;
+        }
+
+        return {
+          ok: false,
+          error: "AUTOMATION_DESYNC",
+          message: recoverableBusyFailure.message,
+        };
+      }
+
       if (
         completionState.observed ||
         completionState.status !== "idle" ||
         pageState.busy ||
-        pageState.assistantCount > baselineAssistantCount ||
-        (nextText.length > 0 && nextText !== baselineReply)
+        pageState.assistantCount > baselineAssistantCount
       ) {
         return { ok: true };
       }
@@ -1534,6 +1719,22 @@ export const INJECTED_BRIDGE_SOURCE = `
         };
       }
 
+      const recoverableBusyFailure = detectRecoverableBusyFailure();
+      if (recoverableBusyFailure) {
+        const retried = await maybeAutoRetryFailedSubmission(
+          recoverableBusyFailure.retryButton,
+        );
+        if (retried) {
+          continue;
+        }
+
+        return {
+          ok: false,
+          error: "AUTOMATION_DESYNC",
+          message: recoverableBusyFailure.message,
+        };
+      }
+
       const recoverableContinueButton = findRecoverableContinueButton();
       if (recoverableContinueButton instanceof HTMLElement) {
         const continued = await maybeAutoContinueInterruptedReply(
@@ -1596,11 +1797,15 @@ export const INJECTED_BRIDGE_SOURCE = `
       const latestAssistant = latestAssistantNode();
       const shellReady = hasLikelyDeepSeekAppShell();
       const blockingMessage = detectBlockingMessage();
+      const virtualListActive = hasRecentVirtualListActivity();
       const domReply = latestAssistant ? (latestAssistant.textContent || "").trim() || null : null;
       const bodyText = (document.body?.innerText || "").trim();
       return {
         inputReady: Boolean(!blockingMessage && (interactiveComposerReady || shellReady)),
-        busy: Boolean(findStopButton()) || completionState.status === "streaming",
+        busy:
+          Boolean(findStopButton()) ||
+          completionState.status === "streaming" ||
+          virtualListActive,
         latestAssistantPreview: domReply,
         assistantCount:
           completionState.observed &&
@@ -1608,6 +1813,8 @@ export const INJECTED_BRIDGE_SOURCE = `
             completionState.responseMessageId !== null)
             ? Math.max(assistantMessageCount(), 1)
             : assistantMessageCount(),
+        activityAt:
+          Math.max(completionState.lastEventAt || 0, virtualListState.lastChangedAt || 0) || null,
         shellReady,
         blockingMessage,
         diagnostics: {
@@ -1669,29 +1876,57 @@ export const INJECTED_BRIDGE_SOURCE = `
         return {
           ok: true,
           baselineState,
+          startObserved: true,
+          submissionMethod: primarySubmission.method,
         };
       }
 
       if (primarySubmission.method === "keyboard") {
-        return primaryStart;
+        return {
+          ok: true,
+          baselineState,
+          startObserved: false,
+          submissionMethod: primarySubmission.method,
+        };
+      }
+
+      if (!canRetryPromptSubmissionWithKeyboard(prompt)) {
+        return {
+          ok: true,
+          baselineState,
+          startObserved: false,
+          submissionMethod: primarySubmission.method,
+        };
       }
 
       const fallbackSubmission = dispatchPromptSubmission({ prompt, method: "keyboard" });
       if (!fallbackSubmission.ok) {
-        return fallbackSubmission;
+        return {
+          ok: true,
+          baselineState,
+          startObserved: false,
+          submissionMethod: primarySubmission.method,
+        };
       }
 
       const fallbackStart = await waitForSubmissionStart({
         baselineState,
         timeoutMs: SUBMISSION_START_TIMEOUT_MS,
       });
-      if (!fallbackStart.ok) {
-        return fallbackStart;
+      if (fallbackStart.ok) {
+        return {
+          ok: true,
+          baselineState,
+          startObserved: true,
+          submissionMethod: fallbackSubmission.method,
+        };
       }
 
       return {
         ok: true,
         baselineState,
+        startObserved: false,
+        submissionMethod: fallbackSubmission.method,
       };
     },
     openFreshChat() {

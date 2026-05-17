@@ -1866,6 +1866,267 @@ describe("provider chat route", () => {
     });
   });
 
+  it("does not auto-retry the current prompt after a timeout", async () => {
+    let bindCount = 0;
+    let resetCount = 0;
+    let sendCount = 0;
+
+    const app = buildApp({
+      token: "test-token",
+      browserClient: {
+        getConnectionStatus: async () => "connected",
+        bindProviderTab: async (input: {
+          provider: string;
+          tabId?: string;
+          openNew?: boolean;
+          openUrl?: string;
+        }) => {
+          bindCount += 1;
+          return {
+            tabId: input.tabId ?? "tab-1",
+            url: input.openUrl ?? "https://chat.deepseek.com/a/chat/s/existing-session",
+            loginState: "logged_in",
+            bridgeInjected: true,
+            pageState: {
+              inputReady: true,
+              busy: false,
+              latestAssistantPreview: null,
+              assistantCount: 0,
+            },
+          };
+        },
+        resetProvider: async () => undefined,
+        resetPageBridge: async () => {
+          resetCount += 1;
+        },
+        startNewChat: async () => undefined,
+        sendChatPrompt: async () => {
+          sendCount += 1;
+          throw new HelperError("TIMEOUT", "The page did not finish streaming in time", {
+            source: "client_error",
+            freshSession: false,
+            completionObserved: true,
+            trace: [
+              {
+                phase: "poll",
+                pageBusy: true,
+                completionStatus: "streaming",
+              },
+            ],
+          });
+        },
+      } as never,
+    });
+
+    await app.inject({
+      method: "POST",
+      url: "/v1/bind",
+      headers: { authorization: "Bearer test-token", "x-web-providers-session-id": "session-a" },
+      payload: {
+        provider: "deepseek-web",
+      },
+    });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/provider/chat",
+      headers: { authorization: "Bearer test-token", "x-web-providers-session-id": "session-a" },
+      payload: {
+        provider: "deepseek-web",
+        model: "deepseek-web-chat",
+        messages: [{ role: "user", content: "hello" }],
+      },
+    });
+
+    expect(response.statusCode).toBe(409);
+    expect(response.json()).toEqual({
+      error: "TIMEOUT",
+      message: "The page did not finish streaming in time",
+    });
+    expect(sendCount).toBe(1);
+    expect(resetCount).toBe(0);
+    expect(bindCount).toBe(2);
+  });
+
+  it("still retries the current prompt when submission never really started", async () => {
+    let bindCount = 0;
+    let resetCount = 0;
+    let sendCount = 0;
+
+    const app = buildApp({
+      token: "test-token",
+      browserClient: {
+        getConnectionStatus: async () => "connected",
+        bindProviderTab: async (input: {
+          provider: string;
+          tabId?: string;
+          openNew?: boolean;
+          openUrl?: string;
+        }) => {
+          bindCount += 1;
+          return {
+            tabId: input.tabId ?? "tab-1",
+            url: input.openUrl ?? "https://chat.deepseek.com/a/chat/s/existing-session",
+            loginState: "logged_in",
+            bridgeInjected: true,
+            pageState: {
+              inputReady: true,
+              busy: false,
+              latestAssistantPreview: null,
+              assistantCount: 0,
+            },
+          };
+        },
+        resetProvider: async () => undefined,
+        resetPageBridge: async () => {
+          resetCount += 1;
+        },
+        startNewChat: async () => undefined,
+        sendChatPrompt: async ({ prompt }: { prompt: string }) => {
+          sendCount += 1;
+          if (sendCount === 1) {
+            throw new HelperError(
+              "AUTOMATION_DESYNC",
+              "Prompt submission did not start a DeepSeek response",
+              {
+                source: "client_error",
+                freshSession: false,
+                completionObserved: false,
+                trace: [
+                  {
+                    phase: "confirm_start",
+                    pageBusy: false,
+                    completionStatus: "idle",
+                  },
+                ],
+              },
+            );
+          }
+
+          return messageResponse(`reply:${prompt}`);
+        },
+      } as never,
+    });
+
+    await app.inject({
+      method: "POST",
+      url: "/v1/bind",
+      headers: { authorization: "Bearer test-token", "x-web-providers-session-id": "session-a" },
+      payload: {
+        provider: "deepseek-web",
+      },
+    });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/provider/chat",
+      headers: { authorization: "Bearer test-token", "x-web-providers-session-id": "session-a" },
+      payload: {
+        provider: "deepseek-web",
+        model: "deepseek-web-chat",
+        messages: [{ role: "user", content: "hello" }],
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({
+      mode: "text",
+      outputText: `reply:${expectedChatPrompt("hello")}`,
+      finishReason: "stop",
+      modelLabel: "DeepSeek Web",
+    });
+    expect(sendCount).toBe(2);
+    expect(resetCount).toBe(1);
+    expect(bindCount).toBe(2);
+  });
+
+  it("does not auto-retry the current prompt when DeepSeek reports server busy recovery", async () => {
+    let bindCount = 0;
+    let resetCount = 0;
+    let sendCount = 0;
+
+    const app = buildApp({
+      token: "test-token",
+      browserClient: {
+        getConnectionStatus: async () => "connected",
+        bindProviderTab: async (input: {
+          provider: string;
+          tabId?: string;
+          openNew?: boolean;
+          openUrl?: string;
+        }) => {
+          bindCount += 1;
+          return {
+            tabId: input.tabId ?? "tab-1",
+            url: input.openUrl ?? "https://chat.deepseek.com/a/chat/s/existing-session",
+            loginState: "logged_in",
+            bridgeInjected: true,
+            pageState: {
+              inputReady: true,
+              busy: false,
+              latestAssistantPreview: null,
+              assistantCount: 0,
+            },
+          };
+        },
+        resetProvider: async () => undefined,
+        resetPageBridge: async () => {
+          resetCount += 1;
+        },
+        startNewChat: async () => undefined,
+        sendChatPrompt: async () => {
+          sendCount += 1;
+          throw new HelperError(
+            "AUTOMATION_DESYNC",
+            "DeepSeek reported that the server is busy. Retry this turn from the page or recover the turn in the helper runtime.",
+            {
+              source: "client_error",
+              freshSession: false,
+              completionObserved: false,
+              trace: [
+                {
+                  phase: "confirm_start",
+                  pageBusy: true,
+                  completionStatus: "idle",
+                },
+              ],
+            },
+          );
+        },
+      } as never,
+    });
+
+    await app.inject({
+      method: "POST",
+      url: "/v1/bind",
+      headers: { authorization: "Bearer test-token", "x-web-providers-session-id": "session-a" },
+      payload: {
+        provider: "deepseek-web",
+      },
+    });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/provider/chat",
+      headers: { authorization: "Bearer test-token", "x-web-providers-session-id": "session-a" },
+      payload: {
+        provider: "deepseek-web",
+        model: "deepseek-web-chat",
+        messages: [{ role: "user", content: "hello" }],
+      },
+    });
+
+    expect(response.statusCode).toBe(409);
+    expect(response.json()).toEqual({
+      error: "AUTOMATION_DESYNC",
+      message:
+        "DeepSeek reported that the server is busy. Retry this turn from the page or recover the turn in the helper runtime.",
+    });
+    expect(sendCount).toBe(1);
+    expect(resetCount).toBe(0);
+    expect(bindCount).toBe(2);
+  });
+
   it("fails after three invalid structured repair attempts", async () => {
     const prompts: string[] = [];
 

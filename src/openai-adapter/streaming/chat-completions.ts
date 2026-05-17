@@ -58,6 +58,23 @@ export function serializeChatCompletionsStream(
     ];
   }
 
+  const contentChunk =
+    typeof result.outputText === "string" && result.outputText.length > 0
+      ? {
+          id,
+          object: "chat.completion.chunk" as const,
+          created,
+          model,
+          choices: [
+            {
+              index: 0,
+              delta: { content: result.outputText },
+              finish_reason: null,
+            },
+          ],
+        }
+      : null;
+
   const toolCallsChunk: ChatCompletionsChunk = {
     id,
     object: "chat.completion.chunk",
@@ -92,6 +109,7 @@ export function serializeChatCompletionsStream(
 
   return [
     toSseData(roleChunk),
+    ...(contentChunk ? [toSseData(contentChunk)] : []),
     toSseData(toolCallsChunk),
     toSseData(finishChunk),
     "data: [DONE]\n\n",

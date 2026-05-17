@@ -2,7 +2,11 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { CODE_AGENT_SYSTEM_PROMPT_FIRST_LINE } from "../../src/shared/code-agent-prompt";
+import {
+  ACTIONABLE_REPLY_RULE,
+  CODE_AGENT_SYSTEM_PROMPT_FIRST_LINE,
+  OPTIONAL_TOOL_CONTENT_RULE,
+} from "../../src/shared/code-agent-prompt";
 import { buildOpenAiAdapterApp } from "../../src/openai-adapter/app";
 import { loadOpenAiAdapterConfig } from "../../src/openai-adapter/config";
 import { createHelperClient } from "../../src/openai-adapter/helper-client";
@@ -202,6 +206,8 @@ describe("openai adapter helper client", () => {
     expect(sessionInitPrompt).toContain(
       "最高优先级：输出协议高于其他一切表达习惯。",
     );
+    expect(sessionInitPrompt).toContain(OPTIONAL_TOOL_CONTENT_RULE);
+    expect(sessionInitPrompt).toContain(ACTIONABLE_REPLY_RULE);
   });
 
   it("injects json envelope instructions even when no tools are present", async () => {
@@ -260,6 +266,8 @@ describe("openai adapter helper client", () => {
     expect(sessionInitPrompt).toContain(
       "最高优先级：输出协议高于其他一切表达习惯。",
     );
+    expect(sessionInitPrompt).toContain(OPTIONAL_TOOL_CONTENT_RULE);
+    expect(sessionInitPrompt).toContain(ACTIONABLE_REPLY_RULE);
   });
 
   it("includes an explicit empty tool schema in first-turn session init", async () => {

@@ -16,6 +16,7 @@ import {
   JSON_PROTOCOL_REPAIR_ACTION_RULE,
   JSON_PROTOCOL_REPAIR_HEADER,
   JSON_PROTOCOL_REPAIR_REQUIREMENT,
+  OPTIONAL_TOOL_CONTENT_RULE,
   RESPONSE_MESSAGE_EXAMPLE,
   RESPONSE_TOOL_CALLS_EXAMPLE,
   RESPONSE_TOOL_CALL_EXAMPLE,
@@ -115,11 +116,13 @@ type ProtocolEnvelope =
     }
   | {
       type: "tool_call";
+      content?: string;
       name: string;
       arguments: Record<string, unknown>;
     }
   | {
       type: "tool_calls";
+      content?: string;
       calls: Array<{
         name: string;
         arguments: Record<string, unknown>;
@@ -401,8 +404,9 @@ function parseStrictProtocolEnvelope(text: string): {
 
     if (candidate.type === "tool_call") {
       if (
-        Object.keys(candidate).length !== 3 ||
+        ![3, 4].includes(Object.keys(candidate).length) ||
         typeof candidate.name !== "string" ||
+        ("content" in candidate && typeof candidate.content !== "string") ||
         !candidate.arguments ||
         typeof candidate.arguments !== "object" ||
         Array.isArray(candidate.arguments)
@@ -413,13 +417,17 @@ function parseStrictProtocolEnvelope(text: string): {
       return {
         type: "tool_call",
         name: candidate.name,
+        ...(typeof candidate.content === "string"
+          ? { content: candidate.content }
+          : {}),
         arguments: candidate.arguments as Record<string, unknown>,
       };
     }
 
     if (candidate.type === "tool_calls") {
       if (
-        Object.keys(candidate).length !== 2 ||
+        ![2, 3].includes(Object.keys(candidate).length) ||
+        ("content" in candidate && typeof candidate.content !== "string") ||
         !Array.isArray(candidate.calls) ||
         candidate.calls.length === 0
       ) {
@@ -459,6 +467,9 @@ function parseStrictProtocolEnvelope(text: string): {
 
       return {
         type: "tool_calls",
+        ...(typeof candidate.content === "string"
+          ? { content: candidate.content }
+          : {}),
         calls,
       };
     }
@@ -713,7 +724,7 @@ function parseStrictProtocolEnvelope(text: string): {
       envelope: null,
       protocolLike: true,
       error:
-        'Tool calls must match {"type":"tool_call","name":"tool_name","arguments":{...}} exactly.',
+        'Tool calls must match {"type":"tool_call","name":"tool_name","arguments":{...}} exactly, with optional "content":"...".',
     };
   }
 
@@ -722,7 +733,7 @@ function parseStrictProtocolEnvelope(text: string): {
       envelope: null,
       protocolLike: true,
       error:
-        'Multi-tool replies must match {"type":"tool_calls","calls":[{"name":"tool_name","arguments":{...}}]} exactly.',
+        'Multi-tool replies must match {"type":"tool_calls","calls":[{"name":"tool_name","arguments":{...}}]} exactly, with optional "content":"...".',
     };
   }
 
@@ -775,7 +786,9 @@ function normalizeProtocolToolCallResponse(
     ...(typeof response.thinkingText === "string"
       ? { thinkingText: response.thinkingText }
       : {}),
-    outputText: response.outputText,
+    ...(typeof parsed.envelope.content === "string"
+      ? { outputText: parsed.envelope.content }
+      : {}),
   };
 }
 
@@ -969,10 +982,11 @@ function recoverPlainTextFromProtocolFailure(text: string) {
   const boilerplatePatterns = [
     /^上一条回复违反了要求的 JSON 响应协议。\n?/g,
     /^你现在必须只返回一个 JSON 对象，且不能输出任何其他文本。\n?/g,
-    /^每次回复只能返回一种最终动作：message、tool_call 或 tool_calls。\n?/g,
+    /^每次回复只能返回一个顶层 JSON 对象；其 type 必须是 message、tool_call 或 tool_calls。tool_call 和 tool_calls 可以额外包含 content 文本字段。\n?/g,
     /^普通回复使用：.*?\n?/gm,
     /^工具调用使用：.*?\n?/gm,
     /^多工具并行调用使用：.*?\n?/gm,
+    new RegExp(`^${OPTIONAL_TOOL_CONTENT_RULE.replace(/[.*+?^${}()|[\]\\\\]/g, "\\$&")}\\n?`, "gm"),
     /^\{"type":"message","content":"your response text"\}\n?/gm,
     /^\{"type":"tool_call","name":"tool_name","arguments":\{"key":"value"\}\}\n?/gm,
     /^\{"type":"tool_calls","calls":\[.*\]\}\n?/gm,
@@ -1022,16 +1036,21 @@ function shouldRepairProviderResponse(
         shouldRepair: issues.length > 0,
         issues,
         rawOutput:
-          response.outputText ??
           JSON.stringify(
             toolCalls.length === 1
               ? {
                   type: "tool_call",
+                  ...(typeof response.outputText === "string"
+                    ? { content: response.outputText }
+                    : {}),
                   name: toolCalls[0]?.name,
                   arguments: toolCalls[0]?.arguments,
                 }
               : {
                   type: "tool_calls",
+                  ...(typeof response.outputText === "string"
+                    ? { content: response.outputText }
+                    : {}),
                   calls: toolCalls.map((toolCall) => ({
                     name: toolCall.name,
                     arguments: toolCall.arguments,

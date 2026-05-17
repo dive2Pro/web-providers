@@ -66,6 +66,10 @@ export function serializeResponsesStream(input: StreamInput): string[] {
     return events.map(toSseData);
   }
 
+  if (typeof result.outputText === "string" && result.outputText.length > 0) {
+    events.push(outputTextDeltaEvent(result.outputText));
+  }
+
   for (const [index, toolCall] of result.toolCalls.entries()) {
     events.push(
       functionCallArgumentsDeltaEvent({

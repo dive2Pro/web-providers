@@ -69,4 +69,54 @@ describe("responses serializer", () => {
       ],
     });
   });
+
+  it("serializes assistant text before function calls when both are present", () => {
+    expect(
+      serializeResponses({
+        id: "resp-5",
+        created: 1710000002,
+        model: "qwen-web-tools",
+        result: {
+          mode: "native_tool_call",
+          outputText: "I will inspect both files first.",
+          toolCalls: [
+            {
+              name: "read_file",
+              argumentsJson: "{\"path\":\"src/app.css\"}",
+            },
+            {
+              name: "read_file",
+              argumentsJson: "{\"path\":\"src/theme.css\"}",
+            },
+          ],
+          finishReason: "stop",
+        },
+      }),
+    ).toMatchObject({
+      output: [
+        {
+          type: "message",
+          role: "assistant",
+          content: [
+            {
+              type: "output_text",
+              text: "I will inspect both files first.",
+            },
+          ],
+        },
+        {
+          type: "function_call",
+          name: "read_file",
+          arguments: "{\"path\":\"src/app.css\"}",
+          call_id: "resp-5-tool-1",
+        },
+        {
+          type: "function_call",
+          name: "read_file",
+          arguments: "{\"path\":\"src/theme.css\"}",
+          call_id: "resp-5-tool-2",
+        },
+      ],
+    });
+  });
 });

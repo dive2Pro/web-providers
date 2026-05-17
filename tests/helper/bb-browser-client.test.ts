@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { HelperError } from "../../src/helper/errors";
 import {
   BbBrowserClient,
@@ -671,8 +671,18 @@ describe("BbBrowserClient", () => {
         url: "https://chat.deepseek.com/",
       }),
       openDeepSeek: async () => undefined,
-      submitPrompt: async () => undefined,
+      submitPrompt: async () => {
+        throw new Error("请求超时");
+      },
       evaluate: async <T>(_tabId: string, script: string) => {
+        if (script.includes("window.__piDeepSeekBridge.startPrompt(")) {
+          return {
+            ok: false,
+            error: "AUTOMATION_DESYNC",
+            message: "Prompt submission did not start a DeepSeek response",
+          } as T;
+        }
+
         if (script.includes("window.__piDeepSeekBridge.getPageState()")) {
           return {
             inputReady: true,
@@ -1839,6 +1849,159 @@ describe("BbBrowserClient", () => {
     expect(submittedPrompt).toBe("hello via transport");
   });
 
+  it("does not resubmit through transport when bridge submission is unconfirmed", async () => {
+    let submittedPrompt: string | null = null;
+    let progressPollCount = 0;
+
+    const client = new BbBrowserClient({
+      getConnectionStatus: async () => "connected",
+      findDeepSeekTab: async () => ({
+        id: "tab-1",
+        url: "https://chat.deepseek.com/",
+      }),
+      openDeepSeek: async () => undefined,
+      submitPrompt: async (_tabId: string, prompt: string) => {
+        submittedPrompt = prompt;
+      },
+      evaluate: async <T>(_tabId: string, script: string) => {
+        if (script.includes("window.__piDeepSeekBridge.startPrompt(")) {
+          return {
+            ok: true,
+            startObserved: false,
+            baselineState: {
+              inputReady: true,
+              busy: false,
+              latestAssistantPreview: "old reply",
+              assistantCount: 1,
+              activityAt: null,
+              blockingMessage: null,
+            },
+          } as T;
+        }
+
+        if (script.includes("getCompletionState()") && script.includes("getPageState()")) {
+          progressPollCount += 1;
+          return {
+            pageState: {
+              inputReady: true,
+              busy: false,
+              latestAssistantPreview: "old reply",
+              assistantCount: 1,
+            },
+            completionState: {
+              observed: false,
+              status: "idle",
+              closed: false,
+              terminalAt: null,
+              turn: null,
+            },
+          } as T;
+        }
+
+        if (script.includes("window.__piDeepSeekBridge = undefined")) {
+          return true as T;
+        }
+
+        if (script.includes("window.__piDeepSeekBridge.getPageState()")) {
+          return {
+            inputReady: true,
+            busy: false,
+            latestAssistantPreview: "old reply",
+            assistantCount: 1,
+            blockingMessage: null,
+          } as T;
+        }
+
+        return undefined as T;
+      },
+    });
+
+    await expect(
+      client.sendChatPrompt({
+        tabId: "tab-1",
+        prompt: "hello once",
+        timeoutMs: 300,
+      }),
+    ).rejects.toMatchObject({
+      code: "AUTOMATION_DESYNC",
+      message: "Prompt submission did not start a DeepSeek response",
+    });
+
+    expect(submittedPrompt).toBeNull();
+    expect(progressPollCount).toBeGreaterThan(0);
+  });
+
+  it("fails fast when transport submission never produces real DeepSeek start signals", async () => {
+    let submittedPrompt: string | null = null;
+    let confirmPollCount = 0;
+
+    const client = new BbBrowserClient({
+      getConnectionStatus: async () => "connected",
+      findDeepSeekTab: async () => ({
+        id: "tab-1",
+        url: "https://chat.deepseek.com/",
+      }),
+      openDeepSeek: async () => undefined,
+      submitPrompt: async (_tabId: string, prompt: string) => {
+        submittedPrompt = prompt;
+      },
+      evaluate: async <T>(_tabId: string, script: string) => {
+        if (script.includes("window.__piDeepSeekBridge.startPrompt(")) {
+          return {
+            ok: false,
+            error: "AUTOMATION_DESYNC",
+            message: "Prompt submission did not start a DeepSeek response",
+          } as T;
+        }
+
+        if (script.includes("getCompletionState()") && script.includes("getPageState()")) {
+          confirmPollCount += 1;
+          return {
+            pageState: {
+              inputReady: true,
+              busy: false,
+              latestAssistantPreview: "old reply (rerendered)",
+              assistantCount: 1,
+            },
+            completionState: {
+              observed: false,
+              status: "idle",
+              closed: false,
+              terminalAt: null,
+              turn: null,
+            },
+          } as T;
+        }
+
+        if (script.includes("window.__piDeepSeekBridge.getPageState()")) {
+          return {
+            inputReady: true,
+            busy: false,
+            latestAssistantPreview: "old reply",
+            assistantCount: 1,
+            blockingMessage: null,
+          } as T;
+        }
+
+        return undefined as T;
+      },
+    });
+
+    await expect(
+      client.sendChatPrompt({
+        tabId: "tab-1",
+        prompt: "hello",
+        timeoutMs: 3000,
+      }),
+    ).rejects.toMatchObject({
+      code: "AUTOMATION_DESYNC",
+      message: "Prompt submission did not start a DeepSeek response",
+    });
+
+    expect(submittedPrompt).toBe("hello");
+    expect(confirmPollCount).toBeGreaterThan(0);
+  });
+
   it("times out when transport submission produces only DOM text without completion data", async () => {
     let submittedPrompt: string | null = null;
     let pollCount = 0;
@@ -1898,6 +2061,183 @@ describe("BbBrowserClient", () => {
     });
 
     expect(submittedPrompt).toBe("hello");
+  });
+
+  it("does not hard-timeout DeepSeek while page activity keeps advancing", async () => {
+    vi.useFakeTimers();
+
+    try {
+      const client = new BbBrowserClient({
+        getConnectionStatus: async () => "connected",
+        findDeepSeekTab: async () => ({
+          id: "tab-1",
+          url: "https://chat.deepseek.com/",
+        }),
+        openDeepSeek: async () => undefined,
+        submitPrompt: async () => undefined,
+        evaluate: async <T>(_tabId: string, script: string) => {
+          if (script.includes("window.__piDeepSeekBridge.startPrompt(")) {
+            return {
+              ok: true,
+              baselineState: {
+                inputReady: true,
+                busy: false,
+                latestAssistantPreview: "old reply",
+                assistantCount: 1,
+                activityAt: null,
+                blockingMessage: null,
+              },
+            } as T;
+          }
+
+          if (script.includes("getCompletionState()") && script.includes("getPageState()")) {
+            const now = Date.now();
+            if (now >= 121_000) {
+              return {
+                pageState: {
+                  inputReady: true,
+                  busy: false,
+                  latestAssistantPreview: "final answer",
+                  assistantCount: 2,
+                  activityAt: now,
+                  blockingMessage: null,
+                },
+                completionState: {
+                  observed: true,
+                  status: "finished",
+                  closed: true,
+                  turn: {
+                    mode: "text",
+                    outputText: "final answer",
+                  },
+                },
+              } as T;
+            }
+
+            return {
+              pageState: {
+                inputReady: true,
+                busy: true,
+                latestAssistantPreview: `chunk-${Math.floor(now / 300)}`,
+                assistantCount: 2,
+                activityAt: now,
+                blockingMessage: null,
+              },
+              completionState: {
+                observed: true,
+                status: "streaming",
+                closed: false,
+                turn: null,
+              },
+            } as T;
+          }
+
+          return undefined as T;
+        },
+      });
+
+      const pending = client.sendChatPrompt({
+        tabId: "tab-1",
+        prompt: "long reply",
+        timeoutMs: 400,
+      });
+
+      await vi.advanceTimersByTimeAsync(121_500);
+
+      await expect(pending).resolves.toMatchObject({
+        mode: "text",
+        outputText: "final answer",
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("times out DeepSeek when busy is stuck but page activity no longer advances", async () => {
+    vi.useFakeTimers();
+
+    try {
+      let resetCount = 0;
+
+      const client = new BbBrowserClient({
+        getConnectionStatus: async () => "connected",
+        findDeepSeekTab: async () => ({
+          id: "tab-1",
+          url: "https://chat.deepseek.com/",
+        }),
+        openDeepSeek: async () => undefined,
+        submitPrompt: async () => undefined,
+        evaluate: async <T>(_tabId: string, script: string) => {
+          if (script.includes("window.__piDeepSeekBridge = undefined")) {
+            resetCount += 1;
+            return true as T;
+          }
+
+          if (script.includes("window.__piDeepSeekBridge.startPrompt(")) {
+            return {
+              ok: true,
+              baselineState: {
+                inputReady: true,
+                busy: false,
+                latestAssistantPreview: "old reply",
+                assistantCount: 1,
+                activityAt: null,
+                blockingMessage: null,
+              },
+            } as T;
+          }
+
+          if (script.includes("getCompletionState()") && script.includes("getPageState()")) {
+            return {
+              pageState: {
+                inputReady: true,
+                busy: true,
+                latestAssistantPreview: "old reply",
+                assistantCount: 2,
+                activityAt: 100,
+                blockingMessage: null,
+              },
+              completionState: {
+                observed: true,
+                status: "streaming",
+                closed: false,
+                turn: null,
+              },
+            } as T;
+          }
+
+          if (script.includes("window.__piDeepSeekBridge.getPageState()")) {
+            return {
+              inputReady: true,
+              busy: true,
+              latestAssistantPreview: "old reply",
+              assistantCount: 2,
+              activityAt: 100,
+              blockingMessage: null,
+            } as T;
+          }
+
+          return undefined as T;
+        },
+      });
+
+      const pending = client.sendChatPrompt({
+        tabId: "tab-1",
+        prompt: "stuck busy",
+        timeoutMs: 400,
+      });
+      const rejected = expect(pending).rejects.toMatchObject({
+        code: "TIMEOUT",
+        message: "The page did not finish streaming in time",
+      });
+
+      await vi.advanceTimersByTimeAsync(1_500);
+
+      await rejected;
+      expect(resetCount).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("does not return repeated DOM text without completion data", async () => {
@@ -2113,9 +2453,58 @@ describe("BbBrowserClient", () => {
           return true as T;
         }
 
-        if (script.includes("window.__piDeepSeekBridge.getPageState()")) {
+        if (script.includes("window.__piDeepSeekBridge.startPrompt(")) {
+          return {
+            ok: true,
+            baselineState: {
+              inputReady: true,
+              busy: false,
+              latestAssistantPreview: "old reply",
+              assistantCount: 1,
+              blockingMessage: null,
+            },
+          } as T;
+        }
+
+        if (script.includes("getCompletionState()") && script.includes("getPageState()")) {
           pollCount += 1;
 
+          if (pollCount === 1) {
+            return {
+              pageState: {
+                inputReady: true,
+                busy: true,
+                latestAssistantPreview: "old reply",
+                assistantCount: 2,
+              },
+              completionState: {
+                observed: false,
+                status: "idle",
+                closed: false,
+                terminalAt: null,
+                turn: null,
+              },
+            } as T;
+          }
+
+          return {
+            pageState: {
+              inputReady: true,
+              busy: false,
+              latestAssistantPreview: "old reply",
+              assistantCount: 2,
+            },
+            completionState: {
+              observed: false,
+              status: "idle",
+              closed: false,
+              terminalAt: null,
+              turn: null,
+            },
+          } as T;
+        }
+
+        if (script.includes("window.__piDeepSeekBridge.getPageState()")) {
           if (pollCount === 1) {
             return {
               inputReady: true,

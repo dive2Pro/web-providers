@@ -57,6 +57,9 @@ export interface BoundSession {
 
 export interface ActiveRequest {
   requestId: string;
+  turnId: string;
+  requestFingerprint: string;
+  recoveryStage: string;
   prompt: string;
   accumulatedReply: string;
   startedAt: string;
@@ -122,6 +125,8 @@ export interface ProviderRequestDebugRecord {
   sessionId: string;
   provider: ProviderId;
   requestId: string;
+  turnId: string;
+  requestFingerprint: string;
   rawRequest: ProviderChatRequest;
   normalizedMessages: ProviderChatRequest["messages"];
   prompt: string;
@@ -139,6 +144,13 @@ export interface ProviderRequestDebugRecord {
         attemptCount: number;
         issues: string[][];
         success: boolean;
+      }
+    | null;
+  turnRecovery:
+    | {
+        recovered: boolean;
+        attemptedStages: string[];
+        finalStage: string;
       }
     | null;
   error: {

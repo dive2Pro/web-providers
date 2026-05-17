@@ -38,12 +38,28 @@ export function serializeResponses(input: {
     object: "response",
     created_at: input.created,
     model: input.model,
-    output: input.result.toolCalls.map((toolCall, index) => ({
-      type: "function_call" as const,
-      name: toolCall.name,
-      arguments: toolCall.argumentsJson,
-      call_id: `${input.id}-tool-${index + 1}`,
-    })),
+    output: [
+      ...(typeof input.result.outputText === "string" && input.result.outputText.length > 0
+        ? [
+            {
+              type: "message" as const,
+              role: "assistant" as const,
+              content: [
+                {
+                  type: "output_text" as const,
+                  text: input.result.outputText,
+                },
+              ],
+            },
+          ]
+        : []),
+      ...input.result.toolCalls.map((toolCall, index) => ({
+        type: "function_call" as const,
+        name: toolCall.name,
+        arguments: toolCall.argumentsJson,
+        call_id: `${input.id}-tool-${index + 1}`,
+      })),
+    ],
     parallel_tool_calls: input.result.toolCalls.length > 1,
     usage: {
       input_tokens: 0,
